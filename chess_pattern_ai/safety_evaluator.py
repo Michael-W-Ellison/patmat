@@ -148,84 +148,57 @@ class SafetyEvaluator:
         piece_protect_w = self.safety_weights.get('piece_protection', 1.0)
         exposed_pen = self.safety_weights.get('exposed_penalty', 1.0)
 
-        # Basic safety evaluation using discovered weights
-        if self._is_king_castled(king_square, color):
-            safety += king_safety_w * 10.0
+        # Apply discovered weights to observable features
+        # Count nearby friendly pieces (more = safer, discovered from observation)
+        nearby_pieces = self._count_nearby_pieces(board_part, king_square, color)
+        safety += piece_protect_w * nearby_pieces
 
-        if self._has_pawn_shield(board_part, king_square, color):
-            safety += piece_protect_w * 5.0
-
-        if self._is_king_exposed(king_square):
-            safety -= exposed_pen * 5.0
+        # Count pawn shield (discovered pattern)
+        pawn_shield_count = self._count_pawn_shield(board_part, king_square, color)
+        safety += king_safety_w * pawn_shield_count
 
         return safety
 
-    def _is_king_castled(self, king_square: int, color: str) -> bool:
-        """Check if king has castled (moved from starting position)"""
-        if color == 'white':
-            return king_square != 4  # Not on e1
-        else:
-            return king_square != 60  # Not on e8
+    def _count_nearby_pieces(self, board_part: str, king_square: int, color: str) -> int:
+        """Count friendly pieces near king (observable feature)"""
+        board = [None] * 64
+        square = 56
 
-    def _is_king_exposed(self, king_square: int) -> bool:
-        """Check if king is in exposed position"""
-        file = king_square % 8
-        rank = king_square // 8
-        # Exposed if on edge or in center
-        return file in [0, 7] or rank in [3, 4]
+        for rank in board_part.split('/'):
+            file = 0
+            for char in rank:
+                if char.isdigit():
+                    file += int(char)
+                else:
+                    board[square + file] = char
+                    file += 1
+            square -= 8
 
-    def _pattern_matches(self, pattern_name: str, board_part: str,
-                        king_square: int, color: str, castling: str) -> bool:
-        """
-        Check if a discovered safety pattern matches the current position
+        king_file = king_square % 8
+        king_rank = king_square // 8
+        nearby_pieces = 0
 
-        Args:
-            pattern_name: Name of the pattern to check
-            board_part: Board position from FEN
-            king_square: King square index
-            color: King color
-            castling: Castling rights
+        # Check 8 surrounding squares
+        for dr in [-1, 0, 1]:
+            for df in [-1, 0, 1]:
+                if dr == 0 and df == 0:
+                    continue
+                check_rank = king_rank + dr
+                check_file = king_file + df
+                if 0 <= check_rank < 8 and 0 <= check_file < 8:
+                    check_square = check_rank * 8 + check_file
+                    piece = board[check_square]
+                    if piece:
+                        # Count friendly pieces
+                        if color == 'white' and piece.isupper():
+                            nearby_pieces += 1
+                        elif color == 'black' and piece.islower():
+                            nearby_pieces += 1
 
-        Returns:
-            True if pattern matches
-        """
-        # Basic pattern matching based on common safety indicators
-        # These are discovered patterns, not hardcoded rules
+        return nearby_pieces
 
-        if "castled" in pattern_name.lower():
-            # Check if king has moved from starting position
-            if color == 'white':
-                # White king starts on e1 (square 4)
-                starting_square = 4
-                return king_square != starting_square
-            else:
-                # Black king starts on e8 (square 60)
-                starting_square = 60
-                return king_square != starting_square
-
-        elif "pawn_shield" in pattern_name.lower():
-            # Check for pawns near king
-            return self._has_pawn_shield(board_part, king_square, color)
-
-        elif "exposed" in pattern_name.lower():
-            # King on edge or center (more exposed)
-            file = king_square % 8
-            rank = king_square // 8
-            return file in [0, 7] or rank in [3, 4]
-
-        elif "back_rank" in pattern_name.lower():
-            # King on back rank
-            rank = king_square // 8
-            if color == 'white':
-                return rank == 0
-            else:
-                return rank == 7
-
-        # Default: pattern not recognized
-        return False
-
-    def _has_pawn_shield(self, board_part: str, king_square: int, color: str) -> bool:
-        """Check if king has pawn shield (simplified)"""
+    def _count_pawn_shield(self, board_part: str, king_square: int, color: str) -> int:
+        """Count pawns near king (observable feature, no assumptions about what's good)"""
         # Convert board to simple representation
         board = [None] * 64
         square = 56
@@ -240,24 +213,26 @@ class SafetyEvaluator:
                     file += 1
             square -= 8
 
-        # Check squares in front of king for pawns
+        # Count friendly pawns in all adjacent squares
         king_file = king_square % 8
         king_rank = king_square // 8
 
         pawn_char = 'P' if color == 'white' else 'p'
-        direction = 1 if color == 'white' else -1
+        pawn_count = 0
 
-        shield_count = 0
-        for file_offset in [-1, 0, 1]:
-            check_file = king_file + file_offset
-            check_rank = king_rank + direction
+        # Check all 8 surrounding squares for pawns
+        for dr in [-1, 0, 1]:
+            for df in [-1, 0, 1]:
+                if dr == 0 and df == 0:
+                    continue
+                check_rank = king_rank + dr
+                check_file = king_file + df
+                if 0 <= check_rank < 8 and 0 <= check_file < 8:
+                    check_square = check_rank * 8 + check_file
+                    if board[check_square] == pawn_char:
+                        pawn_count += 1
 
-            if 0 <= check_file < 8 and 0 <= check_rank < 8:
-                check_square = check_rank * 8 + check_file
-                if board[check_square] == pawn_char:
-                    shield_count += 1
-
-        return shield_count >= 2
+        return pawn_count
 
     def close(self):
         """Close database connection"""

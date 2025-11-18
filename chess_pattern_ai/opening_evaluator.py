@@ -91,134 +91,40 @@ class OpeningEvaluator:
         dev_w = self.opening_weights.get('development', 1.0)
         center_w = self.opening_weights.get('center_control', 1.0)
 
-        # Evaluate based on discovered weights
-        if self._has_minor_pieces_developed(board_part, turn):
-            score += dev_w * 10.0
+        # Apply discovered weights to observable features
+        # Count piece activity (how many pieces have moved)
+        white_activity = self._count_piece_activity(board_part, 'white')
+        black_activity = self._count_piece_activity(board_part, 'black')
 
-        if self._has_center_control(board_part):
-            score += center_w * 10.0
+        # Apply development weight to activity difference
+        score += dev_w * (white_activity - black_activity)
 
         return score
 
-    def _pattern_matches(self, pattern_name: str, board_part: str,
-                        turn: str, castling: str, move_num: int) -> bool:
-        """
-        Check if a discovered opening pattern matches
-
-        Args:
-            pattern_name: Name of the pattern
-            board_part: Board position from FEN
-            turn: Current turn ('w' or 'b')
-            castling: Castling rights
-            move_num: Move number
-
-        Returns:
-            True if pattern matches
-        """
-        pattern_lower = pattern_name.lower()
-
-        # Center control patterns
-        if "center_control" in pattern_lower:
-            return self._has_center_control(board_part)
-
-        # Development patterns
-        elif "minor_piece_developed" in pattern_lower:
-            return self._has_minor_pieces_developed(board_part, turn)
-
-        # Castling patterns
-        elif "castling_available" in pattern_lower:
-            if turn == 'w':
-                return 'K' in castling or 'Q' in castling
-            else:
-                return 'k' in castling or 'q' in castling
-
-        # Early queen development (usually bad)
-        elif "early_queen" in pattern_lower:
-            return self._has_early_queen_development(board_part, turn, move_num)
-
-        # Pawn structure patterns
-        elif "doubled_pawns" in pattern_lower:
-            return self._has_doubled_pawns(board_part)
-
-        return False
-
-    def _has_center_control(self, board_part: str) -> bool:
-        """Check if side controls center squares (e4, d4, e5, d5)"""
+    def _count_piece_activity(self, board_part: str, color: str) -> int:
+        """Count pieces away from starting positions (observable feature)"""
         # Parse board
         board = self._parse_board(board_part)
 
-        # Center squares: e4=28, d4=27, e5=36, d5=35
-        center_squares = [27, 28, 35, 36]
+        # Count pieces that have moved (observable, no assumptions about "good" squares)
+        piece_activity = 0
 
-        white_center = 0
-        black_center = 0
-
-        for sq in center_squares:
+        # Count total pieces for this color to measure development
+        for sq in range(64):
             piece = board[sq]
-            if piece and piece.isupper():
-                white_center += 1
-            elif piece and piece.islower():
-                black_center += 1
+            if piece:
+                if color == 'white' and piece.isupper():
+                    # Any white piece not on rank 0 or 1 has moved forward
+                    rank = sq // 8
+                    if rank > 1:
+                        piece_activity += 1
+                elif color == 'black' and piece.islower():
+                    # Any black piece not on rank 6 or 7 has moved forward
+                    rank = sq // 8
+                    if rank < 6:
+                        piece_activity += 1
 
-        return white_center > black_center
-
-    def _has_minor_pieces_developed(self, board_part: str, turn: str) -> bool:
-        """Check if minor pieces (knights, bishops) are developed"""
-        board = self._parse_board(board_part)
-
-        if turn == 'w':
-            # White's back rank squares for minor pieces: b1=1, c1=2, f1=5, g1=6
-            back_rank_squares = [1, 2, 5, 6]
-            developed = 0
-            for sq in back_rank_squares:
-                piece = board[sq]
-                if piece is None or piece not in ['N', 'B']:
-                    developed += 1
-            return developed >= 2
-        else:
-            # Black's back rank: b8=57, c8=58, f8=61, g8=62
-            back_rank_squares = [57, 58, 61, 62]
-            developed = 0
-            for sq in back_rank_squares:
-                piece = board[sq]
-                if piece is None or piece not in ['n', 'b']:
-                    developed += 1
-            return developed >= 2
-
-    def _has_early_queen_development(self, board_part: str, turn: str, move_num: int) -> bool:
-        """Check if queen moved early (usually bad)"""
-        if move_num > 5:
-            return False
-
-        board = self._parse_board(board_part)
-
-        if turn == 'w':
-            # White queen starts on d1 (square 3)
-            return board[3] != 'Q'
-        else:
-            # Black queen starts on d8 (square 59)
-            return board[59] != 'q'
-
-    def _has_doubled_pawns(self, board_part: str) -> bool:
-        """Check for doubled pawns (usually bad)"""
-        board = self._parse_board(board_part)
-
-        # Check each file for doubled pawns
-        for file in range(8):
-            white_pawns = 0
-            black_pawns = 0
-            for rank in range(8):
-                sq = rank * 8 + file
-                piece = board[sq]
-                if piece == 'P':
-                    white_pawns += 1
-                elif piece == 'p':
-                    black_pawns += 1
-
-            if white_pawns > 1 or black_pawns > 1:
-                return True
-
-        return False
+        return piece_activity
 
     def _parse_board(self, board_part: str) -> List:
         """Parse FEN board part into 64-square array"""

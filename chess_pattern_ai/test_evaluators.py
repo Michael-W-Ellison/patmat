@@ -127,13 +127,16 @@ class TestOpeningEvaluator(unittest.TestCase):
         score = self.evaluator.evaluate_opening(fen)
         self.assertEqual(score, 0.0, "Should not evaluate past move 15")
 
-    def test_center_control_detection(self):
-        """Test center control pattern detection"""
-        # Position with white controlling center
+    def test_piece_activity_counting(self):
+        """Test piece activity counting (observable feature)"""
+        # Position with some pieces developed
         fen = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2"
         board_part = fen.split()[0]
-        has_control = self.evaluator._has_center_control(board_part)
-        self.assertIsInstance(has_control, bool)
+        white_activity = self.evaluator._count_piece_activity(board_part, 'white')
+        black_activity = self.evaluator._count_piece_activity(board_part, 'black')
+        # Both sides should have some activity (pawns moved)
+        self.assertIsInstance(white_activity, int)
+        self.assertIsInstance(black_activity, int)
 
     def tearDown(self):
         self.evaluator.close()
