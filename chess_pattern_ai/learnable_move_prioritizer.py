@@ -57,12 +57,16 @@ class LearnableMovePrioritizer:
                 distance_from_start INTEGER,        -- How many ranks moved from starting area (0-8)
                 game_phase TEXT,                    -- 'opening', 'middlegame', 'endgame'
 
-                -- Outcome tracking
+                -- Outcome tracking (binary win/loss)
                 times_seen INTEGER DEFAULT 0,
                 games_won INTEGER DEFAULT 0,
                 games_lost INTEGER DEFAULT 0,
                 games_drawn INTEGER DEFAULT 0,
                 win_rate REAL DEFAULT 0.0,
+
+                -- SCORE-BASED tracking (new!)
+                total_score REAL DEFAULT 0.0,
+                avg_score REAL DEFAULT 0.0,
 
                 -- Statistical confidence
                 confidence REAL DEFAULT 0.0,
@@ -173,7 +177,7 @@ class LearnableMovePrioritizer:
             return 'middlegame'
 
     def record_game_moves(self, moves: List[Tuple[str, str, str]],
-                         ai_color: 'chess.Color', result: str):
+                         ai_color: 'chess.Color', result: str, final_score: float = 0.0):
         """
         Record moves from a game to learn which types lead to wins
 
@@ -181,6 +185,7 @@ class LearnableMovePrioritizer:
             moves: List of (fen_before, move_uci, move_san) tuples
             ai_color: Color AI played
             result: 'win', 'loss', or 'draw'
+            final_score: Game score (win=material+(100-rounds), loss=-100, draw=0)
         """
         if not CHESS_AVAILABLE:
             logger.warning("python-chess not available, cannot record moves")
@@ -212,7 +217,8 @@ class LearnableMovePrioritizer:
                 characteristics['move_category'],
                 characteristics['distance_from_start'],
                 characteristics['game_phase'],
-                result
+                result,
+                final_score
             )
 
             board.push(move)
@@ -220,12 +226,12 @@ class LearnableMovePrioritizer:
         self.conn.commit()
 
     def _update_move_statistics(self, piece_type: str, move_category: str,
-                                distance: int, phase: str, result: str):
-        """Update win/loss statistics for a move pattern"""
+                                distance: int, phase: str, result: str, final_score: float):
+        """Update win/loss statistics and score for a move pattern"""
 
         # Get current stats
         self.cursor.execute('''
-            SELECT times_seen, games_won, games_lost, games_drawn
+            SELECT times_seen, games_won, games_lost, games_drawn, total_score
             FROM learned_move_patterns
             WHERE piece_type = ? AND move_category = ?
               AND distance_from_start = ? AND game_phase = ?
@@ -234,10 +240,12 @@ class LearnableMovePrioritizer:
         row = self.cursor.fetchone()
 
         if row:
-            times_seen, won, lost, drawn = row
+            times_seen, won, lost, drawn, total_score = row
             times_seen += 1
+            total_score += final_score
         else:
             times_seen, won, lost, drawn = 1, 0, 0, 0
+            total_score = final_score
 
         # Update based on result
         if result == 'win':
@@ -250,21 +258,25 @@ class LearnableMovePrioritizer:
         # Calculate win rate and confidence
         total_games = won + lost + drawn
         win_rate = won / total_games if total_games > 0 else 0.0
+        avg_score = total_score / total_games if total_games > 0 else 0.0
 
         # Confidence increases with more observations
         confidence = min(1.0, total_games / 50.0)  # Max confidence at 50+ games
 
-        # Priority score: win_rate weighted by confidence
-        # High win rate + high confidence = high priority
-        priority_score = win_rate * confidence * 100
+        # Priority score: SCORE-BASED instead of just win rate!
+        # Moves with high avg_score get priority
+        # Normalized to 0-100 range: (avg_score + 100) / 2 gives 0-100 range
+        # Then weight by confidence
+        normalized_score = (avg_score + 100) / 2  # -100 to +200 → 0 to 150
+        priority_score = (normalized_score / 150) * confidence * 100  # 0-100
 
         # Insert or update
         self.cursor.execute('''
             INSERT INTO learned_move_patterns
                 (piece_type, move_category, distance_from_start, game_phase,
                  times_seen, games_won, games_lost, games_drawn,
-                 win_rate, confidence, priority_score, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                 win_rate, total_score, avg_score, confidence, priority_score, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
             ON CONFLICT(piece_type, move_category, distance_from_start, game_phase)
             DO UPDATE SET
                 times_seen = ?,
@@ -272,13 +284,15 @@ class LearnableMovePrioritizer:
                 games_lost = ?,
                 games_drawn = ?,
                 win_rate = ?,
+                total_score = ?,
+                avg_score = ?,
                 confidence = ?,
                 priority_score = ?,
                 updated_at = datetime('now')
         ''', (
             piece_type, move_category, distance, phase,
-            times_seen, won, lost, drawn, win_rate, confidence, priority_score,
-            times_seen, won, lost, drawn, win_rate, confidence, priority_score
+            times_seen, won, lost, drawn, win_rate, total_score, avg_score, confidence, priority_score,
+            times_seen, won, lost, drawn, win_rate, total_score, avg_score, confidence, priority_score
         ))
 
     def _load_priorities(self):

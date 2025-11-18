@@ -46,11 +46,16 @@ class PatternAbstractionEngine:
                 avg_material_lost REAL DEFAULT 0.0,
                 confidence REAL DEFAULT 0.0,
 
-                -- Outcome tracking
+                -- Outcome tracking (binary win/loss)
                 games_with_pattern_won INTEGER DEFAULT 0,
                 games_with_pattern_lost INTEGER DEFAULT 0,
                 games_with_pattern_draw INTEGER DEFAULT 0,
                 win_rate REAL DEFAULT 0.0,
+
+                -- SCORE-BASED tracking (new!)
+                total_score_with_pattern REAL DEFAULT 0.0,
+                games_with_pattern INTEGER DEFAULT 0,
+                avg_score_with_pattern REAL DEFAULT 0.0,
 
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(pattern_type, pattern_description)
@@ -386,13 +391,15 @@ class PatternAbstractionEngine:
 
         return patterns
 
-    def update_patterns_from_game_outcome(self, patterns_in_game: List[Dict], result: str):
+    def update_patterns_from_game_outcome(self, patterns_in_game: List[Dict],
+                                         result: str, final_score: float = 0.0):
         """
         Update pattern statistics based on game outcome
 
         Args:
             patterns_in_game: List of patterns detected during the game
             result: 'win', 'loss', or 'draw'
+            final_score: Game score (win=material+(100-rounds), loss=-100, draw=0)
         """
         # Track which patterns appeared in this game
         unique_patterns = {}
@@ -400,32 +407,41 @@ class PatternAbstractionEngine:
             key = (pattern['type'], pattern['description'])
             unique_patterns[key] = True
 
-        # Update each pattern's win/loss/draw count
+        # Update each pattern's win/loss/draw count AND score
         for (pattern_type, pattern_desc) in unique_patterns.keys():
             if result == 'win':
                 self.cursor.execute('''
                     UPDATE abstract_patterns
                     SET games_with_pattern_won = games_with_pattern_won + 1,
                         win_rate = CAST(games_with_pattern_won + 1 AS REAL) /
-                                   (games_with_pattern_won + games_with_pattern_lost + games_with_pattern_draw + 1)
+                                   (games_with_pattern_won + games_with_pattern_lost + games_with_pattern_draw + 1),
+                        total_score_with_pattern = total_score_with_pattern + ?,
+                        games_with_pattern = games_with_pattern + 1,
+                        avg_score_with_pattern = (total_score_with_pattern + ?) / (games_with_pattern + 1)
                     WHERE pattern_type = ? AND pattern_description = ?
-                ''', (pattern_type, pattern_desc))
+                ''', (final_score, final_score, pattern_type, pattern_desc))
             elif result == 'loss':
                 self.cursor.execute('''
                     UPDATE abstract_patterns
                     SET games_with_pattern_lost = games_with_pattern_lost + 1,
                         win_rate = CAST(games_with_pattern_won AS REAL) /
-                                   (games_with_pattern_won + games_with_pattern_lost + games_with_pattern_draw + 1)
+                                   (games_with_pattern_won + games_with_pattern_lost + games_with_pattern_draw + 1),
+                        total_score_with_pattern = total_score_with_pattern + ?,
+                        games_with_pattern = games_with_pattern + 1,
+                        avg_score_with_pattern = (total_score_with_pattern + ?) / (games_with_pattern + 1)
                     WHERE pattern_type = ? AND pattern_description = ?
-                ''', (pattern_type, pattern_desc))
+                ''', (final_score, final_score, pattern_type, pattern_desc))
             elif result == 'draw':
                 self.cursor.execute('''
                     UPDATE abstract_patterns
                     SET games_with_pattern_draw = games_with_pattern_draw + 1,
                         win_rate = CAST(games_with_pattern_won AS REAL) /
-                                   (games_with_pattern_won + games_with_pattern_lost + games_with_pattern_draw + 1)
+                                   (games_with_pattern_won + games_with_pattern_lost + games_with_pattern_draw + 1),
+                        total_score_with_pattern = total_score_with_pattern + ?,
+                        games_with_pattern = games_with_pattern + 1,
+                        avg_score_with_pattern = (total_score_with_pattern + ?) / (games_with_pattern + 1)
                     WHERE pattern_type = ? AND pattern_description = ?
-                ''', (pattern_type, pattern_desc))
+                ''', (final_score, final_score, pattern_type, pattern_desc))
 
         # Don't commit here - let parent handle it
 

@@ -20,6 +20,7 @@ from integrated_ai_with_clustering import ClusteredIntegratedAI
 from pattern_database_enhancer import PatternDatabaseEnhancer
 from pattern_abstraction_engine import PatternAbstractionEngine
 from learnable_move_prioritizer import LearnableMovePrioritizer
+from game_scorer import GameScorer
 
 # Try to import Stockfish evaluator, but don't require it
 try:
@@ -64,6 +65,10 @@ class LearningGameTracker:
         self.move_prioritizer = LearnableMovePrioritizer(db_path)
         logger.info("🎯 Move prioritizer enabled - will learn winning move patterns")
 
+        # Game scorer - calculate nuanced scores instead of binary win/loss
+        self.game_scorer = GameScorer()
+        logger.info("🎲 Score-based learning enabled - quick wins score higher!")
+
         # Optional Stockfish feedback for enhanced learning
         self.stockfish_evaluator = None
         if use_stockfish_feedback and STOCKFISH_AVAILABLE:
@@ -90,17 +95,32 @@ class LearningGameTracker:
             result: 'win', 'loss', or 'draw'
             moves: List of (fen_before, move_uci) tuples
         """
-        # Insert game record
+        # Calculate score-based metrics
+        rounds_played = board.fullmove_number
+        final_score, _ = self.game_scorer.calculate_final_score(board, ai_color, rounds_played)
+        ai_material = self.game_scorer._calculate_material(board, ai_color)
+        opponent_color = not ai_color
+        opponent_material = self.game_scorer._calculate_material(board, opponent_color)
+
+        # Insert game record with score-based tracking
         self.cursor.execute('''
-            INSERT INTO games (white_player, black_player, result, ai_color, played_at)
-            VALUES (?, ?, ?, ?, datetime('now'))
+            INSERT INTO games (white_player, black_player, result, ai_color, played_at,
+                             rounds_played, final_score, ai_material, opponent_material, moves_count)
+            VALUES (?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?)
         ''', (
             'AI' if ai_color == chess.WHITE else 'Stockfish',
             'Stockfish' if ai_color == chess.WHITE else 'AI',
             result,
-            'white' if ai_color == chess.WHITE else 'black'
+            'white' if ai_color == chess.WHITE else 'black',
+            rounds_played,
+            final_score,
+            ai_material,
+            opponent_material,
+            len(moves)
         ))
         game_id = self.cursor.lastrowid
+
+        logger.info(f"Game {game_id}: {result.upper()} in {rounds_played} rounds, score={final_score:.1f}")
 
         # Optional: Analyze with Stockfish for enhanced learning
         stockfish_analysis = None
@@ -109,12 +129,13 @@ class LearningGameTracker:
 
         # Analyze moves for learning (with optional Stockfish feedback)
         if result == 'loss':
-            self._learn_from_loss(game_id, moves, ai_color, stockfish_analysis)
+            self._learn_from_loss(game_id, moves, ai_color, stockfish_analysis, final_score)
         elif result == 'win':
-            self._learn_from_win(game_id, moves, ai_color, stockfish_analysis)
+            self._learn_from_win(game_id, moves, ai_color, stockfish_analysis, final_score)
 
         # Learn move patterns (which types of moves lead to wins/losses)
-        self.move_prioritizer.record_game_moves(moves, ai_color, result)
+        # Pass the final_score for score-based learning
+        self.move_prioritizer.record_game_moves(moves, ai_color, result, final_score)
 
         self.conn.commit()
 
@@ -168,12 +189,13 @@ class LearningGameTracker:
         return analysis
 
     def _learn_from_loss(self, game_id: int, moves: List[Tuple], ai_color: chess.Color,
-                        stockfish_analysis: Optional[dict] = None):
+                        stockfish_analysis: Optional[dict] = None, final_score: float = -100.0):
         """
         Extract mistakes from losing game
 
         Args:
             stockfish_analysis: Optional Stockfish feedback for enhanced learning
+            final_score: Game score for score-based pattern learning
         """
         board = chess.Board()
         all_patterns_in_game = []  # Track all patterns for outcome learning
@@ -248,17 +270,18 @@ class LearningGameTracker:
                     logger.debug(f"  Patterns: {', '.join(pattern_types)}")
                     all_patterns_in_game.extend(patterns)  # Track for outcome learning
 
-        # Update patterns based on game outcome (LOSS)
+        # Update patterns based on game outcome (LOSS) with score
         if all_patterns_in_game:
-            self.pattern_engine.update_patterns_from_game_outcome(all_patterns_in_game, 'loss')
+            self.pattern_engine.update_patterns_from_game_outcome(all_patterns_in_game, 'loss', final_score)
 
     def _learn_from_win(self, game_id: int, moves: List[Tuple], ai_color: chess.Color,
-                       stockfish_analysis: Optional[dict] = None):
+                       stockfish_analysis: Optional[dict] = None, final_score: float = 0.0):
         """
         Extract successful tactics from winning game
 
         Args:
             stockfish_analysis: Optional Stockfish feedback for enhanced learning
+            final_score: Game score for score-based pattern learning
         """
         board = chess.Board()
         all_patterns_in_game = []  # Track patterns even in wins
@@ -313,9 +336,9 @@ class LearningGameTracker:
             else:
                 board.push(move)
 
-        # Update patterns based on game outcome (WIN)
+        # Update patterns based on game outcome (WIN) with score
         if all_patterns_in_game:
-            self.pattern_engine.update_patterns_from_game_outcome(all_patterns_in_game, 'win')
+            self.pattern_engine.update_patterns_from_game_outcome(all_patterns_in_game, 'win', final_score)
 
     def _count_material(self, board: chess.Board) -> float:
         """Count material for current player"""
