@@ -42,6 +42,28 @@ class PatternDatabaseEnhancer:
     def _create_learning_tables(self):
         """Create tables for storing learned patterns from gameplay"""
 
+        # Table 0: Games with score-based tracking
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS games (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                white_player TEXT,
+                black_player TEXT,
+                result TEXT,  -- 'win', 'loss', 'draw'
+                ai_color TEXT,  -- 'white' or 'black'
+                played_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+                -- SCORE-BASED LEARNING (new!)
+                rounds_played INTEGER,  -- Number of full rounds (move pairs)
+                final_score REAL,  -- Calculated score: win=material+(100-rounds), loss=-100, draw=0
+                ai_material REAL,  -- Final AI material count
+                opponent_material REAL,  -- Final opponent material count
+
+                -- Performance metrics
+                moves_count INTEGER,
+                game_duration_seconds REAL
+            )
+        ''')
+
         # Table 1: Mistakes to avoid
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS learned_mistakes (

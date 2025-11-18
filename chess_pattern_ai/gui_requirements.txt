@@ -1,0 +1,12 @@
+# GUI Requirements for Chess Pattern Recognition AI
+
+# Core dependencies (already installed)
+python-chess>=1.11.0
+numpy>=1.24.0
+
+# GUI and visualization
+matplotlib>=3.7.0
+Pillow>=10.0.0
+cairosvg>=2.7.0
+
+# Note: tkinter is usually included with Python

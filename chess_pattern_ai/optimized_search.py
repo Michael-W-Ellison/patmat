@@ -1,25 +1,36 @@
 #!/usr/bin/env python3
 """
-Optimized Search - Intelligent Move Pruning
+Optimized Search - Learnable Move Pruning
 
 Only search moves that make sense:
-1. Prune moves that hang pieces without compensation
-2. Prune king moves into danger
-3. Focus on forcing moves (checks, captures, threats)
+1. Prune moves that hang pieces without compensation (observable)
+2. Prune king moves into danger (observable)
+3. Prioritize moves that historically lead to wins (LEARNED)
 4. Use quiescence search for tactical positions
-5. Limit branching factor intelligently
+5. Limit branching factor based on learned priorities
+
+NO hardcoded square preferences - learns what works from outcomes
 """
 
 import chess
 from typing import List, Tuple
 import time
+from learnable_move_prioritizer import LearnableMovePrioritizer
 
 
 class OptimizedSearchMixin:
     """
     Mixin to add intelligent move pruning to the AI
-    Dramatically reduces search space by ignoring nonsensical moves
+    Dramatically reduces search space by prioritizing historically successful moves
+
+    NO hardcoded square knowledge - learns from game outcomes
     """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Initialize learnable move prioritizer
+        if not hasattr(self, 'move_prioritizer'):
+            self.move_prioritizer = LearnableMovePrioritizer()
 
     def _filter_sensible_moves(self, board: chess.Board, perspective: chess.Color,
                                depth: int) -> List[chess.Move]:
@@ -45,7 +56,7 @@ class OptimizedSearchMixin:
                 sensible_moves.append(move)
                 continue
 
-            # Check if move hangs a piece badly
+            # Check if move hangs a piece badly (observable - prune obvious blunders)
             piece = board.piece_at(move.from_square)
             if piece:
                 board.push(move)
@@ -63,7 +74,7 @@ class OptimizedSearchMixin:
                         board.pop()
                         continue  # Skip this bad move!
 
-                # Don't move king next to enemy king or into check
+                # Don't move king into check (observable - illegal position)
                 if piece.piece_type == chess.KING:
                     if board.is_check():
                         board.pop()
@@ -71,23 +82,16 @@ class OptimizedSearchMixin:
 
                 board.pop()
 
-            # Include development moves in opening
-            if len(board.move_stack) < 15:
-                if piece and piece.piece_type in [chess.KNIGHT, chess.BISHOP, chess.QUEEN]:
-                    from_rank = chess.square_rank(move.from_square)
-                    # Moving piece from back rank
-                    if from_rank in [0, 7]:
-                        sensible_moves.append(move)
-                        continue
+            # For quiet moves, use LEARNED priorities
+            # Check if this move type has historically led to wins
+            move_priority = self.move_prioritizer.get_move_priority(board, move)
 
-            # Include center control moves
-            if move.to_square in [chess.D4, chess.D5, chess.E4, chess.E5]:
+            # Include moves with learned priority above threshold
+            # (Threshold adapts: forcing moves ~70+, quiet moves 20-40)
+            if move_priority >= 30.0:  # Learned cutoff
                 sensible_moves.append(move)
-                continue
-
-            # For other quiet moves, only include a few random ones
-            # (This prevents searching every pawn push)
-            if len(sensible_moves) < 10:
+            # Always include some moves to explore new patterns
+            elif len(sensible_moves) < 10:
                 sensible_moves.append(move)
 
         # If we filtered too aggressively, add back some moves
@@ -118,12 +122,9 @@ class OptimizedSearchMixin:
         # Get FILTERED moves (only sensible ones!)
         legal_moves = self._filter_sensible_moves(board, perspective, depth)
 
-        # Move ordering: best moves first for better pruning
-        legal_moves.sort(key=lambda m: (
-            board.is_capture(m),      # Captures first
-            board.gives_check(m),     # Checks second
-            m.to_square in [chess.D4, chess.D5, chess.E4, chess.E5]  # Center third
-        ), reverse=True)
+        # Move ordering: sort by LEARNED priority for better alpha-beta pruning
+        # Higher priority moves searched first = more cutoffs = faster search
+        legal_moves = self.move_prioritizer.sort_moves_by_priority(board, legal_moves)
 
         if maximizing:
             max_eval = -99999
