@@ -58,6 +58,9 @@ def test_fast_ai(num_games: int = 3, use_stockfish_feedback: bool = False):
     # Add pattern abstraction engine to AI
     ai.pattern_engine = tracker.pattern_engine
 
+    # Add move prioritizer to AI (learns which move types win)
+    ai.move_prioritizer = tracker.move_prioritizer
+
     print("\nStarting Knowledge:")
     stats = tracker.get_learning_stats()
     print(f"  Games played:      {stats['games_played']}")
@@ -214,6 +217,19 @@ def test_fast_ai(num_games: int = 3, use_stockfish_feedback: bool = False):
         print(f"    Seen {times_seen:3d}x | Avg loss: {avg_loss:.1f} | Confidence: {confidence:.2f}")
         if total_games > 0:
             print(f"    Win rate: {win_rate*100:.0f}% ({won}W-{lost}L-{draw}D in {total_games} games)")
+
+    # Learned move patterns (which move TYPES lead to wins)
+    print(f"\nLearned Move Patterns (Top 5):")
+    move_stats = tracker.move_prioritizer.get_statistics()
+    print(f"  Patterns learned:  {move_stats['patterns_learned']}")
+    print(f"  Avg confidence:    {move_stats['avg_confidence']:.2f}")
+    print(f"  Avg win rate:      {move_stats['avg_win_rate']:.1%}")
+
+    if move_stats['patterns_learned'] > 0:
+        for row in tracker.move_prioritizer.get_top_patterns(5):
+            piece, category, dist, phase, seen, win_rate, conf, priority = row
+            print(f"  {piece:8s} {category:12s} (dist={dist}, {phase:10s})")
+            print(f"    Seen {seen:3d}x | Win rate: {win_rate:.1%} | Priority: {priority:.1f}")
 
     # Adaptive cache stats
     if hasattr(ai, 'adaptive_cache') and ai.adaptive_cache:

@@ -19,6 +19,7 @@ from typing import List, Tuple, Optional
 from integrated_ai_with_clustering import ClusteredIntegratedAI
 from pattern_database_enhancer import PatternDatabaseEnhancer
 from pattern_abstraction_engine import PatternAbstractionEngine
+from learnable_move_prioritizer import LearnableMovePrioritizer
 
 # Try to import Stockfish evaluator, but don't require it
 try:
@@ -58,6 +59,10 @@ class LearningGameTracker:
         self.pattern_engine.cursor = self.cursor
         self.pattern_engine._init_tables()
         logger.info("🧠 Pattern abstraction enabled - will learn principles, not positions")
+
+        # Learnable move prioritizer - learns which move TYPES lead to wins
+        self.move_prioritizer = LearnableMovePrioritizer(db_path)
+        logger.info("🎯 Move prioritizer enabled - will learn winning move patterns")
 
         # Optional Stockfish feedback for enhanced learning
         self.stockfish_evaluator = None
@@ -107,6 +112,9 @@ class LearningGameTracker:
             self._learn_from_loss(game_id, moves, ai_color, stockfish_analysis)
         elif result == 'win':
             self._learn_from_win(game_id, moves, ai_color, stockfish_analysis)
+
+        # Learn move patterns (which types of moves lead to wins/losses)
+        self.move_prioritizer.record_game_moves(moves, ai_color, result)
 
         self.conn.commit()
 
