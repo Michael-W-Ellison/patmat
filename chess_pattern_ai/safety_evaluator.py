@@ -34,30 +34,31 @@ class SafetyEvaluator:
 
     def _load_safety_weights(self):
         """
-        Load discovered safety patterns from database
-        These patterns were learned from analyzing safe vs unsafe king positions
+        Load discovered safety weights from database
+        These weights were learned from analyzing safe vs unsafe king positions
         """
         try:
-            # Load safety patterns discovered from game analysis
+            # Load safety weights discovered from game analysis
             self.cursor.execute('''
-                SELECT pattern_name, weight, confidence, observation_count
+                SELECT king_safety_weight, piece_protection_weight, exposed_penalty, observation_count
                 FROM discovered_safety_patterns
-                ORDER BY ABS(weight) DESC
+                ORDER BY id DESC
+                LIMIT 1
             ''')
 
-            patterns = self.cursor.fetchall()
-            for pattern_name, weight, confidence, obs_count in patterns:
-                self.safety_weights[pattern_name] = {
-                    'weight': weight,
-                    'confidence': confidence,
+            result = self.cursor.fetchone()
+            if result:
+                king_safety_w, piece_protect_w, exposed_pen, obs_count = result
+                self.safety_weights = {
+                    'king_safety': king_safety_w,
+                    'piece_protection': piece_protect_w,
+                    'exposed_penalty': exposed_pen,
                     'observations': obs_count
                 }
-                self.safety_patterns.append(pattern_name)
-
-            if self.safety_weights:
-                logger.info(f"✓ Loaded {len(self.safety_weights)} discovered safety patterns")
+                logger.info(f"✓ Loaded discovered safety weights (from {obs_count} observations)")
             else:
                 logger.warning("No discovered safety patterns found")
+                self.safety_weights = {}
 
         except sqlite3.Error as e:
             logger.warning(f"Could not load safety patterns: {e}")
@@ -139,16 +140,39 @@ class SafetyEvaluator:
         """
         safety = 0.0
 
-        # Check discovered patterns
-        for pattern_name, data in self.safety_weights.items():
-            weight = data['weight']
-            confidence = data['confidence']
+        # Apply discovered safety weights
+        if not self.safety_weights:
+            return 0.0
 
-            # Detect pattern and apply weight
-            if self._pattern_matches(pattern_name, board_part, king_square, color, castling):
-                safety += weight * confidence
+        king_safety_w = self.safety_weights.get('king_safety', 1.0)
+        piece_protect_w = self.safety_weights.get('piece_protection', 1.0)
+        exposed_pen = self.safety_weights.get('exposed_penalty', 1.0)
+
+        # Basic safety evaluation using discovered weights
+        if self._is_king_castled(king_square, color):
+            safety += king_safety_w * 10.0
+
+        if self._has_pawn_shield(board_part, king_square, color):
+            safety += piece_protect_w * 5.0
+
+        if self._is_king_exposed(king_square):
+            safety -= exposed_pen * 5.0
 
         return safety
+
+    def _is_king_castled(self, king_square: int, color: str) -> bool:
+        """Check if king has castled (moved from starting position)"""
+        if color == 'white':
+            return king_square != 4  # Not on e1
+        else:
+            return king_square != 60  # Not on e8
+
+    def _is_king_exposed(self, king_square: int) -> bool:
+        """Check if king is in exposed position"""
+        file = king_square % 8
+        rank = king_square // 8
+        # Exposed if on edge or in center
+        return file in [0, 7] or rank in [3, 4]
 
     def _pattern_matches(self, pattern_name: str, board_part: str,
                         king_square: int, color: str, castling: str) -> bool:

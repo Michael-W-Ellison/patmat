@@ -31,29 +31,31 @@ class OpeningEvaluator:
 
     def _load_opening_weights(self):
         """
-        Load discovered opening patterns from database
-        These patterns were learned from analyzing successful openings
+        Load discovered opening weights from database
+        These weights were learned from analyzing successful openings
         """
         try:
             # Load opening weights discovered from game analysis
             self.cursor.execute('''
-                SELECT pattern_name, weight, confidence, observation_count
+                SELECT development_weight, center_control_weight, repetition_penalty, observation_count
                 FROM discovered_opening_weights
-                ORDER BY ABS(weight) DESC
+                ORDER BY id DESC
+                LIMIT 1
             ''')
 
-            patterns = self.cursor.fetchall()
-            for pattern_name, weight, confidence, obs_count in patterns:
-                self.opening_weights[pattern_name] = {
-                    'weight': weight,
-                    'confidence': confidence,
+            result = self.cursor.fetchone()
+            if result:
+                dev_w, center_w, rep_pen, obs_count = result
+                self.opening_weights = {
+                    'development': dev_w,
+                    'center_control': center_w,
+                    'repetition_penalty': rep_pen,
                     'observations': obs_count
                 }
-
-            if self.opening_weights:
-                logger.info(f"✓ Loaded {len(self.opening_weights)} discovered opening patterns")
+                logger.info(f"✓ Loaded discovered opening weights (from {obs_count} observations)")
             else:
                 logger.warning("No discovered opening patterns found")
+                self.opening_weights = {}
 
         except sqlite3.Error as e:
             logger.warning(f"Could not load opening patterns: {e}")
@@ -82,13 +84,19 @@ class OpeningEvaluator:
 
         score = 0.0
 
-        # Check discovered opening patterns
-        for pattern_name, data in self.opening_weights.items():
-            weight = data['weight']
-            confidence = data['confidence']
+        # Apply discovered opening weights
+        if not self.opening_weights:
+            return 0.0
 
-            if self._pattern_matches(pattern_name, board_part, turn, castling, move_num):
-                score += weight * confidence
+        dev_w = self.opening_weights.get('development', 1.0)
+        center_w = self.opening_weights.get('center_control', 1.0)
+
+        # Evaluate based on discovered weights
+        if self._has_minor_pieces_developed(board_part, turn):
+            score += dev_w * 10.0
+
+        if self._has_center_control(board_part):
+            score += center_w * 10.0
 
         return score
 

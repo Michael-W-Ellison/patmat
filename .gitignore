@@ -45,3 +45,4 @@ Thumbs.db
 *.db-journal
 *.db-wal
 *.db-shm
+rule_discovery.db

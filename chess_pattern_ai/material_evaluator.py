@@ -37,7 +37,7 @@ class MaterialEvaluator:
         """
         try:
             self.cursor.execute('''
-                SELECT piece_type, discovered_value, confidence
+                SELECT piece_type, relative_value, confidence
                 FROM discovered_piece_values
                 ORDER BY piece_type
             ''')
