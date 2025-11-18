@@ -263,12 +263,20 @@ class LearnableMovePrioritizer:
         # Confidence increases with more observations
         confidence = min(1.0, total_games / 50.0)  # Max confidence at 50+ games
 
-        # Priority score: SCORE-BASED instead of just win rate!
-        # Moves with high avg_score get priority
-        # Normalized to 0-100 range: (avg_score + 100) / 2 gives 0-100 range
-        # Then weight by confidence
-        normalized_score = (avg_score + 100) / 2  # -100 to +200 → 0 to 150
-        priority_score = (normalized_score / 150) * confidence * 100  # 0-100
+        # Priority score: DIFFERENTIAL SCORE-BASED!
+        # Moves with high avg_score (material advantage + win bonus) get priority
+        #
+        # Score ranges (with differential scoring):
+        #   Best wins: ~1590 (win + ahead + fast)
+        #   Average wins: ~1050 (win + even + slow)
+        #   Draws ahead: ~300
+        #   Draws behind: ~-300
+        #   Losses close: ~-800 (lost but fought well)
+        #   Losses crushed: ~-1500 (got destroyed)
+        #
+        # Normalize -1500 to +1600 → 0 to 100
+        normalized_score = (avg_score + 1500) / 31  # -1500 to +1600 → 0 to 100
+        priority_score = normalized_score * confidence  # 0-100, confidence-weighted
 
         # Insert or update
         self.cursor.execute('''
