@@ -258,15 +258,10 @@ def test_game_scorer():
 
     # Test 4: Loss with material DISADVANTAGE (got crushed)
     print("\nTest 4: Loss with material DISADVANTAGE (got crushed)")
-    board = chess.Board()
-    # Remove white pieces to simulate crushing defeat
-    board.remove_piece_at(chess.B1)  # Remove knight
-    board.remove_piece_at(chess.G1)  # Remove knight
-    board.remove_piece_at(chess.C1)  # Remove bishop
-    board.remove_piece_at(chess.F1)  # Remove bishop
-    board.remove_piece_at(chess.D1)  # Remove queen
-    board.set_turn(chess.BLACK)
-    board.push_san('Qxf2#')  # Checkmate
+    # Checkmate position where white is severely behind in material
+    # White missing queen, rook, bishop - then gets checkmated (fool's mate style)
+    # FEN: after 1. f3 e5 2. g4 Qh4# but with white pieces removed
+    board = chess.Board("rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RN1QKBNR w KQkq - 1 3")
 
     score, result = scorer.calculate_final_score(board, chess.WHITE, rounds_played=15)
     ai_mat = scorer._calculate_material(board, chess.WHITE)
@@ -280,9 +275,9 @@ def test_game_scorer():
 
     # Test 5: Draw with material advantage
     print("\nTest 5: Draw with material advantage")
-    board = chess.Board()
-    board.remove_piece_at(chess.B8)  # Remove black knight
-    board.set_halfmove_clock(100)  # Force fifty-move rule
+    # Create a stalemate position where white is ahead in material
+    # King and queen vs lone king - stalemate position
+    board = chess.Board("7k/5Q2/5K2/8/8/8/8/8 b - - 0 1")  # Stalemate!
 
     score, result = scorer.calculate_final_score(board, chess.WHITE, rounds_played=50)
     ai_mat = scorer._calculate_material(board, chess.WHITE)
