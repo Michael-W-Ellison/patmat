@@ -51,3 +51,4 @@ test_integration.db
 demo_learning.db
 gui_training.db
 headless_training.db
+progressive_training.db
