@@ -46,3 +46,6 @@ Thumbs.db
 *.db-wal
 *.db-shm
 rule_discovery.db
+test_game.db
+test_integration.db
+demo_learning.db
