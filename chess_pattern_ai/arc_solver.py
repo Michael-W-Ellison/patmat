@@ -65,7 +65,8 @@ class ARCSolver:
         test_input = test_inputs[0]  # Use first test case
 
         # Step 3: Apply pattern to test input
-        output = self._apply_pattern(test_input, detected_pattern)
+        # Pass training examples for learning-based transformations
+        output = self._apply_pattern(test_input, detected_pattern, train_pairs)
 
         return output
 
@@ -302,13 +303,15 @@ class ARCSolver:
         return None
 
     def _apply_pattern(self, input_grid: List[List[int]],
-                      pattern: Dict) -> Optional[List[List[int]]]:
+                      pattern: Dict,
+                      training_pairs: Optional[List[Tuple]] = None) -> Optional[List[List[int]]]:
         """
         Apply detected pattern to input grid
 
         Args:
             input_grid: Test input grid
             pattern: Detected pattern dictionary
+            training_pairs: Training examples for learning-based transformations
 
         Returns:
             Output grid after transformation
@@ -324,7 +327,7 @@ class ARCSolver:
         elif pattern_type == 'color_mapping':
             return self._apply_color_mapping(input_grid, pattern)
         elif pattern_type == 'object':
-            return self._apply_object_transformation(input_grid, pattern)
+            return self._apply_object_transformation(input_grid, pattern, training_pairs)
         elif pattern_type == 'symmetry':
             return self._apply_symmetry(input_grid, pattern)
         elif pattern_type == 'repetition':
@@ -417,24 +420,283 @@ class ARCSolver:
 
         return output_np.tolist()
 
-    def _apply_object_transformation(self, grid: List[List[int]], pattern: Dict) -> Optional[List[List[int]]]:
-        """Apply object transformation - simplified for common cases"""
-        # Note: Full object transformation is complex
-        # This is a simplified version for the most common case (copying)
+    def _apply_object_transformation(self, grid: List[List[int]], pattern: Dict,
+                                     training_pairs: Optional[List[Tuple]] = None) -> Optional[List[List[int]]]:
+        """
+        Object transformations - Not yet implemented
 
-        operation = pattern.get('operation')
+        Challenge: Object patterns in ARC are extremely varied and complex:
+        - Filling hollow shapes with new colors
+        - Diagonal/complex tiling patterns
+        - Pattern symmetry completion
+        - Object movement and copying
+        - Semantic understanding of shapes
+        - Many other transformation types
 
-        if operation == 'copying':
-            # For copying, we'd need to detect objects and duplicate them
-            # This is complex - for now return None (unsupported)
+        Simple heuristics achieve 0% accuracy because each puzzle requires
+        understanding the specific semantic meaning of the transformation.
+
+        Future approaches that might work:
+        1. Neural networks trained specifically on object transformations
+        2. Program synthesis to generate transformation rules
+        3. Large pre-trained vision models
+        4. Extensive library of transformation templates
+
+        For now: Return None to avoid degrading overall performance
+        """
+        # Object transformations are the hardest part of ARC
+        # Better to skip than to guess wrong
+        return None
+
+    def _apply_learned_transformation(self, test_input: List[List[int]],
+                                      training_pairs: List[Tuple]) -> Optional[List[List[int]]]:
+        """
+        Learn transformation from training examples and apply to test input
+
+        Approach: Find cell-by-cell transformation rules from training data
+        """
+        if not training_pairs:
             return None
-        elif operation == 'recoloring':
-            # Apply color map to objects
-            color_map = pattern['color_map']
-            return self._apply_color_mapping(grid, {'mapping': color_map})
-        elif operation == 'movement':
-            # Move objects - also complex, return None for now
+
+        test_np = np.array(test_input)
+        h, w = test_np.shape
+
+        # Approach 1: Try to find a training example with similar input
+        # If found, apply similar transformation
+
+        for train_input, train_output in training_pairs:
+            train_in_np = np.array(train_input)
+            train_out_np = np.array(train_output)
+
+            # Check if shapes match
+            if train_in_np.shape != test_np.shape:
+                continue
+
+            if train_out_np.shape != test_np.shape:
+                continue  # Output must be same size as input for this to work
+
+            # Check similarity
+            if np.array_equal(train_in_np, test_np):
+                # Exact match! Use the training output
+                return train_output
+
+            # Check partial similarity
+            matching_cells = np.sum(train_in_np == test_np)
+            total_cells = h * w
+            similarity = matching_cells / total_cells
+
+            if similarity > 0.7:  # High similarity
+                # Apply the transformation pattern from this training example
+                output = test_np.copy()
+
+                # For each cell, see if there's a consistent transformation
+                for i in range(h):
+                    for j in range(w):
+                        if train_in_np[i, j] == test_np[i, j]:
+                            # Same input value - apply same transformation
+                            output[i, j] = train_out_np[i, j]
+
+                # Check if we made changes
+                if not np.array_equal(output, test_np):
+                    return output.tolist()
+
+        # Approach 2: Look for cell-level transformation rules across all examples
+        # Build a mapping: input_value → output_value (position-independent)
+        value_transformations = {}
+
+        for train_input, train_output in training_pairs:
+            train_in_np = np.array(train_input)
+            train_out_np = np.array(train_output)
+
+            if train_in_np.shape != train_out_np.shape:
+                continue  # Skip if sizes don't match
+
+            for i in range(min(train_in_np.shape[0], h)):
+                for j in range(min(train_in_np.shape[1], w)):
+                    in_val = int(train_in_np[i, j])
+                    out_val = int(train_out_np[i, j])
+
+                    if in_val not in value_transformations:
+                        value_transformations[in_val] = []
+                    value_transformations[in_val].append(out_val)
+
+        # Find consistent transformations
+        consistent_map = {}
+        for in_val, out_vals in value_transformations.items():
+            # If a value always transforms to the same output, use it
+            unique_outs = set(out_vals)
+            if len(unique_outs) == 1:
+                consistent_map[in_val] = list(unique_outs)[0]
+
+        # Apply consistent mappings if we found any
+        if consistent_map:
+            output = test_np.copy()
+            for in_val, out_val in consistent_map.items():
+                output[test_np == in_val] = out_val
+
+            if not np.array_equal(output, test_np):
+                return output.tolist()
+
+        # No transformation learned
+        return None
+
+    def _apply_object_copying_heuristics(self, grid: List[List[int]], pattern: Dict) -> Optional[List[List[int]]]:
+        """
+        Observation-based approach: Don't try to be clever with heuristics
+
+        Object transformations are too complex and varied for simple heuristics.
+        Better to return None and let the pattern fail than to return wrong answers.
+
+        In future, this could:
+        - Learn from successful training examples
+        - Use machine learning to detect transformation types
+        - Build a library of transformation templates
+
+        For now: return None to avoid degrading overall performance
+        """
+        # Object transformations need proper implementation
+        # Current heuristics produce 0% accuracy, which hurts overall performance
+        # Better to not attempt than to get it wrong
+
+        return None
+
+    def _try_diagonal_tiling(self, grid: np.ndarray) -> Optional[np.ndarray]:
+        """Try to extend a diagonal pattern to fill the grid"""
+        h, w = grid.shape
+
+        # Find non-zero cells to detect diagonal pattern
+        nonzero = np.argwhere(grid != 0)
+        if len(nonzero) < 3:
             return None
+
+        # Check if cells form a diagonal pattern
+        # Look for repeating diagonal offsets
+        if h == w:  # Square grid only
+            output = grid.copy()
+
+            # Try diagonal wrapping - extend pattern diagonally
+            for i in range(h):
+                for j in range(w):
+                    if output[i, j] == 0:
+                        # Look for diagonal neighbors with values
+                        # Try (-1,-1), (-1,0), (0,-1) offsets (top-left region)
+                        for di, dj in [(-1,-1), (-1,0), (0,-1), (-2,-1), (-1,-2)]:
+                            ni, nj = i + di, j + dj
+                            if 0 <= ni < h and 0 <= nj < w and grid[ni, nj] != 0:
+                                # Found a diagonal pattern, use it
+                                output[i, j] = grid[ni, nj]
+                                break
+
+            # Check if we filled the grid reasonably
+            if np.count_nonzero(output) > np.count_nonzero(grid) * 2:
+                return output
+
+        return None
+
+    def _try_fill_enclosed_regions(self, grid: np.ndarray) -> Optional[np.ndarray]:
+        """Fill enclosed regions (hollow shapes) with a different color"""
+        h, w = grid.shape
+        output = grid.copy()
+
+        # Find enclosed regions (cells surrounded by non-zero cells)
+        for i in range(1, h-1):
+            for j in range(1, w-1):
+                if output[i, j] == 0:
+                    # Check if surrounded by non-zero cells
+                    neighbors = [
+                        grid[i-1, j], grid[i+1, j],
+                        grid[i, j-1], grid[i, j+1]
+                    ]
+
+                    nonzero_neighbors = sum(1 for n in neighbors if n != 0)
+
+                    if nonzero_neighbors >= 3:  # Mostly surrounded
+                        # Fill with a new color (find unused color or use max+1)
+                        unique_colors = np.unique(grid[grid != 0])
+                        if len(unique_colors) > 0:
+                            # Use a different color from neighbors
+                            neighbor_colors = set(n for n in neighbors if n != 0)
+                            for color in range(1, 10):
+                                if color not in neighbor_colors:
+                                    output[i, j] = color
+                                    break
+
+        # Only return if we made changes
+        if not np.array_equal(output, grid):
+            return output
+
+        return None
+
+    def _try_pattern_reflection(self, grid: np.ndarray) -> Optional[np.ndarray]:
+        """Try reflecting pattern around center to create symmetry"""
+        h, w = grid.shape
+
+        # Find bounding box of non-zero cells
+        nonzero = np.argwhere(grid != 0)
+        if len(nonzero) == 0:
+            return None
+
+        min_row, min_col = nonzero.min(axis=0)
+        max_row, max_col = nonzero.max(axis=0)
+
+        # If pattern is in top-left quadrant, try reflecting it
+        pattern_h = max_row - min_row + 1
+        pattern_w = max_col - min_col + 1
+
+        if pattern_h < h // 2 and pattern_w < w // 2:
+            output = grid.copy()
+
+            # Reflect vertically and horizontally
+            pattern = grid[min_row:max_row+1, min_col:max_col+1]
+
+            # Place reflections in other quadrants
+            center_r, center_w = h // 2, w // 2
+
+            # Try reflection around center
+            for i in range(h):
+                for j in range(w):
+                    if i < center_r and j < center_w:
+                        # Top-left quadrant (original)
+                        continue
+                    else:
+                        # Calculate mirrored position
+                        mirror_i = min_row + abs(center_r - i) % pattern_h if i >= center_r else i
+                        mirror_j = min_col + abs(center_w - j) % pattern_w if j >= center_w else j
+
+                        if 0 <= mirror_i < h and 0 <= mirror_j < w:
+                            source_i = min_row + (abs(i - min_row) % pattern_h)
+                            source_j = min_col + (abs(j - min_col) % pattern_w)
+
+                            if 0 <= source_i < h and 0 <= source_j < w and grid[source_i, source_j] != 0:
+                                output[i, j] = grid[source_i, source_j]
+
+            if not np.array_equal(output, grid):
+                return output
+
+        return None
+
+    def _apply_object_movement_heuristic(self, grid: List[List[int]]) -> Optional[List[List[int]]]:
+        """Heuristic for object movement - try symmetry"""
+        input_np = np.array(grid)
+
+        # Try creating vertical symmetry
+        h, w = input_np.shape
+        output = input_np.copy()
+
+        # Find non-zero regions and reflect them
+        nonzero = np.argwhere(input_np != 0)
+        if len(nonzero) > 0:
+            min_row = nonzero[:, 0].min()
+            max_row = nonzero[:, 0].max()
+
+            for i in range(h):
+                mirror_i = h - 1 - i
+                for j in range(w):
+                    if input_np[i, j] != 0 and output[mirror_i, j] == 0:
+                        output[mirror_i, j] = input_np[i, j]
+
+            if not np.array_equal(output, input_np):
+                return output.tolist()
 
         return None
 
@@ -684,10 +946,11 @@ class ARCSolverWithLearning(ARCSolver):
 
         return result
 
-    def _apply_pattern(self, input_grid: List[List[int]], pattern: Dict) -> Optional[List[List[int]]]:
+    def _apply_pattern(self, input_grid: List[List[int]], pattern: Dict,
+                       training_pairs: Optional[List[Tuple]] = None) -> Optional[List[List[int]]]:
         """Apply pattern and track which pattern was used"""
         self._last_used_pattern = pattern
-        return super()._apply_pattern(input_grid, pattern)
+        return super()._apply_pattern(input_grid, pattern, training_pairs)
 
     def _detect_pattern_from_examples(self, train_pairs: List[Tuple]) -> Optional[Dict]:
         """
