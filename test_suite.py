@@ -104,7 +104,13 @@ def main():
         'python3 breakthrough/breakthrough_headless_trainer.py 3'
     )
 
-    # Test 9: Show learned patterns (Checkers)
+    # Test 9: Pentago (5 games)
+    results['Pentago'] = run_test(
+        'Pentago (5 games)',
+        'python3 pentago/pentago_headless_trainer.py 5'
+    )
+
+    # Test 10: Show learned patterns (Checkers)
     results['Pattern Display'] = run_test(
         'Show learned patterns',
         'python3 checkers/checkers_headless_trainer.py --show-patterns 5'
