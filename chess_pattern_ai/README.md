@@ -1,107 +1,199 @@
-# Chess Pattern Recognition AI - Backup
+# Pattern Recognition AI - Multi-Game System
 
-## Contents
+## Overview
 
-This backup contains the complete pattern recognition chess AI system.
+This system implements observation-based pattern learning for 13 classic board games. The AI learns to play games by discovering patterns through self-play, without hardcoded evaluation rules.
 
-### Core Components
+## Supported Games
 
-1. **Main AI**
-   - `fast_learning_ai.py` - Main entry point with optimized search
-   - `integrated_chess_ai.py` - Integrated AI with all evaluators
-   - `integrated_ai_with_clustering.py` - AI with position clustering
-   - `optimized_search.py` - Intelligent move pruning and search
+The system includes 13 board games, each demonstrating different pattern learning challenges:
 
-2. **Pattern Learning System**
-   - `pattern_abstraction_engine.py` - Extracts abstract patterns from mistakes
-   - `test_learning_ai_with_clustering.py` - Game tracking and learning
-   - `opening_performance_tracker.py` - Opening book learning
+1. **Chess** - Complex tactics and strategy
+2. **Checkers** - Forced captures and king dynamics
+3. **Go (9×9)** - Territory control and influence
+4. **Othello** - Disc flipping and stable pieces
+5. **Connect Four** - Vertical threat patterns
+6. **Gomoku** - 5-in-a-row patterns
+7. **Hex** - Connection and blocking
+8. **Dots and Boxes** - Chain reactions and parity
+9. **Breakthrough** - Pawn racing game
+10. **Pentago** - Rotation-based 5-in-a-row (AI struggles)
+11. **Nine Men's Morris** - Multi-phase mill formation
+12. **Lines of Action** - Connectivity with unique movement
+13. **Arimaa** - Ultimate AI challenge (designed to be hard for computers)
 
-3. **Evaluators**
-   - `discovered_chess_engine.py` - Discovered piece movement rules
-   - `mobility_evaluator.py` - Piece mobility evaluation
-   - `tactical_evaluator.py` - Tactical pattern recognition
-   - `pawn_structure_evaluator.py` - Pawn structure analysis
-   - `positional_evaluator.py` - Positional evaluation
-   - `king_safety_evaluator.py` - King safety assessment
+### Core Architecture
 
-4. **Pattern Recognition**
-   - `integrate_clustering.py` - Position clustering system
-   - `adaptive_pattern_cache.py` - Learning pattern cache
-   - `pattern_database_enhancer.py` - Database pattern enhancement
+1. **Game-Specific Components** (per game)
+   - `{game}_board.py` - Board representation and rules
+   - `{game}_game.py` - Game engine and move generation
+   - `{game}_scorer.py` - Differential scoring and move categorization
+   - `{game}_headless_trainer.py` - Training loop and statistics
 
-5. **Database**
-   - `rule_discovery.db` - Clean 2.9MB knowledge base with:
-     - 11 abstract patterns (learned principles)
-     - 156 movement rules
-     - ~30 evaluation weights
-     - 20 position cluster centers
-     - Game statistics
+2. **Shared Learning System**
+   - `learnable_move_prioritizer.py` - Universal pattern learning engine
+   - SQLite database per game - Stores learned patterns with win rates
+   - Differential scoring - `score = my_advantage - opponent_advantage`
+   - Pattern categorization - Game-specific move categories
 
-6. **Utilities**
-   - `create_clean_database.py` - Database cleanup tool
-   - `cleanup_database.py` - Alternative cleanup approach
+3. **GUI Tools**
+   - `game_launcher_gui.py` - Launch training for all games (requires tkinter)
+   - `pattern_viewer_gui.py` - Visualize learned patterns (requires tkinter)
+   - `chess_pattern_ai_gui.py` - Chess game viewer with board display
+
+4. **Testing**
+   - `test_all_games.py` - Automated tests for all 13 games
 
 ### Key Features
 
-1. **Pattern Abstraction**
-   - Learns WHY moves are bad, not just WHICH moves
-   - Extracts abstract patterns like "hanging pieces" instead of memorizing positions
+1. **Observation-Based Learning**
+   - AI discovers patterns through self-play, no hardcoded rules
+   - Learns from game outcomes: win/loss/draw for each pattern
+   - Adapts move priorities based on success rates
 
-2. **Outcome-Aware Learning**
-   - Tracks win/loss/draw for each pattern
-   - Applies stronger penalties to patterns with 0% win rate
-   - Connects actions to game outcomes
+2. **Game-Agnostic Architecture**
+   - 85% code reuse across all games
+   - Shared pattern learning engine
+   - Each game defines its own move categories and scoring
 
-3. **Optimized Search**
-   - Intelligent move pruning (25x faster)
-   - Two-stage search: root ordering + deep search
-   - Adaptive pattern caching
+3. **Differential Scoring**
+   - `score = my_advantage - opponent_advantage`
+   - Game-specific evaluation metrics
+   - Pattern categorization for targeted learning
 
-4. **Compact Knowledge Base**
-   - 2.9MB database (was 22GB before cleanup)
-   - Only abstract knowledge, no position memorization
-   - 13,776 essential rows vs 47 million bloat rows
+4. **Compact Pattern Databases**
+   - SQLite database per game stores learned patterns
+   - Tracks: category, distance, phase, win rate, times seen
+   - No position memorization, only abstract patterns
 
 ## Usage
 
-### Run AI vs Stockfish
+### Quick Start with GUI (requires tkinter)
 ```bash
-python3 fast_learning_ai.py 10
+# Launch the game trainer GUI
+python3 game_launcher_gui.py
+
+# View learned patterns for a game
+python3 pattern_viewer_gui.py chess_training.db
 ```
 
-### Run with Stockfish Feedback
+### Command Line Training
+
+Train any game from command line:
+
 ```bash
-python3 fast_learning_ai.py 20 --stockfish-feedback
+# Chess (50 games)
+python3 chess_progressive_trainer.py 50
+
+# Checkers (100 games)
+python3 checkers/checkers_headless_trainer.py 100
+
+# Go 9×9 (50 games)
+python3 go/go_headless_trainer.py 50 --size 9
+
+# Othello (100 games)
+python3 othello/othello_headless_trainer.py 100
+
+# Connect Four (200 games)
+python3 connect4/connect4_headless_trainer.py 200
+
+# Gomoku (100 games)
+python3 gomoku/gomoku_headless_trainer.py 100
+
+# Hex (100 games)
+python3 hex/hex_headless_trainer.py 100
+
+# Dots and Boxes (200 games)
+python3 dots_boxes/dots_boxes_headless_trainer.py 200
+
+# Breakthrough (100 games)
+python3 breakthrough/breakthrough_headless_trainer.py 100
+
+# Pentago (100 games)
+python3 pentago/pentago_headless_trainer.py 100
+
+# Nine Men's Morris (50 games)
+python3 morris/morris_headless_trainer.py 50
+
+# Lines of Action (50 games)
+python3 loa/loa_headless_trainer.py 50
+
+# Arimaa (20 games)
+python3 arimaa/arimaa_headless_trainer.py 20
 ```
 
-### Clean Database (if needed)
+### Show Learned Patterns
+
 ```bash
-python3 create_clean_database.py
+# Show top 10 patterns for any game
+python3 {game}/{game}_headless_trainer.py --show-patterns 10
+```
+
+### Run Full Test Suite
+
+```bash
+# Test all 13 games
+python3 test_all_games.py
 ```
 
 ## Requirements
 
+### Core (all games)
 - Python 3.8+
+- sqlite3 (built-in)
+- random (built-in)
+
+### Chess only
 - python-chess
-- numpy
-- scikit-learn
-- sqlite3
 
-## Documentation
+### GUI tools (optional)
+- tkinter (for game_launcher_gui.py and pattern_viewer_gui.py)
 
-See `docs/` folder for:
-- Outcome-aware learning implementation details
-- Database cleanup summary
-- Test results and analysis
+Most games have zero external dependencies beyond Python standard library!
 
-## Backup Date
+## Game Highlights
 
-Created: 2025-11-17 22:11:41
+### Games Where Traditional AI Struggles
+
+**Pentago** - Rotation mechanics make traditional search difficult
+- AI learns "rotation trap" patterns (92-96% win rate)
+- Discovers that rotating after placement creates winning positions
+
+**Nine Men's Morris** - Multi-phase gameplay
+- AI learns mill formation (100% win rate on 3-in-a-row patterns)
+- Discovers 2-piece setup patterns (100% win rate)
+
+**Lines of Action** - Complex connectivity requirements
+- AI learns piece grouping (94.1% win rate in endgame)
+- Discovers that keeping pieces together is critical
+
+**Arimaa** - Specifically designed to be hard for computers
+- Branching factor of 16^4 (17,000+ possible moves per turn)
+- AI learns rabbit advancement strategies (49.8% success)
+- Discovers push/pull tactics and trap control
+
+## Project Structure
+
+```
+chess_pattern_ai/
+├── game_launcher_gui.py          # Launch training for all games (GUI)
+├── pattern_viewer_gui.py          # View learned patterns (GUI)
+├── test_all_games.py              # Test all 13 games
+├── learnable_move_prioritizer.py  # Shared learning engine
+│
+├── {game}/                        # Per-game directories:
+│   ├── {game}_board.py           # Board representation
+│   ├── {game}_game.py            # Game engine
+│   ├── {game}_scorer.py          # Scoring and categorization
+│   └── {game}_headless_trainer.py # Training loop
+│
+└── *.db                          # Pattern databases (gitignored)
+```
 
 ## Version
 
-Pattern Recognition Chess AI v2.0
-- Abstract pattern learning
-- Outcome-aware penalties
-- Clean compact database (2.9MB)
+Pattern Recognition AI v3.0 - Multi-Game System
+- 13 games implemented
+- Observation-based learning
+- Game-agnostic architecture
+- GUI launcher for all games
