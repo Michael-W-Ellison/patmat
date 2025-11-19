@@ -1,0 +1,5 @@
+
+# ARC Challenge
+arc_dataset/
+*.db
+arc_learned*.db
