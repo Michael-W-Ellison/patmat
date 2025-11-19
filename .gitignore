@@ -52,3 +52,6 @@ demo_learning.db
 gui_training.db
 headless_training.db
 progressive_training.db
+
+# ARC Challenge dataset (large, cloned from GitHub)
+arc_dataset/
