@@ -53,5 +53,16 @@ gui_training.db
 headless_training.db
 progressive_training.db
 
-# ARC Challenge dataset (large, cloned from GitHub)
-arc_dataset/
+# Game training databases
+checkers_training.db
+go_training.db
+othello_training.db
+connect4_training.db
+gomoku_training.db
+hex_training.db
+dots_boxes_training.db
+breakthrough_training.db
+pentago_training.db
+morris_training.db
+loa_training.db
+arimaa_training.db

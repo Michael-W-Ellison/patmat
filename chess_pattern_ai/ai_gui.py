@@ -16,6 +16,7 @@ import threading
 import queue
 import chess
 import chess.svg
+import chess.engine
 from PIL import Image, ImageTk
 import io
 import cairosvg
@@ -56,6 +57,16 @@ class ChessAIGUI:
         self.score_history = []
         self.material_history = []
 
+        # Stockfish integration
+        self.stockfish_path = '/usr/games/stockfish'
+        self.stockfish_level = 5  # Default skill level (0-20)
+        self.use_stockfish = False  # Toggle between Stockfish and random
+        self.engine = None
+        self.consecutive_wins = 0  # For progressive difficulty
+
+        # Try to initialize Stockfish
+        self._init_stockfish()
+
         # Queue for thread communication
         self.update_queue = queue.Queue()
 
@@ -64,6 +75,47 @@ class ChessAIGUI:
 
         # Start update loop
         self.process_queue()
+
+    def _init_stockfish(self):
+        """Initialize Stockfish engine"""
+        try:
+            self.engine = chess.engine.SimpleEngine.popen_uci(self.stockfish_path)
+            self.engine.configure({"Skill Level": self.stockfish_level})
+            self.use_stockfish = True
+            print(f"✓ Stockfish initialized at level {self.stockfish_level}")
+            print(f"  Path: {self.stockfish_path}")
+        except FileNotFoundError:
+            print(f"⚠ Stockfish not found at: {self.stockfish_path}")
+            print("  Trying common alternative paths...")
+            # Try alternative paths
+            for path in ['/usr/local/bin/stockfish', 'stockfish', '/opt/homebrew/bin/stockfish']:
+                try:
+                    self.engine = chess.engine.SimpleEngine.popen_uci(path)
+                    self.engine.configure({"Skill Level": self.stockfish_level})
+                    self.stockfish_path = path
+                    self.use_stockfish = True
+                    print(f"✓ Stockfish found at: {path}")
+                    return
+                except:
+                    continue
+            print("  Stockfish not available - will use random opponent")
+            self.use_stockfish = False
+        except Exception as e:
+            print(f"⚠ Error initializing Stockfish: {e}")
+            print("  Will use random opponent instead")
+            self.use_stockfish = False
+
+    def update_stockfish_level(self):
+        """Update Stockfish skill level"""
+        if self.engine and self.use_stockfish:
+            try:
+                new_level = int(self.stockfish_level_var.get())
+                self.stockfish_level = max(0, min(20, new_level))
+                self.engine.configure({"Skill Level": self.stockfish_level})
+                self.consecutive_wins = 0  # Reset progression
+                print(f"✓ Stockfish level updated to {self.stockfish_level}")
+            except Exception as e:
+                print(f"⚠ Error updating Stockfish level: {e}")
 
     def create_widgets(self):
         """Create all GUI widgets"""
@@ -150,6 +202,68 @@ class ChessAIGUI:
             train_frame, text="⏹ Stop Training", command=self.stop_training, state=tk.DISABLED
         )
         self.stop_training_btn.pack(side=tk.LEFT, padx=5)
+
+        # Stockfish controls
+        stockfish_frame = ttk.LabelFrame(control_frame, text="Opponent Settings", padding=5)
+        stockfish_frame.pack(fill=tk.X, pady=10)
+
+        # Opponent type selector
+        ttk.Label(stockfish_frame, text="Opponent:").pack(side=tk.LEFT, padx=5)
+
+        self.opponent_var = tk.StringVar(value="stockfish" if self.use_stockfish else "random")
+        opponent_combo = ttk.Combobox(
+            stockfish_frame,
+            textvariable=self.opponent_var,
+            values=["random", "stockfish"],
+            state="readonly",
+            width=10
+        )
+        opponent_combo.pack(side=tk.LEFT, padx=5)
+        opponent_combo.bind("<<ComboboxSelected>>", lambda e: self._update_opponent_type())
+
+        # Stockfish level control
+        ttk.Label(stockfish_frame, text="Stockfish Level (0-20):").pack(side=tk.LEFT, padx=5)
+        self.stockfish_level_var = tk.StringVar(value=str(self.stockfish_level))
+        level_spin = ttk.Spinbox(
+            stockfish_frame,
+            from_=0, to=20,
+            textvariable=self.stockfish_level_var,
+            width=5,
+            command=self.update_stockfish_level
+        )
+        level_spin.pack(side=tk.LEFT, padx=5)
+
+        # Progressive mode checkbox
+        self.progressive_var = tk.BooleanVar(value=False)
+        progressive_check = ttk.Checkbutton(
+            stockfish_frame,
+            text="Progressive (auto-advance after 10 wins)",
+            variable=self.progressive_var
+        )
+        progressive_check.pack(side=tk.LEFT, padx=10)
+
+        # Status label
+        status_text = "✓ Stockfish available" if self.use_stockfish else "⚠ Stockfish not found"
+        self.stockfish_status_label = ttk.Label(
+            stockfish_frame,
+            text=status_text,
+            foreground="green" if self.use_stockfish else "orange"
+        )
+        self.stockfish_status_label.pack(side=tk.LEFT, padx=5)
+
+    def _update_opponent_type(self):
+        """Update opponent type when combobox changes"""
+        opponent = self.opponent_var.get()
+        if opponent == "stockfish" and not self.use_stockfish:
+            messagebox.showwarning(
+                "Stockfish Not Available",
+                "Stockfish is not installed or not found.\n\n"
+                "Will use random opponent instead.\n\n"
+                "To use Stockfish:\n"
+                "  - Install: sudo apt-get install stockfish\n"
+                "  - Or download from: https://stockfishchess.org/"
+            )
+            self.opponent_var.set("random")
 
     def create_metrics_panel(self, parent):
         """Create real-time metrics display"""
@@ -362,11 +476,25 @@ class ChessAIGUI:
         return best_move
 
     def play_opponent_move(self):
-        """Make a random opponent move (for testing)"""
+        """Make opponent move (Stockfish or random)"""
         if self.current_board.is_game_over():
             return None
 
+        # Use Stockfish if available and selected
+        opponent = self.opponent_var.get() if hasattr(self, 'opponent_var') else "random"
+
+        if opponent == "stockfish" and self.engine and self.use_stockfish:
+            try:
+                result = self.engine.play(self.current_board, chess.engine.Limit(time=0.1))
+                return result.move
+            except Exception as e:
+                print(f"⚠ Stockfish error: {e}, falling back to random")
+                # Fall through to random move
+
+        # Random opponent (fallback or selected)
         legal_moves = list(self.current_board.legal_moves)
+        if not legal_moves:
+            return None
 
         # 30% chance of capture if available
         captures = [m for m in legal_moves if self.current_board.is_capture(m)]
@@ -421,6 +549,20 @@ class ChessAIGUI:
             self.draws += 1
 
         self.score_history.append(final_score)
+
+        # Progressive difficulty (if enabled)
+        if self.progressive_var.get() if hasattr(self, 'progressive_var') else False:
+            if result == 'win':
+                self.consecutive_wins += 1
+                if self.consecutive_wins >= 10 and self.stockfish_level < 20:
+                    self.stockfish_level += 1
+                    self.consecutive_wins = 0
+                    if self.engine and self.use_stockfish:
+                        self.engine.configure({"Skill Level": self.stockfish_level})
+                        self.stockfish_level_var.set(str(self.stockfish_level))
+                        self.update_queue.put(('move', f"\n🎉 Level up! Now Stockfish level {self.stockfish_level}\n"))
+            else:
+                self.consecutive_wins = 0
 
         # Record for learning
         self.prioritizer.record_game_moves(game_moves, self.ai_color, result, final_score)
@@ -532,6 +674,15 @@ class ChessAIGUI:
         self.training_active = False
         self.game_active = False
         self.prioritizer.close()
+
+        # Cleanup Stockfish engine
+        if self.engine:
+            try:
+                self.engine.quit()
+                print("✓ Stockfish engine closed")
+            except:
+                pass
+
         self.root.destroy()
 
 
