@@ -15,6 +15,7 @@ import numpy as np
 from arc_puzzle import ARCPuzzle, ARCDatasetLoader
 from universal_game_learner import GameObserver
 from arc_object_detector import ObjectTransformationDetector
+from arc_symmetry_detector import SymmetryDetector, RepetitionDetector
 
 
 class ARCObserver(GameObserver):
@@ -34,8 +35,10 @@ class ARCObserver(GameObserver):
         # Create ARC-specific tables
         self._init_arc_tables()
 
-        # Initialize object detector
+        # Initialize detectors
         self.object_detector = ObjectTransformationDetector()
+        self.symmetry_detector = SymmetryDetector()
+        self.repetition_detector = RepetitionDetector()
 
     def _init_arc_tables(self):
         """Create tables for ARC-specific pattern learning"""
@@ -174,6 +177,16 @@ class ARCObserver(GameObserver):
         object_pattern = self._detect_object_transformation(train_pairs)
         if object_pattern:
             patterns_detected.append(object_pattern)
+
+        # 6. Check for symmetry operations
+        symmetry_pattern = self._detect_symmetry_operations(train_pairs)
+        if symmetry_pattern:
+            patterns_detected.append(symmetry_pattern)
+
+        # 7. Check for repetition operations
+        repetition_pattern = self._detect_repetition_operations(train_pairs)
+        if repetition_pattern:
+            patterns_detected.append(repetition_pattern)
 
         # Record discovered patterns
         for pattern in patterns_detected:
@@ -426,6 +439,60 @@ class ARCObserver(GameObserver):
                             'description': f'Scale objects by {scale_h}x{scale_w}',
                             'parameters': {'scale_h': scale_h, 'scale_w': scale_w, 'operation': 'scaling'}
                         }
+
+        return None
+
+    def _detect_symmetry_operations(self, train_pairs) -> Optional[Dict]:
+        """Detect symmetry-based transformations (reflection, pattern completion)"""
+
+        # Check all examples for consistent symmetry operation
+        symmetries = []
+
+        for input_grid, output_grid in train_pairs:
+            result = self.symmetry_detector.detect_symmetry_transformation(input_grid, output_grid)
+            if result:
+                symmetries.append(result)
+
+        # If same symmetry operation appears in all examples
+        if symmetries and len(symmetries) == len(train_pairs):
+            # Check if all examples show same operation
+            operations = [s['name'] for s in symmetries]
+            if len(set(operations)) == 1:
+                # All examples have same symmetry operation
+                sym = symmetries[0]
+                return {
+                    'type': sym['type'],
+                    'name': sym['name'],
+                    'description': sym['description'],
+                    'parameters': sym.get('parameters', {})
+                }
+
+        return None
+
+    def _detect_repetition_operations(self, train_pairs) -> Optional[Dict]:
+        """Detect repetition-based transformations (tiling, duplication)"""
+
+        # Check all examples for consistent repetition operation
+        repetitions = []
+
+        for input_grid, output_grid in train_pairs:
+            result = self.repetition_detector.detect_repetition(input_grid, output_grid)
+            if result:
+                repetitions.append(result)
+
+        # If same repetition operation appears in all examples
+        if repetitions and len(repetitions) == len(train_pairs):
+            # Check if all examples show same operation
+            operations = [r['name'] for r in repetitions]
+            if len(set(operations)) == 1:
+                # All examples have same repetition operation
+                rep = repetitions[0]
+                return {
+                    'type': rep['type'],
+                    'name': rep['name'],
+                    'description': rep['description'],
+                    'parameters': rep.get('parameters', {})
+                }
 
         return None
 
