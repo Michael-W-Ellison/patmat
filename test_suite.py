@@ -122,7 +122,13 @@ def main():
         'python3 loa/loa_headless_trainer.py 5'
     )
 
-    # Test 12: Show learned patterns (Checkers)
+    # Test 12: Arimaa (3 games - slower)
+    results['Arimaa'] = run_test(
+        'Arimaa (3 games)',
+        'python3 arimaa/arimaa_headless_trainer.py 3'
+    )
+
+    # Test 13: Show learned patterns (Checkers)
     results['Pattern Display'] = run_test(
         'Show learned patterns',
         'python3 checkers/checkers_headless_trainer.py --show-patterns 5'
