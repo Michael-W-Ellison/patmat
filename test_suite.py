@@ -116,7 +116,13 @@ def main():
         'python3 morris/morris_headless_trainer.py 5'
     )
 
-    # Test 11: Show learned patterns (Checkers)
+    # Test 11: Lines of Action (5 games)
+    results['Lines of Action'] = run_test(
+        'Lines of Action (5 games)',
+        'python3 loa/loa_headless_trainer.py 5'
+    )
+
+    # Test 12: Show learned patterns (Checkers)
     results['Pattern Display'] = run_test(
         'Show learned patterns',
         'python3 checkers/checkers_headless_trainer.py --show-patterns 5'
