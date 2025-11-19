@@ -2,16 +2,13 @@
 
 ## Quick Start
 
-### Install Dependencies
+**RECOMMENDED**: Use the headless (command-line) trainer, which works on all platforms without complex dependencies.
+
+### Install Core Dependencies
 
 On Windows (PowerShell):
 ```powershell
 pip install python-chess numpy scikit-learn
-```
-
-Or using the requirements file:
-```powershell
-pip install -r requirements.txt
 ```
 
 On Linux/Mac:
@@ -19,10 +16,7 @@ On Linux/Mac:
 pip3 install python-chess numpy scikit-learn
 ```
 
-Or using the requirements file:
-```bash
-pip3 install -r requirements.txt
-```
+That's it! You can now use `headless_trainer.py` for all training and pattern learning.
 
 ## Dependencies
 
