@@ -14,6 +14,7 @@ from typing import List, Dict, Tuple, Optional
 import numpy as np
 from arc_puzzle import ARCPuzzle, ARCDatasetLoader
 from universal_game_learner import GameObserver
+from arc_object_detector import ObjectTransformationDetector
 
 
 class ARCObserver(GameObserver):
@@ -32,6 +33,9 @@ class ARCObserver(GameObserver):
 
         # Create ARC-specific tables
         self._init_arc_tables()
+
+        # Initialize object detector
+        self.object_detector = ObjectTransformationDetector()
 
     def _init_arc_tables(self):
         """Create tables for ARC-specific pattern learning"""
@@ -165,6 +169,11 @@ class ARCObserver(GameObserver):
         color_pattern = self._detect_color_transformation(train_pairs)
         if color_pattern:
             patterns_detected.append(color_pattern)
+
+        # 5. Check for object-based transformations
+        object_pattern = self._detect_object_transformation(train_pairs)
+        if object_pattern:
+            patterns_detected.append(object_pattern)
 
         # Record discovered patterns
         for pattern in patterns_detected:
@@ -319,6 +328,10 @@ class ARCObserver(GameObserver):
             for (i, j), in_color in np.ndenumerate(input_np):
                 out_color = output_np[i, j]
 
+                # Convert numpy types to Python native types for JSON serialization
+                in_color = int(in_color)
+                out_color = int(out_color)
+
                 if in_color in color_map:
                     if color_map[in_color] != out_color:
                         # Inconsistent mapping
@@ -342,6 +355,77 @@ class ARCObserver(GameObserver):
                     'description': f'Remap colors: {color_map}',
                     'parameters': {'mapping': color_map}
                 }
+
+        return None
+
+    def _detect_object_transformation(self, train_pairs) -> Optional[Dict]:
+        """Detect object-based transformations (movement, copying, recoloring)"""
+
+        # Analyze transformations for each example
+        transformations_by_type = {}
+
+        for input_grid, output_grid in train_pairs:
+            result = self.object_detector.detect_transformation(input_grid, output_grid)
+
+            if result['transformations']:
+                for trans in result['transformations']:
+                    trans_type = trans['type']
+                    if trans_type not in transformations_by_type:
+                        transformations_by_type[trans_type] = []
+                    transformations_by_type[trans_type].append(trans)
+
+        # Check if consistent transformation across all examples
+        for trans_type, trans_list in transformations_by_type.items():
+            if len(trans_list) == len(train_pairs):
+                # This transformation appears in all examples
+
+                if trans_type == 'uniform_movement':
+                    # Check if all movements have same delta
+                    deltas = [t['delta'] for t in trans_list]
+                    if len(set(deltas)) == 1:
+                        delta = deltas[0]
+                        return {
+                            'type': 'object',
+                            'name': f'object_move_{delta[0]:.0f}_{delta[1]:.0f}',
+                            'description': f'Move all objects by ({delta[0]:.0f}, {delta[1]:.0f})',
+                            'parameters': {'delta': delta, 'operation': 'movement'}
+                        }
+
+                elif trans_type == 'object_copying':
+                    # Objects were copied
+                    copies = trans_list[0]['copies']  # Assume consistent
+                    return {
+                        'type': 'object',
+                        'name': 'object_copying',
+                        'description': f'Copy objects: {copies}',
+                        'parameters': {'copies': copies, 'operation': 'copying'}
+                    }
+
+                elif trans_type == 'object_recoloring':
+                    # Check if color mapping is consistent
+                    color_maps = [t['color_map'] for t in trans_list]
+                    # Convert to comparable format
+                    color_maps_str = [str(sorted(cm.items())) for cm in color_maps]
+                    if len(set(color_maps_str)) == 1:
+                        color_map = color_maps[0]
+                        return {
+                            'type': 'object',
+                            'name': 'object_recoloring',
+                            'description': f'Recolor objects: {color_map}',
+                            'parameters': {'color_map': color_map, 'operation': 'recoloring'}
+                        }
+
+                elif trans_type == 'object_scaling':
+                    # Objects were scaled
+                    scales = [(t['scale_h'], t['scale_w']) for t in trans_list]
+                    if len(set(scales)) == 1:
+                        scale_h, scale_w = scales[0]
+                        return {
+                            'type': 'object',
+                            'name': f'object_scale_{scale_h}x{scale_w}',
+                            'description': f'Scale objects by {scale_h}x{scale_w}',
+                            'parameters': {'scale_h': scale_h, 'scale_w': scale_w, 'operation': 'scaling'}
+                        }
 
         return None
 

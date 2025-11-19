@@ -1,0 +1,651 @@
+======================================================================
+ARC PATTERN LEARNING - Full Dataset Training
+======================================================================
+
+Initializing ARCObserver...
+Loading complete training dataset...
+Loaded 400 training puzzles
+
+Observing 400 puzzles to learn patterns...
+This may take a minute...
+
+Observing puzzle: 007bbfb7 (5 examples)
+  → Detected: Output is 3x scaled version of input
+Observing puzzle: 00d62c1b (5 examples)
+Observing puzzle: 017c7c7b (3 examples)
+  → Detected: Output is scaled 1.5x1.0
+Observing puzzle: 025d127b (2 examples)
+Observing puzzle: 045e512c (3 examples)
+Observing puzzle: 0520fde7 (3 examples)
+  → Detected: Output is scaled 1.0x0.42857142857142855
+Observing puzzle: 05269061 (3 examples)
+Observing puzzle: 05f2a901 (3 examples)
+Observing puzzle: 06df4c85 (3 examples)
+Observing puzzle: 08ed6ac7 (2 examples)
+Observing puzzle: 09629e4f (4 examples)
+Observing puzzle: 0962bcdd (2 examples)
+Observing puzzle: 0a938d79 (4 examples)
+Observing puzzle: 0b148d64 (3 examples)
+Observing puzzle: 0ca9ddb6 (3 examples)
+Observing puzzle: 0d3d703e (4 examples)
+Observing puzzle: 0dfd9992 (3 examples)
+Observing puzzle: 0e206a2e (3 examples)
+Observing puzzle: 10fcaaa3 (4 examples)
+  → Detected: Output is 2x scaled version of input
+Observing puzzle: 11852cab (3 examples)
+Observing puzzle: 1190e5a7 (3 examples)
+Observing puzzle: 137eaa0f (3 examples)
+  → Detected: Output is scaled 0.2727272727272727x0.2727272727272727
+Observing puzzle: 150deff5 (3 examples)
+Observing puzzle: 178fcbfb (3 examples)
+Observing puzzle: 1a07d186 (3 examples)
+Observing puzzle: 1b2d62fb (5 examples)
+  → Detected: Output is scaled 1.0x0.42857142857142855
+Observing puzzle: 1b60fb0c (3 examples)
+Observing puzzle: 1bfc4729 (2 examples)
+Observing puzzle: 1c786137 (3 examples)
+Observing puzzle: 1caeab9d (3 examples)
+Observing puzzle: 1cf80156 (3 examples)
+Observing puzzle: 1e0a9b12 (3 examples)
+Observing puzzle: 1e32b0e9 (3 examples)
+Observing puzzle: 1f0c79e5 (4 examples)
+Observing puzzle: 1f642eb9 (3 examples)
+Observing puzzle: 1f85a75f (2 examples)
+Observing puzzle: 1f876c06 (3 examples)
+Observing puzzle: 1fad071e (3 examples)
+  → Detected: Output is scaled 0.1111111111111111x0.5555555555555556
+Observing puzzle: 2013d3e2 (2 examples)
+  → Detected: Output is scaled 0.3x0.3
+Observing puzzle: 2204b7a8 (3 examples)
+Observing puzzle: 22168020 (3 examples)
+Observing puzzle: 22233c11 (3 examples)
+Observing puzzle: 2281f1f4 (3 examples)
+Observing puzzle: 228f6490 (3 examples)
+Observing puzzle: 22eb0ac0 (3 examples)
+  → Detected: Tile input in 1x1 pattern
+Observing puzzle: 234bbc79 (4 examples)
+Observing puzzle: 23581191 (2 examples)
+Observing puzzle: 239be575 (6 examples)
+Observing puzzle: 23b5c85d (5 examples)
+Progress: 50/400 puzzles (34.3 puzzles/sec)
+Observing puzzle: 253bf280 (8 examples)
+  → Detected: Tile input in 1x1 pattern
+Observing puzzle: 25d487eb (3 examples)
+Observing puzzle: 25d8a9c8 (4 examples)
+Observing puzzle: 25ff71a9 (4 examples)
+Observing puzzle: 264363fd (3 examples)
+Observing puzzle: 272f95fa (2 examples)
+Observing puzzle: 27a28665 (7 examples)
+  → Detected: Output is scaled 0.3333333333333333x0.3333333333333333
+Observing puzzle: 28bf18c6 (3 examples)
+  → Detected: Output is scaled 0.375x0.75
+Observing puzzle: 28e73c20 (5 examples)
+Observing puzzle: 29623171 (3 examples)
+Observing puzzle: 29c11459 (2 examples)
+Observing puzzle: 29ec7d0e (4 examples)
+Observing puzzle: 2bcee788 (4 examples)
+Observing puzzle: 2bee17df (3 examples)
+Observing puzzle: 2c608aff (4 examples)
+Observing puzzle: 2dc579da (3 examples)
+Observing puzzle: 2dd70a9a (3 examples)
+Observing puzzle: 2dee498d (3 examples)
+  → Detected: Output is scaled 1.0x0.3333333333333333
+Observing puzzle: 31aa019c (3 examples)
+Observing puzzle: 321b1fc6 (2 examples)
+Observing puzzle: 32597951 (3 examples)
+Observing puzzle: 3345333e (2 examples)
+Observing puzzle: 3428a4f5 (4 examples)
+  → Detected: Output is scaled 0.46153846153846156x1.0
+Observing puzzle: 3618c87e (3 examples)
+Observing puzzle: 3631a71a (4 examples)
+Observing puzzle: 363442ee (3 examples)
+Observing puzzle: 36d67576 (3 examples)
+Observing puzzle: 36fdfd69 (3 examples)
+Observing puzzle: 3906de3d (3 examples)
+Observing puzzle: 39a8645d (3 examples)
+  → Detected: Output is scaled 0.21428571428571427x0.21428571428571427
+Observing puzzle: 39e1d7f9 (3 examples)
+Observing puzzle: 3aa6fb7a (2 examples)
+Observing puzzle: 3ac3eb23 (2 examples)
+Observing puzzle: 3af2c5a8 (3 examples)
+  → Detected: Output is 2x scaled version of input
+Observing puzzle: 3bd67248 (3 examples)
+Observing puzzle: 3bdb4ada (2 examples)
+Observing puzzle: 3befdf3e (3 examples)
+Observing puzzle: 3c9b0459 (4 examples)
+  → Detected: Apply rotate 180 to input
+Observing puzzle: 3de23699 (4 examples)
+Observing puzzle: 3e980e27 (4 examples)
+Observing puzzle: 3eda0437 (4 examples)
+Observing puzzle: 3f7978a0 (3 examples)
+Observing puzzle: 40853293 (2 examples)
+Observing puzzle: 4093f84a (3 examples)
+Observing puzzle: 41e4d17e (2 examples)
+Observing puzzle: 4258a5f9 (2 examples)
+Observing puzzle: 4290ef0e (3 examples)
+Observing puzzle: 42a50994 (4 examples)
+Observing puzzle: 4347f46a (3 examples)
+Observing puzzle: 444801d8 (3 examples)
+Progress: 100/400 puzzles (35.4 puzzles/sec)
+Observing puzzle: 445eab21 (3 examples)
+  → Detected: Output is scaled 0.2x0.2
+Observing puzzle: 447fd412 (3 examples)
+Observing puzzle: 44d8ac46 (4 examples)
+  → Detected: Tile input in 1x1 pattern
+Observing puzzle: 44f52bb0 (6 examples)
+  → Detected: Output is scaled 0.3333333333333333x0.3333333333333333
+Observing puzzle: 4522001f (2 examples)
+  → Detected: Output is 3x scaled version of input
+Observing puzzle: 4612dd53 (3 examples)
+Observing puzzle: 46442a0e (3 examples)
+  → Detected: Output is 2x scaled version of input
+Observing puzzle: 469497ad (3 examples)
+Observing puzzle: 46f33fce (3 examples)
+  → Detected: Output is 2x scaled version of input
+Observing puzzle: 47c1f68c (3 examples)
+Observing puzzle: 484b58aa (3 examples)
+Observing puzzle: 48d8fb45 (3 examples)
+  → Detected: Output is scaled 0.3x0.3
+Observing puzzle: 4938f0c2 (3 examples)
+  → Detected: Tile input in 1x1 pattern
+Observing puzzle: 496994bd (2 examples)
+Observing puzzle: 49d1d64f (3 examples)
+Observing puzzle: 4be741c5 (3 examples)
+Observing puzzle: 4c4377d9 (4 examples)
+  → Detected: Output is scaled 2.0x1.0
+Observing puzzle: 4c5c2cf0 (3 examples)
+Observing puzzle: 50846271 (4 examples)
+Observing puzzle: 508bd3b6 (3 examples)
+Observing puzzle: 50cb2852 (3 examples)
+Observing puzzle: 5117e062 (3 examples)
+  → Detected: Output is scaled 0.23076923076923078x0.23076923076923078
+Observing puzzle: 5168d44c (3 examples)
+Observing puzzle: 539a4f51 (3 examples)
+  → Detected: Output is 2x scaled version of input
+Observing puzzle: 53b68214 (3 examples)
+  → Detected: Tile input in 2x1 pattern
+Observing puzzle: 543a7ed5 (2 examples)
+Observing puzzle: 54d82841 (3 examples)
+Observing puzzle: 54d9e175 (4 examples)
+Observing puzzle: 5521c0d9 (3 examples)
+Observing puzzle: 5582e5ca (3 examples)
+Observing puzzle: 5614dbcf (2 examples)
+  → Detected: Output is scaled 0.3333333333333333x0.3333333333333333
+Observing puzzle: 56dc2b01 (3 examples)
+Observing puzzle: 56ff96f3 (4 examples)
+Observing puzzle: 57aa92db (4 examples)
+Observing puzzle: 5ad4f10b (3 examples)
+Observing puzzle: 5bd6f4ac (4 examples)
+  → Detected: Output is scaled 0.3333333333333333x0.3333333333333333
+Observing puzzle: 5c0a986e (3 examples)
+Observing puzzle: 5c2c9af4 (3 examples)
+Observing puzzle: 5daaa586 (3 examples)
+Observing puzzle: 60b61512 (2 examples)
+Observing puzzle: 6150a2bd (2 examples)
+  → Detected: Apply rotate 180 to input
+  → Detected: Remap colors: {7: 7, 5: 8, 0: 3, 3: 0, 8: 5}
+Observing puzzle: 623ea044 (3 examples)
+Observing puzzle: 62c24649 (3 examples)
+  → Detected: Output is 2x scaled version of input
+Observing puzzle: 63613498 (3 examples)
+Observing puzzle: 6430c8c4 (4 examples)
+  → Detected: Output is scaled 0.4444444444444444x1.0
+Observing puzzle: 6455b5f5 (4 examples)
+Observing puzzle: 662c240a (4 examples)
+  → Detected: Output is scaled 0.3333333333333333x1.0
+Observing puzzle: 67385a82 (4 examples)
+Observing puzzle: 673ef223 (3 examples)
+Observing puzzle: 6773b310 (4 examples)
+  → Detected: Output is scaled 0.2727272727272727x0.2727272727272727
+Progress: 150/400 puzzles (35.1 puzzles/sec)
+Observing puzzle: 67a3c6ac (3 examples)
+  → Detected: Apply horizontal flip to input
+Observing puzzle: 67a423a3 (3 examples)
+Observing puzzle: 67e8384a (4 examples)
+  → Detected: Output is 2x scaled version of input
+Observing puzzle: 681b3aeb (3 examples)
+  → Detected: Output is scaled 0.3x0.3
+Observing puzzle: 6855a6e4 (3 examples)
+Observing puzzle: 68b16354 (3 examples)
+  → Detected: Apply vertical flip to input
+Observing puzzle: 694f12f3 (2 examples)
+Observing puzzle: 6a1e5592 (2 examples)
+Observing puzzle: 6aa20dc0 (3 examples)
+Observing puzzle: 6b9890af (3 examples)
+Observing puzzle: 6c434453 (2 examples)
+Observing puzzle: 6cdd2623 (3 examples)
+Observing puzzle: 6cf79266 (3 examples)
+Observing puzzle: 6d0160f0 (4 examples)
+Observing puzzle: 6d0aefbc (4 examples)
+  → Detected: Output is scaled 1.0x2.0
+Observing puzzle: 6d58a25d (3 examples)
+Observing puzzle: 6d75e8bb (3 examples)
+Observing puzzle: 6e02f1e3 (5 examples)
+Observing puzzle: 6e19193c (2 examples)
+Observing puzzle: 6e82a1ae (3 examples)
+Observing puzzle: 6ecd11f4 (3 examples)
+Observing puzzle: 6f8cd79b (4 examples)
+Observing puzzle: 6fa7a44f (4 examples)
+  → Detected: Output is scaled 2.0x1.0
+Observing puzzle: 72322fa7 (3 examples)
+Observing puzzle: 72ca375d (3 examples)
+Observing puzzle: 73251a56 (3 examples)
+Observing puzzle: 7447852a (3 examples)
+Observing puzzle: 7468f01a (3 examples)
+Observing puzzle: 746b3537 (5 examples)
+Observing puzzle: 74dd1130 (4 examples)
+  → Detected: Apply transpose to input
+Observing puzzle: 75b8110e (5 examples)
+  → Detected: Output is scaled 0.5x0.5
+Observing puzzle: 760b3cac (3 examples)
+Observing puzzle: 776ffc46 (4 examples)
+Observing puzzle: 77fdfe62 (3 examples)
+Observing puzzle: 780d0b14 (3 examples)
+Observing puzzle: 7837ac64 (4 examples)
+Observing puzzle: 794b24be (10 examples)
+Observing puzzle: 7b6016b9 (3 examples)
+Observing puzzle: 7b7f7511 (3 examples)
+Observing puzzle: 7c008303 (3 examples)
+  → Detected: Output is scaled 0.6666666666666666x0.6666666666666666
+Observing puzzle: 7ddcd7ec (3 examples)
+Observing puzzle: 7df24a62 (4 examples)
+Observing puzzle: 7e0986d6 (2 examples)
+Observing puzzle: 7f4411dc (3 examples)
+Observing puzzle: 7fe24cdd (3 examples)
+  → Detected: Output is 2x scaled version of input
+Observing puzzle: 80af3007 (3 examples)
+  → Detected: Output is scaled 0.5625x0.5
+Observing puzzle: 810b9b61 (3 examples)
+Observing puzzle: 82819916 (4 examples)
+Observing puzzle: 83302e8f (3 examples)
+Observing puzzle: 834ec97d (3 examples)
+Progress: 200/400 puzzles (34.3 puzzles/sec)
+Observing puzzle: 8403a5d5 (3 examples)
+Observing puzzle: 846bdb03 (4 examples)
+Observing puzzle: 855e0971 (4 examples)
+Observing puzzle: 85c4e7cd (4 examples)
+Observing puzzle: 868de0fa (5 examples)
+Observing puzzle: 8731374e (3 examples)
+Observing puzzle: 88a10436 (3 examples)
+Observing puzzle: 88a62173 (3 examples)
+  → Detected: Output is scaled 0.4x0.4
+Observing puzzle: 890034e9 (3 examples)
+Observing puzzle: 8a004b2b (3 examples)
+Observing puzzle: 8be77c9e (3 examples)
+  → Detected: Output is scaled 2.0x1.0
+Observing puzzle: 8d5021e8 (3 examples)
+  → Detected: Output is scaled 3.0x2.0
+Observing puzzle: 8d510a79 (2 examples)
+Observing puzzle: 8e1813be (3 examples)
+Observing puzzle: 8e5a5113 (3 examples)
+Observing puzzle: 8eb1be9a (2 examples)
+Observing puzzle: 8efcae92 (3 examples)
+Observing puzzle: 8f2ea7aa (3 examples)
+Observing puzzle: 90c28cc7 (3 examples)
+Observing puzzle: 90f3ed37 (3 examples)
+Observing puzzle: 913fb3ed (4 examples)
+Observing puzzle: 91413438 (4 examples)
+Observing puzzle: 91714a58 (3 examples)
+Observing puzzle: 9172f3a0 (2 examples)
+  → Detected: Output is 3x scaled version of input
+Observing puzzle: 928ad970 (3 examples)
+Observing puzzle: 93b581b8 (3 examples)
+Observing puzzle: 941d9a10 (3 examples)
+Observing puzzle: 94f9d214 (4 examples)
+  → Detected: Output is scaled 0.5x1.0
+Observing puzzle: 952a094c (3 examples)
+Observing puzzle: 9565186b (4 examples)
+Observing puzzle: 95990924 (3 examples)
+Observing puzzle: 963e52fc (3 examples)
+  → Detected: Output is scaled 1.0x2.0
+  → Detected: Tile input in 1x2 pattern
+Observing puzzle: 97999447 (3 examples)
+Observing puzzle: 97a05b5b (3 examples)
+Observing puzzle: 98cf29f8 (3 examples)
+Observing puzzle: 995c5fa3 (4 examples)
+  → Detected: Output is scaled 0.75x0.21428571428571427
+Observing puzzle: 99b1bc43 (4 examples)
+  → Detected: Output is scaled 0.4444444444444444x1.0
+Observing puzzle: 99fa7670 (4 examples)
+Observing puzzle: 9aec4887 (3 examples)
+Observing puzzle: 9af7a82c (4 examples)
+Observing puzzle: 9d9215db (3 examples)
+Observing puzzle: 9dfd6313 (3 examples)
+  → Detected: Apply transpose to input
+Observing puzzle: 9ecd008a (3 examples)
+  → Detected: Output is scaled 0.1875x0.1875
+Observing puzzle: 9edfc990 (3 examples)
+Observing puzzle: 9f236235 (3 examples)
+Observing puzzle: a1570a43 (4 examples)
+Observing puzzle: a2fd1cf0 (3 examples)
+Observing puzzle: a3325580 (6 examples)
+Observing puzzle: a3df8b1e (3 examples)
+Observing puzzle: a416b8f3 (3 examples)
+  → Detected: Output is scaled 1.0x2.0
+  → Detected: Tile input in 1x2 pattern
+Progress: 250/400 puzzles (33.8 puzzles/sec)
+Observing puzzle: a48eeaf7 (2 examples)
+Observing puzzle: a5313dff (3 examples)
+Observing puzzle: a5f85a15 (3 examples)
+Observing puzzle: a61ba2ce (2 examples)
+  → Detected: Output is scaled 0.3076923076923077x0.3076923076923077
+Observing puzzle: a61f2674 (2 examples)
+Observing puzzle: a64e4611 (3 examples)
+Observing puzzle: a65b410d (3 examples)
+Observing puzzle: a68b268e (6 examples)
+  → Detected: Output is scaled 0.4444444444444444x0.4444444444444444
+Observing puzzle: a699fb00 (3 examples)
+Observing puzzle: a740d043 (3 examples)
+Observing puzzle: a78176bb (3 examples)
+Observing puzzle: a79310a0 (3 examples)
+Observing puzzle: a85d4709 (4 examples)
+  → Detected: Remap colors: {5: 3, 0: 3}
+Observing puzzle: a87f7484 (4 examples)
+Observing puzzle: a8c38be5 (2 examples)
+Observing puzzle: a8d7556c (3 examples)
+Observing puzzle: a9f96cdd (4 examples)
+Observing puzzle: aabf363d (2 examples)
+Observing puzzle: aba27056 (3 examples)
+Observing puzzle: ac0a08a4 (3 examples)
+Observing puzzle: ae3edfdc (3 examples)
+Observing puzzle: ae4f1146 (4 examples)
+  → Detected: Output is scaled 0.3333333333333333x0.3333333333333333
+Observing puzzle: aedd82e4 (4 examples)
+Observing puzzle: af902bf9 (3 examples)
+Observing puzzle: b0c4d837 (6 examples)
+Observing puzzle: b190f7f5 (3 examples)
+Observing puzzle: b1948b0a (3 examples)
+  → Detected: Remap colors: {6: 2, 7: 7}
+Observing puzzle: b230c067 (3 examples)
+Observing puzzle: b27ca6d3 (2 examples)
+Observing puzzle: b2862040 (4 examples)
+Observing puzzle: b527c5c6 (4 examples)
+Observing puzzle: b548a754 (3 examples)
+Observing puzzle: b60334d2 (2 examples)
+Observing puzzle: b6afb2da (2 examples)
+Observing puzzle: b7249182 (3 examples)
+Observing puzzle: b775ac94 (3 examples)
+Observing puzzle: b782dc8a (2 examples)
+Observing puzzle: b8825c91 (4 examples)
+Observing puzzle: b8cdaf2b (4 examples)
+Observing puzzle: b91ae062 (5 examples)
+Observing puzzle: b94a9452 (3 examples)
+Observing puzzle: b9b7f026 (3 examples)
+Observing puzzle: ba26e723 (5 examples)
+Observing puzzle: ba97ae07 (4 examples)
+Observing puzzle: bb43febb (2 examples)
+Observing puzzle: bbc9ae5d (5 examples)
+Observing puzzle: bc1d5164 (5 examples)
+  → Detected: Output is scaled 0.6x0.42857142857142855
+Observing puzzle: bd4472b8 (3 examples)
+Observing puzzle: bda2d7a6 (3 examples)
+Observing puzzle: bdad9b1f (2 examples)
+Progress: 300/400 puzzles (33.8 puzzles/sec)
+Observing puzzle: be94b721 (4 examples)
+Observing puzzle: beb8660c (3 examples)
+Observing puzzle: c0f76784 (3 examples)
+Observing puzzle: c1d99e64 (3 examples)
+Observing puzzle: c3e719e8 (3 examples)
+  → Detected: Output is 3x scaled version of input
+Observing puzzle: c3f564a4 (3 examples)
+Observing puzzle: c444b776 (2 examples)
+Observing puzzle: c59eb873 (3 examples)
+  → Detected: Output is 2x scaled version of input
+Observing puzzle: c8cbb738 (3 examples)
+Observing puzzle: c8f0f002 (3 examples)
+  → Detected: Remap colors: {8: 8, 1: 1, 7: 5}
+Observing puzzle: c909285e (3 examples)
+Observing puzzle: c9e6f938 (3 examples)
+  → Detected: Output is scaled 1.0x2.0
+Observing puzzle: c9f8e694 (2 examples)
+Observing puzzle: caa06a1f (3 examples)
+Observing puzzle: cbded52d (3 examples)
+Observing puzzle: cce03e0d (3 examples)
+  → Detected: Output is 3x scaled version of input
+Observing puzzle: cdecee7f (3 examples)
+  → Detected: Output is scaled 0.3x0.3
+Observing puzzle: ce22a75a (2 examples)
+Observing puzzle: ce4f8723 (4 examples)
+  → Detected: Output is scaled 0.4444444444444444x1.0
+Observing puzzle: ce602527 (4 examples)
+Observing puzzle: ce9e57f2 (3 examples)
+Observing puzzle: cf98881b (5 examples)
+  → Detected: Output is scaled 1.0x0.2857142857142857
+Observing puzzle: d037b0a7 (3 examples)
+Observing puzzle: d06dbe63 (2 examples)
+Observing puzzle: d07ae81c (3 examples)
+Observing puzzle: d0f5fe59 (3 examples)
+Observing puzzle: d10ecb37 (3 examples)
+Observing puzzle: d13f3404 (3 examples)
+  → Detected: Output is 2x scaled version of input
+Observing puzzle: d22278a0 (4 examples)
+Observing puzzle: d23f8c26 (3 examples)
+  → Detected: Remap colors: {4: 4, 9: 0, 0: 0, 3: 3, 6: 0, 1: 0}
+Observing puzzle: d2abd087 (3 examples)
+Observing puzzle: d364b489 (2 examples)
+Observing puzzle: d406998b (4 examples)
+Observing puzzle: d43fd935 (3 examples)
+Observing puzzle: d4469b4b (7 examples)
+  → Detected: Output is scaled 0.6x0.6
+Observing puzzle: d4a91cb9 (3 examples)
+Observing puzzle: d4f3cd78 (2 examples)
+Observing puzzle: d511f180 (3 examples)
+Observing puzzle: d5d6de2d (3 examples)
+Observing puzzle: d631b094 (4 examples)
+Observing puzzle: d687bc17 (3 examples)
+Observing puzzle: d6ad076f (3 examples)
+Observing puzzle: d89b689b (3 examples)
+Observing puzzle: d8c310e9 (3 examples)
+Observing puzzle: d90796e8 (3 examples)
+  → Detected: Remap colors: {3: 8, 5: 5, 2: 0, 0: 0}
+Observing puzzle: d9f24cd1 (2 examples)
+Observing puzzle: d9fac9be (4 examples)
+Observing puzzle: dae9d2b5 (5 examples)
+  → Detected: Output is scaled 1.0x0.5
+Observing puzzle: db3e9e38 (2 examples)
+Observing puzzle: db93a21d (4 examples)
+Progress: 350/400 puzzles (34.3 puzzles/sec)
+Observing puzzle: dbc1a6ce (4 examples)
+Observing puzzle: dc0a314f (3 examples)
+  → Detected: Output is scaled 0.3125x0.3125
+Observing puzzle: dc1df850 (3 examples)
+Observing puzzle: dc433765 (7 examples)
+Observing puzzle: ddf7fa4f (3 examples)
+Observing puzzle: de1cd16c (4 examples)
+Observing puzzle: ded97339 (3 examples)
+Observing puzzle: e179c5f4 (3 examples)
+Observing puzzle: e21d9049 (2 examples)
+Observing puzzle: e26a3af2 (3 examples)
+Observing puzzle: e3497940 (3 examples)
+  → Detected: Output is scaled 1.0x0.4444444444444444
+Observing puzzle: e40b9e2f (3 examples)
+Observing puzzle: e48d4e1a (4 examples)
+Observing puzzle: e5062a87 (3 examples)
+Observing puzzle: e509e548 (3 examples)
+Observing puzzle: e50d258f (3 examples)
+Observing puzzle: e6721834 (3 examples)
+Observing puzzle: e73095fd (3 examples)
+Observing puzzle: e76a88a6 (2 examples)
+Observing puzzle: e8593010 (3 examples)
+Observing puzzle: e8dc4411 (3 examples)
+Observing puzzle: e9614598 (2 examples)
+Observing puzzle: e98196ab (3 examples)
+  → Detected: Output is scaled 0.45454545454545453x1.0
+Observing puzzle: e9afcf9a (2 examples)
+Observing puzzle: ea32f347 (4 examples)
+Observing puzzle: ea786f4a (3 examples)
+Observing puzzle: eb281b96 (2 examples)
+Observing puzzle: eb5a1d5d (3 examples)
+Observing puzzle: ec883f72 (4 examples)
+Observing puzzle: ecdecbb3 (3 examples)
+Observing puzzle: ed36ccf7 (4 examples)
+Observing puzzle: ef135b50 (3 examples)
+Observing puzzle: f15e1fac (3 examples)
+Observing puzzle: f1cefba8 (3 examples)
+Observing puzzle: f25fbde4 (3 examples)
+Observing puzzle: f25ffba3 (2 examples)
+Observing puzzle: f2829549 (5 examples)
+  → Detected: Output is scaled 1.0x0.42857142857142855
+Observing puzzle: f35d900a (4 examples)
+Observing puzzle: f5b8619d (3 examples)
+  → Detected: Output is 2x scaled version of input
+Observing puzzle: f76d97a5 (3 examples)
+Observing puzzle: f8a8fe49 (3 examples)
+Observing puzzle: f8b3ba0a (4 examples)
+Observing puzzle: f8c80d96 (3 examples)
+Observing puzzle: f8ff0b80 (3 examples)
+  → Detected: Output is scaled 0.25x0.08333333333333333
+Observing puzzle: f9012d9b (3 examples)
+Observing puzzle: fafffa47 (5 examples)
+  → Detected: Output is scaled 0.5x1.0
+Observing puzzle: fcb5c309 (3 examples)
+Observing puzzle: fcc82909 (3 examples)
+Observing puzzle: feca6190 (5 examples)
+Observing puzzle: ff28f65a (8 examples)
+Progress: 400/400 puzzles (34.5 puzzles/sec)
+Observing puzzle: ff805c23 (3 examples)
+  → Detected: Output is scaled 0.20833333333333334x0.20833333333333334
+
+======================================================================
+Training Complete!
+======================================================================
+Time elapsed: 11.6 seconds
+Processing rate: 34.5 puzzles/sec
+Total examples observed: 1302
+Average examples per puzzle: 3.25
+
+======================================================================
+LEARNED PATTERNS: ARC TRANSFORMATIONS
+======================================================================
+
+SCALING PATTERNS:
+Pattern                        Count      Description                             
+----------------------------------------------------------------------
+uniform_scale_2x               16         Output is 2x scaled version of input    
+anisotropic_scale_0.3333333333333333x0.3333333333333333 9          Output is scaled 0.3333333333333333x0.3333333333333333
+uniform_scale_3x               7          Output is 3x scaled version of input    
+anisotropic_scale_0.3x0.3      6          Output is scaled 0.3x0.3                
+anisotropic_scale_1.0x0.42857142857142855 5          Output is scaled 1.0x0.42857142857142855
+anisotropic_scale_2.0x1.0      4          Output is scaled 2.0x1.0                
+anisotropic_scale_1.0x2.0      4          Output is scaled 1.0x2.0                
+anisotropic_scale_0.2727272727272727x0.2727272727272727 3          Output is scaled 0.2727272727272727x0.2727272727272727
+anisotropic_scale_0.4444444444444444x1.0 3          Output is scaled 0.4444444444444444x1.0 
+anisotropic_scale_1.5x1.0      2          Output is scaled 1.5x1.0                
+anisotropic_scale_0.1111111111111111x0.5555555555555556 2          Output is scaled 0.1111111111111111x0.5555555555555556
+anisotropic_scale_0.375x0.75   2          Output is scaled 0.375x0.75             
+anisotropic_scale_1.0x0.3333333333333333 2          Output is scaled 1.0x0.3333333333333333 
+anisotropic_scale_0.46153846153846156x1.0 2          Output is scaled 0.46153846153846156x1.0
+anisotropic_scale_0.21428571428571427x0.21428571428571427 2          Output is scaled 0.21428571428571427x0.21428571428571427
+anisotropic_scale_0.2x0.2      2          Output is scaled 0.2x0.2                
+anisotropic_scale_0.23076923076923078x0.23076923076923078 2          Output is scaled 0.23076923076923078x0.23076923076923078
+anisotropic_scale_0.5x1.0      2          Output is scaled 0.5x1.0                
+anisotropic_scale_0.3333333333333333x1.0 1          Output is scaled 0.3333333333333333x1.0 
+anisotropic_scale_0.5x0.5      1          Output is scaled 0.5x0.5                
+anisotropic_scale_0.6666666666666666x0.6666666666666666 1          Output is scaled 0.6666666666666666x0.6666666666666666
+anisotropic_scale_0.5625x0.5   1          Output is scaled 0.5625x0.5             
+anisotropic_scale_0.4x0.4      1          Output is scaled 0.4x0.4                
+anisotropic_scale_3.0x2.0      1          Output is scaled 3.0x2.0                
+anisotropic_scale_0.75x0.21428571428571427 1          Output is scaled 0.75x0.21428571428571427
+anisotropic_scale_0.1875x0.1875 1          Output is scaled 0.1875x0.1875          
+anisotropic_scale_0.3076923076923077x0.3076923076923077 1          Output is scaled 0.3076923076923077x0.3076923076923077
+anisotropic_scale_0.4444444444444444x0.4444444444444444 1          Output is scaled 0.4444444444444444x0.4444444444444444
+anisotropic_scale_0.6x0.42857142857142855 1          Output is scaled 0.6x0.42857142857142855
+anisotropic_scale_1.0x0.2857142857142857 1          Output is scaled 1.0x0.2857142857142857 
+anisotropic_scale_0.6x0.6      1          Output is scaled 0.6x0.6                
+anisotropic_scale_1.0x0.5      1          Output is scaled 1.0x0.5                
+anisotropic_scale_0.3125x0.3125 1          Output is scaled 0.3125x0.3125          
+anisotropic_scale_1.0x0.4444444444444444 1          Output is scaled 1.0x0.4444444444444444 
+anisotropic_scale_0.45454545454545453x1.0 1          Output is scaled 0.45454545454545453x1.0
+anisotropic_scale_0.25x0.08333333333333333 1          Output is scaled 0.25x0.08333333333333333
+anisotropic_scale_0.20833333333333334x0.20833333333333334 1          Output is scaled 0.20833333333333334x0.20833333333333334
+
+TILING PATTERNS:
+Pattern                        Count      Description                             
+----------------------------------------------------------------------
+tile_1x1                       8          Tile input in 1x1 pattern               
+tile_2x1                       2          Tile input in 2x1 pattern               
+tile_1x2                       2          Tile input in 1x2 pattern               
+
+COLOR_MAPPING PATTERNS:
+Pattern                        Count      Description                             
+----------------------------------------------------------------------
+color_remap                    6          Remap colors: {7: 7, 5: 8, 0: 3, 3: 0, 8: 5}
+
+SPATIAL PATTERNS:
+Pattern                        Count      Description                             
+----------------------------------------------------------------------
+rotate_180                     4          Apply rotate 180 to input               
+transpose                      2          Apply transpose to input                
+horizontal_flip                1          Apply horizontal flip to input          
+vertical_flip                  1          Apply vertical flip to input            
+
+======================================================================
+Total: 45 unique patterns, 1302 observations
+======================================================================
+
+
+======================================================================
+Detailed Pattern Analysis:
+======================================================================
+
+Pattern Type Distribution:
+Type                 Unique     Total Seen      Avg per Pattern
+----------------------------------------------------------------------
+scaling              37         94              2.54           
+tiling               3          12              4.00           
+spatial              4          8               2.00           
+color_mapping        1          6               6.00           
+
+======================================================================
+Coverage Analysis:
+======================================================================
+Total observations: 1302
+Identified patterns: 0
+Unidentified: 1302
+Coverage: 0.0%
+
+======================================================================
+Top 10 Most Common Patterns:
+======================================================================
+Pattern                        Count      Description                             
+----------------------------------------------------------------------
+uniform_scale_2x               16         Output is 2x scaled version of input    
+anisotropic_scale_0.3333333333333333x0.3333333333333333 9          Output is scaled 0.3333333333333333x0...
+tile_1x1                       8          Tile input in 1x1 pattern               
+uniform_scale_3x               7          Output is 3x scaled version of input    
+anisotropic_scale_0.3x0.3      6          Output is scaled 0.3x0.3                
+color_remap                    6          Remap colors: {7: 7, 5: 8, 0: 3, 3: 0...
+anisotropic_scale_1.0x0.42857142857142855 5          Output is scaled 1.0x0.42857142857142855
+rotate_180                     4          Apply rotate 180 to input               
+anisotropic_scale_2.0x1.0      4          Output is scaled 2.0x1.0                
+anisotropic_scale_1.0x2.0      4          Output is scaled 1.0x2.0                
+
+======================================================================
+Sample Puzzles with No Detected Patterns (20 shown):
+======================================================================
+  - 007bbfb7
+  - 00d62c1b
+  - 017c7c7b
+  - 025d127b
+  - 045e512c
+  - 0520fde7
+  - 05269061
+  - 05f2a901
+  - 06df4c85
+  - 08ed6ac7
+  - 09629e4f
+  - 0962bcdd
+  - 0a938d79
+  - 0b148d64
+  - 0ca9ddb6
+  - 0d3d703e
+  - 0dfd9992
+  - 0e206a2e
+  - 10fcaaa3
+  - 11852cab
+
+These puzzles likely require more sophisticated pattern detectors.
+
+======================================================================
+Phase 2: Full Dataset Training Complete!
+======================================================================
