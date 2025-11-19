@@ -95,10 +95,12 @@ class HeadlessTrainer:
             else:
                 move = self.play_opponent_move(board)
                 if move:
+                    # Get SAN notation BEFORE pushing the move
+                    move_san = board.san(move)
                     board.push(move)
                     move_count += 1
                     if verbose:
-                        print(f"  Opp: {board.san(move):8s}")
+                        print(f"  Opp: {move_san:8s}")
 
         # Calculate final score
         rounds_played = board.fullmove_number
