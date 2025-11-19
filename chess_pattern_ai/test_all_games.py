@@ -22,27 +22,27 @@ from checkers.checkers_scorer import CheckersScorer
 from checkers.checkers_headless_trainer import CheckersHeadlessTrainer
 
 # Import Go
-from go.go_board import GoBoard, Stone, GoColor
+from go.go_board import GoBoard, Stone, Color as GoColor
 from go.go_game import GoGame
 from go.go_scorer import GoScorer
 
 # Import Othello
-from othello.othello_board import OthelloBoard, OthelloColor
+from othello.othello_board import OthelloBoard, Color as OthelloColor
 from othello.othello_game import OthelloGame
 from othello.othello_scorer import OthelloScorer
 
 # Import Connect Four
-from connect4.connect4_board import Connect4Board, Connect4Color
+from connect4.connect4_board import Connect4Board, Color as Connect4Color
 from connect4.connect4_game import Connect4Game
 from connect4.connect4_scorer import Connect4Scorer
 
 # Import Gomoku
-from gomoku.gomoku_board import GomokuBoard, GomokuStone, GomokuColor
+from gomoku.gomoku_board import GomokuBoard, Stone as GomokuStone, Color as GomokuColor
 from gomoku.gomoku_game import GomokuGame
 from gomoku.gomoku_scorer import GomokuScorer
 
 # Import Hex
-from hex.hex_board import HexBoard, HexStone, HexColor
+from hex.hex_board import HexBoard, Stone as HexStone, Color as HexColor
 from hex.hex_game import HexGame
 from hex.hex_scorer import HexScorer
 
@@ -52,7 +52,7 @@ from dots_boxes.dots_boxes_game import DotsBoxesGame
 from dots_boxes.dots_boxes_scorer import DotsBoxesScorer
 
 # Import Breakthrough
-from breakthrough.breakthrough_board import BreakthroughBoard, BreakthroughPiece, BreakthroughColor
+from breakthrough.breakthrough_board import BreakthroughBoard, Piece as BreakthroughPiece, Color as BreakthroughColor
 from breakthrough.breakthrough_game import BreakthroughGame
 from breakthrough.breakthrough_scorer import BreakthroughScorer
 
