@@ -1,5 +1,9 @@
 # Chess Pattern AI Dependencies
 
+# ============================================================================
+# CORE DEPENDENCIES (Required for headless training and pattern learning)
+# ============================================================================
+
 # Core chess library
 python-chess>=1.9.0
 
@@ -7,26 +11,32 @@ python-chess>=1.9.0
 numpy>=1.21.0
 scikit-learn>=1.0.0
 
-# ARC puzzle solving (optional)
+# ============================================================================
+# GUI DEPENDENCIES (Optional - only needed for ai_gui.py)
+# ============================================================================
+# NOTE: The GUI has complex dependencies that are difficult to install on Windows.
+# We recommend using headless_trainer.py instead, which works on all platforms.
+#
+# If you want to use the GUI anyway:
+# pillow>=9.0.0
+# matplotlib>=3.5.0
+# cairosvg>=2.5.0  # Requires Cairo C library (see SETUP.md for Windows install)
+#
+# On Windows, installing Cairo is complex. See SETUP.md for instructions.
+# TL;DR: Use headless_trainer.py instead - it has all the same features!
+
+# ============================================================================
+# ARC PUZZLE SOLVING (Optional)
+# ============================================================================
 # scipy>=1.7.0  # Uncomment if needed for advanced features
 
-# Database (built-in with Python 3)
-# sqlite3 is part of Python standard library
-
-# All other dependencies are Python standard library:
-# - json
-# - csv
-# - sqlite3
-# - collections
-# - dataclasses
-# - typing
-# - random
-# - time
-# - datetime
-# - os
-# - sys
-# - logging
-# - tempfile
-# - shutil
-# - unittest
-# - abc
+# ============================================================================
+# STANDARD LIBRARY (No installation needed)
+# ============================================================================
+# The following are part of Python's standard library:
+# - tkinter (GUI toolkit - comes with Python on Windows)
+# - json, csv, sqlite3
+# - collections, dataclasses, typing
+# - random, time, datetime
+# - os, sys, logging
+# - tempfile, shutil, unittest, abc
