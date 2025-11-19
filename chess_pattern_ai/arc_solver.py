@@ -538,6 +538,236 @@ class ARCSolver:
         self.conn.close()
 
 
+class ARCSolverWithLearning(ARCSolver):
+    """
+    ARC Solver with continual learning capabilities
+
+    Improves performance over time by:
+    1. Tracking pattern success/failure rates
+    2. Updating pattern confidence based on results
+    3. Learning from successful solutions
+    4. Prioritizing high-confidence patterns
+    """
+
+    def __init__(self, db_path: str = 'arc_learned_full.db'):
+        super().__init__(db_path)
+        self._init_learning_tables()
+        self._last_used_pattern = None
+        self._last_puzzle_id = None
+
+    def _init_learning_tables(self):
+        """Initialize database tables for learning"""
+        # Pattern success tracking
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS pattern_performance (
+                pattern_hash TEXT PRIMARY KEY,
+                pattern_type TEXT,
+                successes INTEGER DEFAULT 0,
+                failures INTEGER DEFAULT 0,
+                confidence REAL DEFAULT 0.5,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # Puzzle solutions for retraining
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS learned_solutions (
+                puzzle_id TEXT PRIMARY KEY,
+                pattern_hash TEXT,
+                input_grid TEXT,
+                output_grid TEXT,
+                verified INTEGER DEFAULT 0,
+                added_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        self.conn.commit()
+
+    def _pattern_hash(self, pattern: Dict) -> str:
+        """Create unique hash for a pattern"""
+        import hashlib
+        pattern_str = json.dumps(pattern, sort_keys=True)
+        return hashlib.md5(pattern_str.encode()).hexdigest()
+
+    def _get_pattern_confidence(self, pattern_hash: str) -> float:
+        """Get confidence score for a pattern"""
+        self.cursor.execute('''
+            SELECT confidence FROM pattern_performance WHERE pattern_hash = ?
+        ''', (pattern_hash,))
+
+        result = self.cursor.fetchone()
+        return result[0] if result else 0.5  # Default confidence
+
+    def _update_pattern_confidence(self, pattern_hash: str, pattern_type: str, success: bool):
+        """Update pattern confidence based on success/failure"""
+        # Get current stats
+        self.cursor.execute('''
+            SELECT successes, failures FROM pattern_performance WHERE pattern_hash = ?
+        ''', (pattern_hash,))
+
+        result = self.cursor.fetchone()
+
+        if result:
+            successes, failures = result
+        else:
+            successes, failures = 0, 0
+
+        # Update counts
+        if success:
+            successes += 1
+        else:
+            failures += 1
+
+        # Calculate new confidence (success rate with smoothing)
+        total = successes + failures
+        confidence = (successes + 1) / (total + 2)  # Laplace smoothing
+
+        # Store updated stats
+        self.cursor.execute('''
+            INSERT OR REPLACE INTO pattern_performance
+            (pattern_hash, pattern_type, successes, failures, confidence, last_updated)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ''', (pattern_hash, pattern_type, successes, failures, confidence))
+
+        self.conn.commit()
+
+    def _add_solution_to_training(self, puzzle_id: str, pattern_hash: str,
+                                   input_grid: List[List[int]], output_grid: List[List[int]]):
+        """Add a successful solution to the training set"""
+        input_json = json.dumps(input_grid)
+        output_json = json.dumps(output_grid)
+
+        self.cursor.execute('''
+            INSERT OR REPLACE INTO learned_solutions
+            (puzzle_id, pattern_hash, input_grid, output_grid, verified)
+            VALUES (?, ?, ?, ?, 1)
+        ''', (puzzle_id, pattern_hash, input_json, output_json))
+
+        self.conn.commit()
+
+    def solve_and_learn(self, puzzle: ARCPuzzle, expected_output: Optional[List[List[int]]] = None) -> Optional[List[List[int]]]:
+        """
+        Solve puzzle and learn from the result
+
+        Args:
+            puzzle: ARCPuzzle to solve
+            expected_output: Expected output for validation (optional)
+
+        Returns:
+            Predicted output grid, or None if no solution found
+        """
+        # Store puzzle ID for tracking
+        self._last_puzzle_id = puzzle.puzzle_id
+
+        # Solve the puzzle
+        result = self.solve(puzzle)
+
+        # Learn from the result if we have expected output
+        if expected_output and self._last_used_pattern:
+            pattern_hash = self._pattern_hash(self._last_used_pattern)
+            pattern_type = self._last_used_pattern.get('type', 'unknown')
+
+            if result:
+                is_correct = (result == expected_output)
+
+                # Update pattern confidence
+                self._update_pattern_confidence(pattern_hash, pattern_type, is_correct)
+
+                if is_correct:
+                    # Add successful solution to training set
+                    test_input = puzzle.get_test_inputs()[0]
+                    self._add_solution_to_training(puzzle.puzzle_id, pattern_hash,
+                                                   test_input, result)
+            else:
+                # Pattern detected but failed to apply
+                self._update_pattern_confidence(pattern_hash, pattern_type, False)
+
+        return result
+
+    def _apply_pattern(self, input_grid: List[List[int]], pattern: Dict) -> Optional[List[List[int]]]:
+        """Apply pattern and track which pattern was used"""
+        self._last_used_pattern = pattern
+        return super()._apply_pattern(input_grid, pattern)
+
+    def _detect_pattern_from_examples(self, train_pairs: List[Tuple]) -> Optional[Dict]:
+        """
+        Detect pattern with confidence-based prioritization
+
+        Tries detectors in order of their learned confidence scores
+        """
+        # Get confidence scores for each pattern type
+        pattern_type_confidence = {}
+
+        self.cursor.execute('''
+            SELECT pattern_type, AVG(confidence) as avg_conf
+            FROM pattern_performance
+            GROUP BY pattern_type
+        ''')
+
+        for row in self.cursor.fetchall():
+            pattern_type, avg_conf = row
+            pattern_type_confidence[pattern_type] = avg_conf
+
+        # Define detectors
+        detectors = [
+            ('scaling', self._detect_scaling_pattern),
+            ('spatial', self._detect_spatial_pattern),
+            ('tiling', self._detect_tiling_pattern),
+            ('color_mapping', self._detect_color_pattern),
+            ('object', self._detect_object_pattern),
+            ('symmetry', self._detect_symmetry_pattern),
+            ('repetition', self._detect_repetition_pattern),
+        ]
+
+        # Sort detectors by confidence (highest first)
+        # Use default confidence of 0.5 for unseen pattern types
+        detectors_sorted = sorted(
+            detectors,
+            key=lambda x: pattern_type_confidence.get(x[0], 0.5),
+            reverse=True
+        )
+
+        # Try each detector in confidence order
+        for detector_type, detector_func in detectors_sorted:
+            pattern = detector_func(train_pairs)
+            if pattern:
+                return pattern
+
+        return None
+
+    def get_learning_stats(self) -> Dict:
+        """Get statistics about learning progress"""
+        self.cursor.execute('''
+            SELECT
+                pattern_type,
+                COUNT(*) as count,
+                AVG(confidence) as avg_confidence,
+                SUM(successes) as total_successes,
+                SUM(failures) as total_failures
+            FROM pattern_performance
+            GROUP BY pattern_type
+            ORDER BY avg_confidence DESC
+        ''')
+
+        stats = {}
+        for row in self.cursor.fetchall():
+            pattern_type, count, avg_conf, successes, failures = row
+            stats[pattern_type] = {
+                'patterns_tracked': count,
+                'avg_confidence': avg_conf,
+                'total_successes': successes,
+                'total_failures': failures,
+                'success_rate': successes / (successes + failures) if (successes + failures) > 0 else 0
+            }
+
+        return stats
+
+    def get_learned_solutions_count(self) -> int:
+        """Get count of learned solutions"""
+        self.cursor.execute('SELECT COUNT(*) FROM learned_solutions WHERE verified = 1')
+        return self.cursor.fetchone()[0]
+
+
 def main():
     """Demo: Solve sample puzzles"""
     print("="*70)
