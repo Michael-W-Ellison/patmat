@@ -1,0 +1,32 @@
+# Chess Pattern AI Dependencies
+
+# Core chess library
+python-chess>=1.9.0
+
+# Data science and machine learning
+numpy>=1.21.0
+scikit-learn>=1.0.0
+
+# ARC puzzle solving (optional)
+# scipy>=1.7.0  # Uncomment if needed for advanced features
+
+# Database (built-in with Python 3)
+# sqlite3 is part of Python standard library
+
+# All other dependencies are Python standard library:
+# - json
+# - csv
+# - sqlite3
+# - collections
+# - dataclasses
+# - typing
+# - random
+# - time
+# - datetime
+# - os
+# - sys
+# - logging
+# - tempfile
+# - shutil
+# - unittest
+# - abc
