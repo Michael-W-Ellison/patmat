@@ -318,6 +318,7 @@ class PGNPatternImporter:
         print(f"\n\n{'=' * 70}")
         print("IMPORT COMPLETE")
         print("=" * 70)
+        print(f"Database: {self.db_path}")
         print(f"Time: {elapsed:.1f}s ({elapsed/processed:.2f}s per game)")
         print(f"Processed: {processed:,} games")
         print(f"Results: {white_wins:,}W-{black_wins:,}B-{draws:,}D")
@@ -325,6 +326,14 @@ class PGNPatternImporter:
 
         # Show statistics
         self._show_statistics()
+
+        # Verify database was written
+        import os
+        db_size = os.path.getsize(self.db_path)
+        print(f"\nDatabase size: {db_size / 1024 / 1024:.1f} MB")
+
+        if db_size < 1000:
+            print("⚠ WARNING: Database is very small! Data may not have been saved properly.")
 
     def _update_pattern(self, characteristics: Dict, result: str):
         """Update pattern statistics in database"""
@@ -345,11 +354,12 @@ class PGNPatternImporter:
 
         if row:
             times_seen, won, lost, drawn = row
-            times_seen += 1
         else:
-            times_seen, won, lost, drawn = 1, 0, 0, 0
+            times_seen, won, lost, drawn = 0, 0, 0, 0
 
-        # Update based on result
+        # Update counters
+        times_seen += 1
+
         if result == 'win':
             won += 1
         elif result == 'loss':
@@ -361,24 +371,43 @@ class PGNPatternImporter:
         total_games = won + lost + drawn
         win_rate = won / total_games if total_games > 0 else 0.0
 
-        # Confidence based on sample size (sigmoid curve)
-        confidence = min(1.0, times_seen / 100.0)
+        # Confidence increases with more observations (same as LearnableMovePrioritizer)
+        confidence = min(1.0, total_games / 50.0)  # Max confidence at 50+ games
 
-        # Priority score: win_rate weighted by confidence
-        priority_score = win_rate * confidence * 100
-
-        # Calculate score (similar to game scoring)
-        total_score = won * 50 - lost * 50  # Simplified scoring
+        # Calculate differential score (same as LearnableMovePrioritizer)
+        # Win = +1050 avg, Loss = -800 avg, Draw = 0
+        # This matches the differential scoring system used in training
+        total_score = won * 1050 + drawn * 0 - lost * 800
         avg_score = total_score / total_games if total_games > 0 else 0.0
 
-        # Insert or update
+        # Priority score: DIFFERENTIAL SCORE-BASED (same as LearnableMovePrioritizer)
+        # Normalize -1500 to +1600 → 0 to 100
+        normalized_score = (avg_score + 1500) / 31  # Maps score range to 0-100
+        priority_score = normalized_score * confidence  # 0-100, confidence-weighted
+
+        # Insert or update (use ON CONFLICT like LearnableMovePrioritizer)
         self.cursor.execute('''
-            INSERT OR REPLACE INTO learned_move_patterns
-            (piece_type, move_category, distance_from_start, game_phase,
-             times_seen, games_won, games_lost, games_drawn,
-             win_rate, total_score, avg_score, confidence, priority_score)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO learned_move_patterns
+                (piece_type, move_category, distance_from_start, game_phase,
+                 times_seen, games_won, games_lost, games_drawn,
+                 win_rate, total_score, avg_score, confidence, priority_score, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(piece_type, move_category, distance_from_start, game_phase)
+            DO UPDATE SET
+                times_seen = ?,
+                games_won = ?,
+                games_lost = ?,
+                games_drawn = ?,
+                win_rate = ?,
+                total_score = ?,
+                avg_score = ?,
+                confidence = ?,
+                priority_score = ?,
+                updated_at = datetime('now')
         ''', (piece_type, move_category, distance, phase,
+              times_seen, won, lost, drawn,
+              win_rate, total_score, avg_score, confidence, priority_score,
+              # ON CONFLICT DO UPDATE values
               times_seen, won, lost, drawn,
               win_rate, total_score, avg_score, confidence, priority_score))
 
