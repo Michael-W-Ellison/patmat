@@ -199,17 +199,35 @@ def add_to_universal_database(patterns, universal_db='chess_pattern_ai/universal
         print("\n❌ No patterns to add!")
         return
 
-    if not os.path.exists(universal_db):
-        print(f"\n❌ Universal database not found at {universal_db}")
-        print("Run this first:")
+    # Try multiple possible locations for the database
+    possible_paths = [
+        universal_db,
+        'universal_patterns.db',
+        os.path.join('chess_pattern_ai', 'universal_patterns.db'),
+        os.path.join(os.path.dirname(__file__), 'universal_patterns.db')
+    ]
+
+    db_path = None
+    for path in possible_paths:
+        if os.path.exists(path):
+            db_path = path
+            print(f"\n✓ Found universal database at: {path}")
+            break
+
+    if not db_path:
+        print(f"\n❌ Universal database not found!")
+        print(f"Searched:")
+        for path in possible_paths:
+            print(f"  - {path}")
+        print("\nRun this first:")
         print("  python chess_pattern_ai/universal_pattern_extractor.py")
         return
 
     print(f"\n" + "="*70)
-    print(f"Adding patterns to {universal_db}:")
+    print(f"Adding patterns to {db_path}:")
     print("="*70)
 
-    conn = sqlite3.connect(universal_db)
+    conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
     patterns_added = 0
