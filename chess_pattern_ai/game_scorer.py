@@ -71,12 +71,14 @@ class GameScorer:
         Score Breakdown (DIFFERENTIAL):
         - Win:  (ai_material - opp_material) + (100 - rounds_played) + 1000
         - Loss: (ai_material - opp_material) - 1000
-        - Draw: (ai_material - opp_material)
+        - Draw: (ai_material - opp_material) - 500  ← PENALIZED!
 
         This teaches:
         - Winning with material advantage > winning with material disadvantage
         - Losing by a little > losing by a lot
-        - Quick wins score higher (king decay)
+        - Quick wins score higher (time bonus)
+        - Draws are penalized to discourage draw-seeking behavior
+        - Even draws with material advantage are discouraged (should push for win!)
         - Exchanges: "I lost 320 but gained 500 = +180 net"
         """
         if not CHESS_AVAILABLE:
@@ -106,9 +108,13 @@ class GameScorer:
 
         elif board.is_stalemate() or board.is_insufficient_material() or \
              board.is_fifty_moves() or board.is_repetition():
-            # Draw: just material advantage (ahead in draw > behind in draw)
+            # Draw: PENALIZE for not winning!
+            # Draws negate the chance to win, so they should be discouraged
             result_type = 'draw'
-            final_score = material_advantage
+            draw_penalty = 500  # Penalty for not converting advantage to win
+            # Still consider material (drawing ahead > drawing behind)
+            # but apply penalty to discourage draw-seeking behavior
+            final_score = material_advantage - draw_penalty
 
         else:
             # Game not finished (shouldn't happen)
