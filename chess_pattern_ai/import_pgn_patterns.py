@@ -300,7 +300,7 @@ class PGNPatternImporter:
 
             processed += 1
 
-            # Show progress
+            # Show progress and commit periodically
             if processed % 100 == 0:
                 elapsed = time.time() - start_time
                 rate = processed / elapsed
@@ -309,6 +309,10 @@ class PGNPatternImporter:
                       f"({processed/len(games)*100:.1f}%) | "
                       f"Rate: {rate:.1f} games/s | "
                       f"ETA: {eta:.0f}s", end='\r')
+
+            # Commit every 1000 games to prevent data loss
+            if processed % 1000 == 0:
+                self.conn.commit()
 
         # Final commit
         self.conn.commit()
