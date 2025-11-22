@@ -83,12 +83,14 @@ class HeadlessTrainer:
         return random.choice(legal_moves)
 
     def play_game(self, ai_color, verbose=False):
-        """Play a complete game"""
+        """Play a complete game until natural conclusion"""
         board = chess.Board()
         game_moves = []
         move_count = 0
 
-        while not board.is_game_over() and move_count < 60:
+        # Play until game naturally ends (checkmate, stalemate, etc.)
+        # No artificial move limit - let games reach their conclusion
+        while not board.is_game_over():
             fen_before = board.fen()
 
             if board.turn == ai_color:

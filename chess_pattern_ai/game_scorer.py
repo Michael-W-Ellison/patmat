@@ -2,32 +2,44 @@
 """
 Game Scorer - Score-Based Learning System
 
-Instead of binary win/loss, calculate nuanced game scores:
+Instead of binary win/loss, calculate nuanced game scores using DIFFERENTIAL scoring.
 
 Scoring Rules:
-1. Own king value: 100 (constant)
-2. Opponent king value: 100 - rounds_played (decays each round)
-3. Material values: P=100, N=320, B=330, R=500, Q=900
+1. Material values: P=100, N=320, B=330, R=500, Q=900
+2. Material advantage = (ai_material - opponent_material)
+3. Win bonus = 1000 (constant)
+4. Time bonus = max(0, 100 - rounds_played) - decreases over time
+5. Draw penalty = 500 (to discourage draw-seeking)
+6. Loss penalty = 1000
 
 Final Score Calculation:
 - If AI wins (checkmates opponent):
-    score = own_material + (100 - rounds_played)
+    score = material_advantage + (100 - rounds_played) + 1000
 
     Examples:
-    - Round 10 checkmate: material + 90 = BEST
-    - Round 50 checkmate: material + 50 = GOOD but slower
+    - Round 10 checkmate, +500 material: 500 + 90 + 1000 = +1590 (BEST)
+    - Round 50 checkmate, +100 material: 100 + 50 + 1000 = +1150 (GOOD)
 
 - If AI loses (own king checkmated):
-    score = -100 (WORST OUTCOME)
+    score = material_advantage - 1000
 
-- If draw:
-    score = 0 (neutral)
+    Examples:
+    - Lost but +200 material: 200 - 1000 = -800 (fought well)
+    - Lost with -500 material: -500 - 1000 = -1500 (got crushed)
+
+- If draw (stalemate, repetition, etc):
+    score = material_advantage - 500 (PENALIZED)
+
+    Examples:
+    - Draw with +300 material: 300 - 500 = -200 (should have won!)
+    - Draw with -200 material: -200 - 500 = -700 (saved a loss)
 
 This naturally teaches:
-- Quick checkmate is valuable (opponent king worth more early)
-- Material advantage matters
-- Losing is catastrophic (-100)
-- Winning quickly > winning slowly
+- Winning is valuable (+1000 bonus)
+- Quick wins are better (time bonus decreases)
+- Material advantage matters (even in same result)
+- Draws are discouraged (-500 penalty)
+- Avoidable draws when ahead are especially bad
 """
 
 try:
@@ -108,13 +120,46 @@ class GameScorer:
 
         elif board.is_stalemate() or board.is_insufficient_material() or \
              board.is_fifty_moves() or board.is_repetition():
-            # Draw: PENALIZE for not winning!
-            # Draws negate the chance to win, so they should be discouraged
-            result_type = 'draw'
-            draw_penalty = 500  # Penalty for not converting advantage to win
-            # Still consider material (drawing ahead > drawing behind)
-            # but apply penalty to discourage draw-seeking behavior
-            final_score = material_advantage - draw_penalty
+            # Check if this is an AVOIDABLE draw (AI's fault)
+            # Avoidable draws when ahead should be treated as losses!
+
+            # Determine if draw was avoidable
+            is_avoidable_draw = False
+
+            if board.is_stalemate() and material_advantage > 100:
+                # Stalemate when AI has significant material advantage = avoidable
+                # AI should have checkmated, not stalemated
+                is_avoidable_draw = True
+                draw_reason = "stalemate_while_ahead"
+
+            elif board.is_repetition():
+                # Repetition is almost always avoidable - AI chose to repeat
+                # Should avoid this unless behind (drawing a losing position)
+                if material_advantage > -200:
+                    is_avoidable_draw = True
+                    draw_reason = "threefold_repetition"
+
+            elif board.is_fifty_moves() and material_advantage > 200:
+                # Fifty-move rule when ahead = failed to make progress
+                # Should have pushed for checkmate or pawn moves
+                is_avoidable_draw = True
+                draw_reason = "fifty_move_rule_while_ahead"
+
+            # Insufficient material is generally NOT avoidable
+            # (both sides ran out of mating material)
+
+            if is_avoidable_draw:
+                # Treat avoidable draw as a LOSS
+                # AI should learn to avoid causing draws when ahead
+                result_type = 'draw'  # Still record as draw for statistics
+                loss_penalty = 1000
+                avoidable_draw_penalty = 300  # Extra penalty for causing draw
+                final_score = material_advantage - loss_penalty - avoidable_draw_penalty
+            else:
+                # Unavoidable draw or drew from behind (acceptable)
+                result_type = 'draw'
+                draw_penalty = 500  # Standard draw penalty
+                final_score = material_advantage - draw_penalty
 
         else:
             # Game not finished (shouldn't happen)
