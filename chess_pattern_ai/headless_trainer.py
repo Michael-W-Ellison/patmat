@@ -88,7 +88,7 @@ class HeadlessTrainer:
         game_moves = []
         move_count = 0
 
-        while not board.is_game_over() and move_count < 60:
+        while not board.is_game_over() and move_count < 999:
             fen_before = board.fen()
 
             if board.turn == ai_color:
