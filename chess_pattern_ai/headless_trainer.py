@@ -34,23 +34,34 @@ class HeadlessTrainer:
         self.game_results = []
 
     def play_ai_move(self, board, ai_color):
-        """Simple AI move selection"""
+        """AI move selection using learned patterns + material evaluation"""
         if board.is_game_over():
             return None
 
         legal_moves = list(board.legal_moves)
         legal_moves = self.prioritizer.sort_moves_by_priority(board, legal_moves)
 
-        # Simple evaluation
+        # Evaluate moves using BOTH material AND learned patterns
         best_move = None
         best_score = -999999
 
         for move in legal_moves[:15]:
+            # Get material evaluation
             board.push(move)
             ai_mat = self.scorer._calculate_material(board, ai_color)
             opp_mat = self.scorer._calculate_material(board, not ai_color)
-            score = ai_mat - opp_mat
+            material_score = ai_mat - opp_mat
             board.pop()
+
+            # Get learned priority for this move (0-100 scale)
+            # Higher priority = historically better outcomes
+            priority = self.prioritizer.get_move_priority(board, move)
+
+            # CRITICAL FIX: Combine material + learned patterns
+            # Material is weighted more heavily but patterns guide strategy
+            # Priority scaled by 20 means a priority-72 move gets +1440 bonus
+            # This makes high-priority moves worth ~1.5 pawns of material
+            score = material_score + (priority * 20)
 
             if score > best_score:
                 best_score = score
