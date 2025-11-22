@@ -60,8 +60,8 @@ class GameScorer:
 
     # Standard piece values (centipawns)
     PIECE_VALUES = {
-        'P': 100, 'N': 320, 'B': 330, 'R': 500, 'Q': 900, 'K': 0,
-        'p': 100, 'n': 320, 'b': 330, 'r': 500, 'q': 900, 'k': 0
+        'P': 10, 'N': 32, 'B': 33, 'R': 50, 'Q': 90, 'K': 0,
+        'p': 10, 'n': 32, 'b': 33, 'r': 50, 'q': 90, 'k': 0
     }
 
     def __init__(self):
@@ -108,13 +108,13 @@ class GameScorer:
                 # AI delivered checkmate
                 result_type = 'win'
                 time_bonus = max(0, 100 - rounds_played)  # Quick wins better
-                win_bonus = 1000  # Winning is good!
+                win_bonus = 100  # Winning is good!
                 final_score = material_advantage + time_bonus + win_bonus
 
             else:
                 # AI was checkmated
                 result_type = 'loss'
-                loss_penalty = 1000  # Losing is bad
+                loss_penalty = 500  # Losing is bad
                 # But losing with material advantage is LESS bad than getting crushed
                 final_score = material_advantage - loss_penalty
 
@@ -271,8 +271,8 @@ def test_game_scorer():
     score, result = scorer.calculate_final_score(board, chess.WHITE, rounds_played=4)
     print(f"  Result: {result}")
     print(f"  Score: {score:.1f}")
-    print(f"  Breakdown: (my_material - opp_material) + (100 - 4) + 1000")
-    print(f"           = material_advantage + 96 + 1000")
+    print(f"  Breakdown: (my_material - opp_material) + (100 - 4) + 100")
+    print(f"           = material_advantage + 96 + 100")
 
     # Test 2: Late checkmate
     print("\nTest 2: Late checkmate (round 50)")
@@ -286,8 +286,8 @@ def test_game_scorer():
     score, result = scorer.calculate_final_score(board, chess.WHITE, rounds_played=50)
     print(f"  Result: {result}")
     print(f"  Score: {score:.1f}")
-    print(f"  Breakdown: material_advantage + (100 - 50) + 1000")
-    print(f"           = material_advantage + 50 + 1000")
+    print(f"  Breakdown: material_advantage + (100 - 50) + 100")
+    print(f"           = material_advantage + 50 + 100")
     print(f"  Note: Quick mate (round 4) gets +46 time bonus!")
 
     # Test 3: Loss with material advantage (fought well)
@@ -357,15 +357,15 @@ def test_game_scorer():
 
     print("\n" + "=" * 70)
     print("\nDIFFERENTIAL Scoring System Summary:")
-    print("  Win + ahead +500:   1000 + 500 + 90 = +1590  (BEST)")
-    print("  Win + ahead +100:   1000 + 100 + 90 = +1190  (GOOD)")
-    print("  Win + behind -200:  1000 - 200 + 90 = +890   (OK, won despite disadvantage)")
-    print("  Draw + ahead +300:  300                      (Neutral but ahead)")
-    print("  Draw + behind -300: -300                     (Neutral but behind)")
-    print("  Loss + ahead +200:  200 - 1000 = -800        (Lost but fought well)")
-    print("  Loss + behind -500: -500 - 1000 = -1500      (Got crushed)")
+    print("  Win + ahead +50:   100 + 50 + 9 = +159  (BEST)")
+    print("  Win + ahead +10:   100 + 10 + 9 = +119  (GOOD)")
+    print("  Win + behind -20:  100 - 20 + 9 = +89   (OK, won despite disadvantage)")
+    print("  Draw + ahead +30:  30                      (Neutral but ahead)")
+    print("  Draw + behind -30: -30                     (Neutral but behind)")
+    print("  Loss + ahead +20:  20 - 100 = -80        (Lost but fought well)")
+    print("  Loss + behind -50: -50 - 100 = -150      (Got crushed)")
     print("\nSystem learns:")
-    print("  - Exchanges: 'Lost pawn, gained rook' = +400 advantage")
+    print("  - Exchanges: 'Lost pawn, gained rook' = +40 advantage")
     print("  - Tactics: Patterns that improve material advantage are good")
     print("  - Relative position: Ahead > Behind, even in same result")
     print("  - Speed: Quick wins get time bonus")
