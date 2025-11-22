@@ -43,9 +43,6 @@ class HeadlessTrainer:
             'unavoidable': 0
         }
 
-        # Track repetition avoidance
-        self.repetitions_avoided = 0
-
     def play_ai_move(self, board, ai_color):
         """AI move selection using learned patterns + material evaluation"""
         if board.is_game_over():
@@ -64,32 +61,19 @@ class HeadlessTrainer:
             ai_mat = self.scorer._calculate_material(board, ai_color)
             opp_mat = self.scorer._calculate_material(board, not ai_color)
             material_score = ai_mat - opp_mat
-
-            # CRITICAL: Detect if this move would cause repetition
-            # Check for twofold repetition (one step before threefold draw)
-            is_approaching_repetition = board.is_repetition(2)
-
             board.pop()
 
             # Get learned priority for this move (0-100 scale)
             # Higher priority = historically better outcomes
+            # The priority now includes observable game state features:
+            # - repetition_count (AI will learn: count=2 → score=-10000 → avoid)
+            # - moves_since_progress (AI will learn: 40+ → draw → make progress)
+            # - total_material_level (AI will learn: low → draw → avoid trades)
             priority = self.prioritizer.get_move_priority(board, move)
 
             # Combine material + learned patterns
             # Priority scaled by 20 means a priority-72 move gets +1440 bonus
             score = material_score + (priority * 20)
-
-            # ACTIVE REPETITION AVOIDANCE
-            # If this move would repeat a position and we're not losing,
-            # heavily penalize it to prevent draw by repetition
-            if is_approaching_repetition:
-                # Only avoid repetition if we're not significantly behind
-                # (drawing from a losing position is acceptable)
-                if material_score > -20:  # Not 2+ pawns behind
-                    # Massive penalty - treat like losing 5 pawns worth of material
-                    repetition_penalty = 50
-                    score -= repetition_penalty
-                    self.repetitions_avoided += 1
 
             if score > best_score:
                 best_score = score
@@ -249,8 +233,6 @@ class HeadlessTrainer:
             print(f"  ---")
             print(f"  AVOIDABLE (AI's fault): {self.draw_types['avoidable']:3d} ({self.draw_types['avoidable']/self.draws*100:5.1f}%)")
             print(f"  Unavoidable:            {self.draw_types['unavoidable']:3d} ({self.draw_types['unavoidable']/self.draws*100:5.1f}%)")
-            print(f"\nRepetition Avoidance:")
-            print(f"  Repetitions Detected & Avoided: {self.repetitions_avoided}")
 
         # Learning statistics
         stats = self.prioritizer.get_statistics()
