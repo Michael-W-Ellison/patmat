@@ -126,8 +126,8 @@ class GameScorer:
             # Determine if draw was avoidable
             is_avoidable_draw = False
 
-            if board.is_stalemate() and material_advantage > 100:
-                # Stalemate when AI has significant material advantage = avoidable
+            if board.is_stalemate() and material_advantage > 10:
+                # Stalemate when AI has material advantage (>1 pawn) = avoidable
                 # AI should have checkmated, not stalemated
                 is_avoidable_draw = True
                 draw_reason = "stalemate_while_ahead"
@@ -135,12 +135,12 @@ class GameScorer:
             elif board.is_repetition():
                 # Repetition is almost always avoidable - AI chose to repeat
                 # Should avoid this unless behind (drawing a losing position)
-                if material_advantage > -200:
+                if material_advantage > -20:
                     is_avoidable_draw = True
                     draw_reason = "threefold_repetition"
 
-            elif board.is_fifty_moves() and material_advantage > 200:
-                # Fifty-move rule when ahead = failed to make progress
+            elif board.is_fifty_moves() and material_advantage > 20:
+                # Fifty-move rule when ahead (>2 pawns) = failed to make progress
                 # Should have pushed for checkmate or pawn moves
                 is_avoidable_draw = True
                 draw_reason = "fifty_move_rule_while_ahead"

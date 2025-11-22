@@ -138,7 +138,7 @@ class HeadlessTrainer:
 
             if board.is_stalemate():
                 self.draw_types['stalemate'] += 1
-                if material_advantage > 100:
+                if material_advantage > 10:
                     self.draw_types['avoidable'] += 1
                 else:
                     self.draw_types['unavoidable'] += 1
@@ -149,14 +149,14 @@ class HeadlessTrainer:
 
             elif board.is_fifty_moves():
                 self.draw_types['fifty_moves'] += 1
-                if material_advantage > 200:
+                if material_advantage > 20:
                     self.draw_types['avoidable'] += 1
                 else:
                     self.draw_types['unavoidable'] += 1
 
             elif board.is_repetition():
                 self.draw_types['repetition'] += 1
-                if material_advantage > -200:
+                if material_advantage > -20:
                     self.draw_types['avoidable'] += 1
                 else:
                     self.draw_types['unavoidable'] += 1
