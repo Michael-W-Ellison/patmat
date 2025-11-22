@@ -33,6 +33,16 @@ class HeadlessTrainer:
         self.score_history = []
         self.game_results = []
 
+        # Track draw types
+        self.draw_types = {
+            'stalemate': 0,
+            'insufficient_material': 0,
+            'fifty_moves': 0,
+            'repetition': 0,
+            'avoidable': 0,
+            'unavoidable': 0
+        }
+
     def play_ai_move(self, board, ai_color):
         """AI move selection using learned patterns + material evaluation"""
         if board.is_game_over():
@@ -119,6 +129,38 @@ class HeadlessTrainer:
         rounds_played = board.fullmove_number
         final_score, result = self.scorer.calculate_final_score(board, ai_color, rounds_played)
 
+        # Track draw types for analysis
+        if result == 'draw':
+            # Calculate material to determine if draw was avoidable
+            ai_mat = self.scorer._calculate_material(board, ai_color)
+            opp_mat = self.scorer._calculate_material(board, not ai_color)
+            material_advantage = ai_mat - opp_mat
+
+            if board.is_stalemate():
+                self.draw_types['stalemate'] += 1
+                if material_advantage > 100:
+                    self.draw_types['avoidable'] += 1
+                else:
+                    self.draw_types['unavoidable'] += 1
+
+            elif board.is_insufficient_material():
+                self.draw_types['insufficient_material'] += 1
+                self.draw_types['unavoidable'] += 1
+
+            elif board.is_fifty_moves():
+                self.draw_types['fifty_moves'] += 1
+                if material_advantage > 200:
+                    self.draw_types['avoidable'] += 1
+                else:
+                    self.draw_types['unavoidable'] += 1
+
+            elif board.is_repetition():
+                self.draw_types['repetition'] += 1
+                if material_advantage > -200:
+                    self.draw_types['avoidable'] += 1
+                else:
+                    self.draw_types['unavoidable'] += 1
+
         # Update statistics
         self.games_played += 1
         if result == 'win':
@@ -178,6 +220,17 @@ class HeadlessTrainer:
         print(f"Average Score: {sum(self.score_history)/len(self.score_history):+.0f}")
         print(f"Best Score: {max(self.score_history):+.0f}")
         print(f"Worst Score: {min(self.score_history):+.0f}")
+
+        # Draw type analysis
+        if self.draws > 0:
+            print(f"\nDraw Analysis ({self.draws} total draws):")
+            print(f"  Stalemate:              {self.draw_types['stalemate']:3d} ({self.draw_types['stalemate']/self.draws*100:5.1f}%)")
+            print(f"  Insufficient Material:  {self.draw_types['insufficient_material']:3d} ({self.draw_types['insufficient_material']/self.draws*100:5.1f}%)")
+            print(f"  Fifty-Move Rule:        {self.draw_types['fifty_moves']:3d} ({self.draw_types['fifty_moves']/self.draws*100:5.1f}%)")
+            print(f"  Threefold Repetition:   {self.draw_types['repetition']:3d} ({self.draw_types['repetition']/self.draws*100:5.1f}%)")
+            print(f"  ---")
+            print(f"  AVOIDABLE (AI's fault): {self.draw_types['avoidable']:3d} ({self.draw_types['avoidable']/self.draws*100:5.1f}%)")
+            print(f"  Unavoidable:            {self.draw_types['unavoidable']:3d} ({self.draw_types['unavoidable']/self.draws*100:5.1f}%)")
 
         # Learning statistics
         stats = self.prioritizer.get_statistics()

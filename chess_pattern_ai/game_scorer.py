@@ -149,11 +149,15 @@ class GameScorer:
             # (both sides ran out of mating material)
 
             if is_avoidable_draw:
-                # Treat avoidable draw as a LOSS
-                # AI should learn to avoid causing draws when ahead
-                result_type = 'draw'  # Still record as draw for statistics
+                # Heavily penalize avoidable draws
+                # CRITICAL: Penalty must be severe enough to override PGN patterns
+                # PGN has 202M observations, so we need extreme negative scores
+                # to shift the avg_score and priority calculations
+                # The priority formula: normalized_score = (avg_score + 1500) / 31
+                # So score of -10000 gives priority near -275 (extremely bad!)
+                result_type = 'draw'  # Keep as draw for accurate statistics
                 loss_penalty = 1000
-                avoidable_draw_penalty = 300  # Extra penalty for causing draw
+                avoidable_draw_penalty = 9000  # SEVERE penalty to override PGN learning
                 final_score = material_advantage - loss_penalty - avoidable_draw_penalty
             else:
                 # Unavoidable draw or drew from behind (acceptable)
