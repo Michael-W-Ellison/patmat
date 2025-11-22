@@ -57,6 +57,11 @@ class LearnableMovePrioritizer:
                 distance_from_start INTEGER,        -- How many ranks moved from starting area (0-8)
                 game_phase TEXT,                    -- 'opening', 'middlegame', 'endgame'
 
+                -- Observable game state (allows discovering draw-causing patterns)
+                repetition_count INTEGER DEFAULT 0, -- How many times position repeated (0, 1, 2)
+                moves_since_progress INTEGER DEFAULT 0, -- Halfmove clock / 10 (0, 1, 2, 3, 4, 5+)
+                total_material_level TEXT DEFAULT 'medium', -- 'high', 'medium', 'low'
+
                 -- Outcome tracking (binary win/loss)
                 times_seen INTEGER DEFAULT 0,
                 games_won INTEGER DEFAULT 0,
@@ -76,7 +81,8 @@ class LearnableMovePrioritizer:
 
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
-                UNIQUE(piece_type, move_category, distance_from_start, game_phase)
+                UNIQUE(piece_type, move_category, distance_from_start, game_phase,
+                       repetition_count, moves_since_progress, total_material_level)
             )
         ''')
 
@@ -94,7 +100,8 @@ class LearnableMovePrioritizer:
         Classify a move by observable characteristics (NO hardcoded square knowledge)
 
         Returns:
-            Dict with: piece_type, move_category, distance_from_start, game_phase
+            Dict with: piece_type, move_category, distance_from_start, game_phase,
+                       repetition_count, moves_since_progress, total_material_level
         """
         if not CHESS_AVAILABLE:
             return {}
@@ -150,11 +157,64 @@ class LearnableMovePrioritizer:
         # Observable: Game phase based on material and moves
         game_phase = self._detect_game_phase(board)
 
+        # OBSERVABLE GAME STATE FEATURES (for discovering draw patterns)
+
+        # 1. Repetition count: How many times has this position occurred?
+        # After the move, check if position would be repeated
+        board.push(move)
+        if board.is_repetition(3):
+            repetition_count = 2  # Third repetition (causes draw)
+        elif board.is_repetition(2):
+            repetition_count = 1  # Second occurrence
+        else:
+            repetition_count = 0  # First occurrence
+        board.pop()
+
+        # 2. Moves since progress: Observable halfmove clock
+        # Tracks moves since last capture or pawn move (50-move rule)
+        halfmove_clock = board.halfmove_clock
+        # Bucket into ranges for pattern recognition
+        if halfmove_clock >= 50:
+            moves_since_progress = 5  # 50+ moves (draw imminent)
+        elif halfmove_clock >= 40:
+            moves_since_progress = 4  # 40-49 moves (danger zone)
+        elif halfmove_clock >= 30:
+            moves_since_progress = 3  # 30-39 moves
+        elif halfmove_clock >= 20:
+            moves_since_progress = 2  # 20-29 moves
+        elif halfmove_clock >= 10:
+            moves_since_progress = 1  # 10-19 moves
+        else:
+            moves_since_progress = 0  # 0-9 moves (fresh)
+
+        # 3. Total material level: Observable piece count and values
+        # Allows discovering "low material → draw" pattern
+        total_material = 0
+        for square in chess.SQUARES:
+            piece = board.piece_at(square)
+            if piece:
+                # Standard material values
+                values = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3,
+                         chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 0}
+                total_material += values.get(piece.piece_type, 0)
+
+        # Categorize material level
+        # Full board = ~39 points, insufficient material ~= 6 points
+        if total_material <= 6:
+            total_material_level = 'low'  # Insufficient for checkmate
+        elif total_material <= 20:
+            total_material_level = 'medium'  # Endgame
+        else:
+            total_material_level = 'high'  # Opening/middlegame
+
         return {
             'piece_type': piece_type,
             'move_category': move_category,
             'distance_from_start': distance_from_start,
-            'game_phase': game_phase
+            'game_phase': game_phase,
+            'repetition_count': repetition_count,
+            'moves_since_progress': moves_since_progress,
+            'total_material_level': total_material_level
         }
 
     def _detect_game_phase(self, board: 'chess.Board') -> str:
@@ -217,6 +277,9 @@ class LearnableMovePrioritizer:
                 characteristics['move_category'],
                 characteristics['distance_from_start'],
                 characteristics['game_phase'],
+                characteristics['repetition_count'],
+                characteristics['moves_since_progress'],
+                characteristics['total_material_level'],
                 result,
                 final_score
             )
@@ -226,7 +289,10 @@ class LearnableMovePrioritizer:
         self.conn.commit()
 
     def _update_move_statistics(self, piece_type: str, move_category: str,
-                                distance: int, phase: str, result: str, final_score: float):
+                                distance: int, phase: str,
+                                repetition_count: int, moves_since_progress: int,
+                                total_material_level: str,
+                                result: str, final_score: float):
         """Update win/loss statistics and score for a move pattern"""
 
         # Get current stats
@@ -235,7 +301,10 @@ class LearnableMovePrioritizer:
             FROM learned_move_patterns
             WHERE piece_type = ? AND move_category = ?
               AND distance_from_start = ? AND game_phase = ?
-        ''', (piece_type, move_category, distance, phase))
+              AND repetition_count = ? AND moves_since_progress = ?
+              AND total_material_level = ?
+        ''', (piece_type, move_category, distance, phase,
+              repetition_count, moves_since_progress, total_material_level))
 
         row = self.cursor.fetchone()
 
@@ -282,10 +351,12 @@ class LearnableMovePrioritizer:
         self.cursor.execute('''
             INSERT INTO learned_move_patterns
                 (piece_type, move_category, distance_from_start, game_phase,
+                 repetition_count, moves_since_progress, total_material_level,
                  times_seen, games_won, games_lost, games_drawn,
                  win_rate, total_score, avg_score, confidence, priority_score, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-            ON CONFLICT(piece_type, move_category, distance_from_start, game_phase)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(piece_type, move_category, distance_from_start, game_phase,
+                        repetition_count, moves_since_progress, total_material_level)
             DO UPDATE SET
                 times_seen = ?,
                 games_won = ?,
@@ -299,6 +370,7 @@ class LearnableMovePrioritizer:
                 updated_at = datetime('now')
         ''', (
             piece_type, move_category, distance, phase,
+            repetition_count, moves_since_progress, total_material_level,
             times_seen, won, lost, drawn, win_rate, total_score, avg_score, confidence, priority_score,
             times_seen, won, lost, drawn, win_rate, total_score, avg_score, confidence, priority_score
         ))
@@ -307,6 +379,7 @@ class LearnableMovePrioritizer:
         """Load learned move priorities from database"""
         self.cursor.execute('''
             SELECT piece_type, move_category, distance_from_start, game_phase,
+                   repetition_count, moves_since_progress, total_material_level,
                    priority_score, win_rate, confidence
             FROM learned_move_patterns
             WHERE confidence > 0.1
@@ -315,8 +388,8 @@ class LearnableMovePrioritizer:
 
         self.move_priorities = {}
         for row in self.cursor.fetchall():
-            piece_type, category, distance, phase, priority, win_rate, confidence = row
-            key = (piece_type, category, distance, phase)
+            piece_type, category, distance, phase, rep_count, moves_progress, mat_level, priority, win_rate, confidence = row
+            key = (piece_type, category, distance, phase, rep_count, moves_progress, mat_level)
             self.move_priorities[key] = {
                 'priority': priority,
                 'win_rate': win_rate,
@@ -344,7 +417,10 @@ class LearnableMovePrioritizer:
             characteristics['piece_type'],
             characteristics['move_category'],
             characteristics['distance_from_start'],
-            characteristics['game_phase']
+            characteristics['game_phase'],
+            characteristics['repetition_count'],
+            characteristics['moves_since_progress'],
+            characteristics['total_material_level']
         )
 
         # Check if we've learned about this move type
