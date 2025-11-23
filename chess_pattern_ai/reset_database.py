@@ -27,11 +27,10 @@ def reset_database(db_path='headless_training.db'):
         CREATE TABLE learned_move_patterns (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
 
-            -- Observable move characteristics
+            -- Observable move characteristics (NO game-specific stages!)
             piece_type TEXT NOT NULL,
             move_category TEXT NOT NULL,
             distance_from_start INTEGER,
-            game_phase TEXT,
 
             -- Observable game state (allows discovering draw-causing patterns)
             repetition_count INTEGER DEFAULT 0,
@@ -57,7 +56,7 @@ def reset_database(db_path='headless_training.db'):
 
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
-            UNIQUE(piece_type, move_category, distance_from_start, game_phase,
+            UNIQUE(piece_type, move_category, distance_from_start,
                    repetition_count, moves_since_progress, total_material_level)
         )
     ''')
