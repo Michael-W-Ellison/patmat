@@ -215,21 +215,41 @@ class LearnableMovePrioritizer:
     def record_game_moves(self, moves: List[Tuple[str, str, str]],
                          ai_color: 'chess.Color', result: str, final_score: float = 0.0):
         """
-        Record moves from a game to learn which types lead to wins
+        Record moves from a game using MOVE-LEVEL SCORING
+
+        CRITICAL FIX: Score each move based on its immediate observable effect,
+        NOT the final game outcome. This prevents catastrophic learning where
+        the AI learns "normal chess moves lead to stalemate" when actually only
+        the LAST move caused the stalemate.
 
         Args:
             moves: List of (fen_before, move_uci, move_san) tuples
             ai_color: Color AI played
             result: 'win', 'loss', or 'draw'
-            final_score: Game score (win=material+(100-rounds), loss=-100, draw=0)
+            final_score: Game score (only used for last move context)
         """
         if not CHESS_AVAILABLE:
             logger.warning("python-chess not available, cannot record moves")
             return
 
         board = chess.Board()
+        move_count = 0
 
-        for fen_before, move_uci, move_san in moves:
+        # Pre-count AI's moves to identify the last one
+        ai_move_indices = []
+        temp_board = chess.Board()
+        for idx, (fen_before, move_uci, move_san) in enumerate(moves):
+            try:
+                temp_board.set_fen(fen_before)
+                if temp_board.turn == ai_color:
+                    ai_move_indices.append(idx)
+                temp_board.push(chess.Move.from_uci(move_uci))
+            except:
+                continue
+
+        last_ai_move_idx = ai_move_indices[-1] if ai_move_indices else -1
+
+        for idx, (fen_before, move_uci, move_san) in enumerate(moves):
             try:
                 board.set_fen(fen_before)
             except:
@@ -247,7 +267,12 @@ class LearnableMovePrioritizer:
                 board.push(move)
                 continue
 
-            # Update statistics for this move type
+            is_last_move = (idx == last_ai_move_idx)
+
+            # MOVE-LEVEL SCORING: Calculate immediate observable effect
+            move_score = self._calculate_move_score(board, move, ai_color, is_last_move, result)
+
+            # Update statistics for this move type with MOVE score, not GAME score
             self._update_move_statistics(
                 characteristics['piece_type'],
                 characteristics['move_category'],
@@ -256,12 +281,80 @@ class LearnableMovePrioritizer:
                 characteristics['moves_since_progress'],
                 characteristics['total_material_level'],
                 result,
-                final_score
+                move_score  # Use move score, not final_score!
             )
 
             board.push(move)
 
         self.conn.commit()
+
+    def _calculate_move_score(self, board: 'chess.Board', move: 'chess.Move',
+                             ai_color: 'chess.Color', is_last_move: bool, game_result: str) -> float:
+        """
+        Calculate score for a SINGLE move based on immediate observable effects.
+
+        This fixes the catastrophic credit assignment problem where ALL moves
+        in a stalemate game were labeled "bad" even if they were good moves.
+
+        Returns:
+            Move score based on immediate effects (material, check, stalemate, etc.)
+        """
+        if not CHESS_AVAILABLE:
+            return 0.0
+
+        # Material values for calculating captures
+        PIECE_VALUES = {
+            chess.PAWN: 100,
+            chess.KNIGHT: 320,
+            chess.BISHOP: 330,
+            chess.ROOK: 500,
+            chess.QUEEN: 900,
+            chess.KING: 0
+        }
+
+        score = 0.0
+
+        # 1. MATERIAL CHANGE: Did this move gain or lose material?
+        if board.is_capture(move):
+            captured_piece = board.piece_at(move.to_square)
+            if captured_piece:
+                score += PIECE_VALUES.get(captured_piece.piece_type, 0)
+
+        # 2. CHECK BONUS: Forcing moves are generally good
+        board.push(move)
+        if board.is_check():
+            score += 50  # Small bonus for giving check
+
+        # 3. CATASTROPHIC MOVE PENALTIES: Did THIS move cause a bad outcome?
+        if is_last_move:
+            if board.is_stalemate():
+                # THIS move caused stalemate - massive penalty!
+                score -= 10000
+            elif board.is_repetition(3):
+                # THIS move caused threefold repetition
+                score -= 5000
+            elif board.is_fifty_moves():
+                # THIS move triggered fifty-move draw
+                score -= 5000
+            elif board.is_insufficient_material():
+                # THIS move left insufficient material (bad trade)
+                score -= 3000
+            elif board.is_checkmate():
+                # THIS move delivered checkmate!
+                if game_result == 'win':
+                    score += 10000
+                else:
+                    score -= 10000  # Got checkmated
+
+        # 4. MOBILITY BONUS: More legal moves after = good position
+        # (Only calculate for non-catastrophic moves)
+        if not is_last_move or game_result == 'win':
+            legal_moves_after = len(list(board.legal_moves))
+            score += legal_moves_after * 2  # Small bonus per legal move
+
+        board.pop()
+
+        return score
 
     def _update_move_statistics(self, piece_type: str, move_category: str,
                                 distance: int,
