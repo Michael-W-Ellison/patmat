@@ -109,7 +109,7 @@ class MinimalPGNParser:
             print("  python chess_pattern_ai/import_pgn_patterns.py /path/to/games.pgn")
             sys.exit(1)
 
-        print(f"\n✓ Parsed {len(games):,} games from {filename}")
+        print(f"\n[OK] Parsed {len(games):,} games from {filename}")
         return games
 
     def classify_move(self, move_san: str, move_num: int, total_moves: int) -> Dict:
@@ -147,10 +147,11 @@ class MinimalPGNParser:
             else:
                 move_category = 'quiet'
 
-        # Determine game phase
-        if move_num <= 12:
+        # Determine game phase CORRECTLY
+        # Base phase classification on move number, not proximity to end
+        if move_num <= 15:
             game_phase = 'opening'
-        elif total_moves - move_num < 15:
+        elif move_num >= 40:  # Late game, likely endgame
             game_phase = 'endgame'
         else:
             game_phase = 'middlegame'
@@ -194,6 +195,9 @@ class PGNPatternImporter:
                 move_category TEXT NOT NULL,
                 distance_from_start INTEGER,
                 game_phase TEXT,
+                repetition_count INTEGER DEFAULT 0,
+                moves_since_progress INTEGER DEFAULT 25,
+                total_material_level TEXT DEFAULT 'medium',
                 times_seen INTEGER DEFAULT 0,
                 games_won INTEGER DEFAULT 0,
                 games_lost INTEGER DEFAULT 0,
@@ -204,7 +208,8 @@ class PGNPatternImporter:
                 confidence REAL DEFAULT 0.0,
                 priority_score REAL DEFAULT 0.0,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(piece_type, move_category, distance_from_start, game_phase)
+                UNIQUE(piece_type, move_category, distance_from_start, game_phase,
+                       repetition_count, moves_since_progress, total_material_level)
             )
         ''')
 
@@ -389,14 +394,21 @@ class PGNPatternImporter:
         normalized_score = (avg_score + 1500) / 31  # Maps score range to 0-100
         priority_score = normalized_score * confidence  # 0-100, confidence-weighted
 
-        # Insert or update (use ON CONFLICT like LearnableMovePrioritizer)
+        # Add default values for new schema columns (PGN doesn't have this context)
+        repetition_count = 0  # Default: no repetition context in PGN
+        moves_since_progress = 25  # Default: assume moderate progress
+        total_material_level = 'medium'  # Default: assume mid-game material
+        
+        # Insert or update (use ON CONFLICT with new 7-column constraint)
         self.cursor.execute('''
             INSERT INTO learned_move_patterns
                 (piece_type, move_category, distance_from_start, game_phase,
+                 repetition_count, moves_since_progress, total_material_level,
                  times_seen, games_won, games_lost, games_drawn,
                  win_rate, total_score, avg_score, confidence, priority_score, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-            ON CONFLICT(piece_type, move_category, distance_from_start, game_phase)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(piece_type, move_category, distance_from_start, game_phase,
+                        repetition_count, moves_since_progress, total_material_level)
             DO UPDATE SET
                 times_seen = ?,
                 games_won = ?,
@@ -409,6 +421,7 @@ class PGNPatternImporter:
                 priority_score = ?,
                 updated_at = datetime('now')
         ''', (piece_type, move_category, distance, phase,
+              repetition_count, moves_since_progress, total_material_level,
               times_seen, won, lost, drawn,
               win_rate, total_score, avg_score, confidence, priority_score,
               # ON CONFLICT DO UPDATE values
