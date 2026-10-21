@@ -47,6 +47,9 @@ class LearnableMovePrioritizer:
         self.conn.commit()
         self._load_priorities()
 
+        if self.move_priorities:
+            logger.info(f"✓ Loaded {len(self.move_priorities)} learned move patterns")
+
     def _init_tables(self):
         """Create tables for learned move patterns"""
         self._migrate_legacy_table()
@@ -341,6 +344,8 @@ class LearnableMovePrioritizer:
 
         self._recalculate_priorities()
         self.conn.commit()
+        # Use what this game taught from the next game on
+        self._load_priorities()
 
     def record_game_patterns(self, patterns: List[Dict], result: str, final_score: float):
         """
@@ -366,6 +371,8 @@ class LearnableMovePrioritizer:
 
         self._recalculate_priorities()
         self.conn.commit()
+        # Use what this game taught from the next game on
+        self._load_priorities()
 
     @staticmethod
     def _sync_board(board: 'chess.Board', fen_before: str) -> bool:
@@ -584,9 +591,6 @@ class LearnableMovePrioritizer:
                 'win_rate': win_rate,
                 'confidence': confidence
             }
-
-        if self.move_priorities:
-            logger.info(f"✓ Loaded {len(self.move_priorities)} learned move patterns")
 
     def get_move_priority(self, board: 'chess.Board', move: 'chess.Move') -> float:
         """

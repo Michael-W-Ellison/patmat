@@ -146,12 +146,17 @@ class CheckersGame:
                 test_board = board.copy()
                 test_piece = test_board.get_piece_at(piece.position)
 
-                # Temporarily move piece
+                # Temporarily move piece (re-add to the set: its hash uses position)
+                test_board.pieces.discard(test_piece)
                 test_board.board[row][col] = None
                 test_board.board[land_row][land_col] = test_piece
                 test_piece.position = (land_row, land_col)
+                test_board.pieces.add(test_piece)
 
-                # Remove captured
+                # Remove captured from the grid and the piece set; copy() rebuilds
+                # from the set, so a piece left there would reappear and could be
+                # jumped again (endless back-and-forth king jumps)
+                test_board.pieces.discard(test_board.get_piece_at((mid_row, mid_col)))
                 test_board.board[mid_row][mid_col] = None
 
                 # Look for continuation jumps

@@ -18,7 +18,7 @@ import time
 from typing import List, Tuple
 from collections import defaultdict
 
-from checkers.checkers_board import CheckersBoard, Color, Move
+from checkers.checkers_board import CheckersBoard, Color, Move, PieceType
 from checkers.checkers_game import CheckersGame
 from checkers.checkers_scorer import CheckersScorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
@@ -100,15 +100,42 @@ class CheckersHeadlessTrainer:
                 else:  # quiet
                     priority = 30.0
 
-            move_scores.append((move, priority))
+            # One-ply lookahead: material won minus the most the opponent can win back
+            # (a man, 100 material, is worth 10 priority points)
+            net_material = self._net_material_after_reply(game, move, ai_color)
+
+            move_scores.append((move, priority + net_material / 10))
 
         # Select move based on priorities (with exploration)
         if random.random() < 0.1:  # 10% exploration
             return random.choice(legal_moves)
         else:
-            # Choose move with highest priority
+            # Choose move with highest priority plus lookahead material
             move_scores.sort(key=lambda x: x[1], reverse=True)
             return move_scores[0][0]
+
+    def _move_material_gain(self, move: Move) -> float:
+        """Material the mover gains: captured pieces plus promotion to king"""
+        values = self.scorer.PIECE_VALUES
+        gain = sum(values[captured.type] for captured in move.captured_pieces)
+
+        if move.piece.type == PieceType.MAN:
+            promotion_row = 0 if move.piece.color == Color.RED else 7
+            if move.to_pos[0] == promotion_row:
+                gain += values[PieceType.KING] - values[PieceType.MAN]
+
+        return gain
+
+    def _net_material_after_reply(self, game: CheckersGame, move: Move, ai_color: Color) -> float:
+        """Material gained by move minus the opponent's best material gain in reply"""
+        board_after = game.board.copy()
+        board_after.make_move(move)
+
+        opp_color = Color.BLACK if ai_color == Color.RED else Color.RED
+        replies = CheckersGame(board_after).get_legal_moves(opp_color)
+        best_reply_gain = max((self._move_material_gain(reply) for reply in replies), default=0)
+
+        return self._move_material_gain(move) - best_reply_gain
 
     def play_game(self, ai_color: Color, verbose: bool = False) -> Tuple[str, float, int]:
         """

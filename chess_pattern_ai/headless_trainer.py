@@ -56,11 +56,11 @@ class HeadlessTrainer:
         best_score = -999999
 
         for move in legal_moves[:15]:
-            # Get material evaluation
+            # Get material evaluation after the opponent's best reply (one-ply lookahead)
             board.push(move)
             ai_mat = self.scorer._calculate_material(board, ai_color)
             opp_mat = self.scorer._calculate_material(board, not ai_color)
-            material_score = ai_mat - opp_mat
+            material_score = ai_mat - opp_mat - self._best_reply_material_gain(board)
             board.pop()
 
             # Get learned priority for this move (0-100 scale)
@@ -80,6 +80,23 @@ class HeadlessTrainer:
                 best_move = move
 
         return best_move
+
+    def _best_reply_material_gain(self, board):
+        """Most material the side to move can win with one move (captures and promotions)"""
+        values = self.scorer.PIECE_VALUES
+        best_gain = 0
+        for reply in board.legal_moves:
+            gain = 0
+            if board.is_en_passant(reply):
+                gain += values['P']
+            else:
+                captured = board.piece_at(reply.to_square)
+                if captured:
+                    gain += values[captured.symbol().upper()]
+            if reply.promotion:
+                gain += values[chess.piece_symbol(reply.promotion).upper()] - values['P']
+            best_gain = max(best_gain, gain)
+        return best_gain
 
     def play_opponent_move(self, board):
         """Random opponent with 30% capture bias"""
