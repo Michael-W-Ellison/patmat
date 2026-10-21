@@ -360,8 +360,8 @@ def run_full_test_suite():
 
 
 if __name__ == '__main__':
-    # Change to repository root
-    os.chdir('/home/user/patmat')
+    # Change to repository root (parent of this script's directory)
+    os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     success = run_full_test_suite()
 
