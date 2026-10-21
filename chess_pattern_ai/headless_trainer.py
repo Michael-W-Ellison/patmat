@@ -290,12 +290,12 @@ class HeadlessTrainer:
             print("No patterns learned yet!")
             return
 
-        print(f"{'Piece':<10} {'Category':<14} {'Phase':<12} {'Seen':<6} {'Win%':<8} {'Conf':<6} {'Priority':<8}")
+        print(f"{'Piece':<10} {'Category':<14} {'Distance':<10} {'Seen':<6} {'Win%':<8} {'Conf':<6} {'Priority':<8}")
         print("-" * 70)
 
         for row in patterns:
-            piece, category, dist, phase, seen, win_rate, conf, priority = row
-            print(f"{piece:<10} {category:<14} {phase:<12} {seen:<6} {win_rate:<7.1%} {conf:<6.2f} {priority:<8.1f}")
+            piece, category, dist, seen, win_rate, conf, priority = row
+            print(f"{piece:<10} {category:<14} {dist:<10} {seen:<6} {win_rate:<7.1%} {conf:<6.2f} {priority:<8.1f}")
 
         print("=" * 70)
 

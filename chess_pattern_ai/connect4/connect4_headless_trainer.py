@@ -120,18 +120,8 @@ class Connect4HeadlessTrainer:
             # Calculate distance from center column
             distance = self.distance_from_center(move.column)
 
-            # Determine game phase
-            total_pieces = game.get_piece_count(Color.RED) + \
-                          game.get_piece_count(Color.YELLOW)
-            if total_pieces < 9:
-                phase = 'early'
-            elif total_pieces < 30:
-                phase = 'mid'
-            else:
-                phase = 'late'
-
             # Get priority from learned patterns (query cache directly)
-            key = (piece_type, category, distance, phase)
+            key = self.prioritizer.pattern_key(piece_type, category, distance)
 
             if key in self.prioritizer.move_priorities:
                 priority = self.prioritizer.move_priorities[key]['priority']
@@ -198,20 +188,10 @@ class Connect4HeadlessTrainer:
 
                 distance = self.distance_from_center(move.column)
 
-                total_pieces = game.get_piece_count(Color.RED) + \
-                              game.get_piece_count(Color.YELLOW)
-                if total_pieces < 9:
-                    phase = 'early'
-                elif total_pieces < 30:
-                    phase = 'mid'
-                else:
-                    phase = 'late'
-
                 game_moves.append({
                     'piece_type': piece_type,
                     'category': category,
-                    'distance': distance,
-                    'phase': phase
+                    'distance': distance
                 })
 
             # Make move
@@ -249,7 +229,6 @@ class Connect4HeadlessTrainer:
                 piece_type=move_data['piece_type'],
                 move_category=move_data['category'],
                 distance=move_data['distance'],
-                phase=move_data['phase'],
                 result=result,
                 final_score=score
             )
@@ -333,13 +312,13 @@ class Connect4HeadlessTrainer:
 
         patterns = self.prioritizer.get_top_patterns(limit)
 
-        print(f"{'Piece':<8} {'Category':<10} {'Distance':<10} {'Phase':<8} {'Games':<8} {'Win%':<8} {'Priority':<10}")
+        print(f"{'Piece':<8} {'Category':<10} {'Distance':<10} {'Games':<8} {'Win%':<8} {'Priority':<10}")
         print(f"{'-'*72}")
 
         for pattern in patterns:
-            piece_type, category, distance, phase, times_seen, win_rate, confidence, priority = pattern
+            piece_type, category, distance, times_seen, win_rate, confidence, priority = pattern
             win_pct = win_rate * 100
-            print(f"{piece_type:<8} {category:<10} {distance:<10} {phase:<8} {times_seen:<8} {win_pct:<8.1f} {priority:<10.1f}")
+            print(f"{piece_type:<8} {category:<10} {distance:<10} {times_seen:<8} {win_pct:<8.1f} {priority:<10.1f}")
 
         print(f"{'='*70}\n")
 

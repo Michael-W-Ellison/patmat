@@ -71,17 +71,8 @@ class LOAHeadlessTrainer:
             # Get distance metric
             distance = self.scorer.get_distance_metric(move, game.board)
 
-            # Determine game phase based on group count
-            groups = game.board.count_groups(game.current_player)
-            if groups > 6:
-                phase = 'opening'
-            elif groups > 3:
-                phase = 'middlegame'
-            else:
-                phase = 'endgame'
-
             # Get priority from learned patterns
-            key = ('piece', category, distance, phase)
+            key = self.prioritizer.pattern_key('piece', category, distance)
 
             if key in self.prioritizer.move_priorities:
                 priority = self.prioritizer.move_priorities[key]['priority']
@@ -145,19 +136,10 @@ class LOAHeadlessTrainer:
                 category = self.scorer.get_move_category(game_before, new_game, move, Color.BLACK)
                 distance = self.scorer.get_distance_metric(move, game_before.board)
 
-                groups = game_before.board.count_groups(Color.BLACK)
-                if groups > 6:
-                    phase = 'opening'
-                elif groups > 3:
-                    phase = 'middlegame'
-                else:
-                    phase = 'endgame'
-
                 game_moves.append({
                     'piece_type': 'piece',
                     'category': category,
-                    'distance': distance,
-                    'phase': phase
+                    'distance': distance
                 })
 
             game = new_game
@@ -206,7 +188,6 @@ class LOAHeadlessTrainer:
                 piece_type=move_data['piece_type'],
                 move_category=move_data['category'],
                 distance=move_data['distance'],
-                phase=move_data['phase'],
                 result=result,
                 final_score=score
             )
@@ -276,14 +257,14 @@ class LOAHeadlessTrainer:
 
         patterns = self.prioritizer.get_top_patterns(limit)
 
-        print(f"{'Piece':<8} {'Category':<15} {'Dist':<6} {'Phase':<12} "
+        print(f"{'Piece':<8} {'Category':<15} {'Dist':<6} "
               f"{'Games':<8} {'Win%':<8} {'Priority':<10}")
         print(f"{'-'*90}")
 
         for pattern in patterns:
-            piece_type, category, distance, phase, times_seen, win_rate, confidence, priority = pattern
+            piece_type, category, distance, times_seen, win_rate, confidence, priority = pattern
             win_pct = win_rate * 100
-            print(f"{piece_type:<8} {category:<15} {distance:<6} {phase:<12} "
+            print(f"{piece_type:<8} {category:<15} {distance:<6} "
                   f"{times_seen:<8} {win_pct:<8.1f} {priority:<10.1f}")
 
         print(f"{'='*70}\n")

@@ -86,18 +86,8 @@ class CheckersHeadlessTrainer:
             to_row, to_col = move.to_pos
             distance = abs(to_row - from_row) + abs(to_col - from_col)
 
-            # Determine game phase (simple heuristic)
-            total_pieces = len(game.board.get_pieces(Color.RED)) + \
-                          len(game.board.get_pieces(Color.BLACK))
-            if total_pieces > 16:
-                phase = 'opening'
-            elif total_pieces > 8:
-                phase = 'middlegame'
-            else:
-                phase = 'endgame'
-
             # Get priority from learned patterns (query cache directly)
-            key = (piece_type, category, distance, phase)
+            key = self.prioritizer.pattern_key(piece_type, category, distance)
 
             if key in self.prioritizer.move_priorities:
                 priority = self.prioritizer.move_priorities[key]['priority']
@@ -168,20 +158,10 @@ class CheckersHeadlessTrainer:
                 to_row, to_col = move.to_pos
                 distance = abs(to_row - from_row) + abs(to_col - from_col)
 
-                total_pieces = len(game.board.get_pieces(Color.RED)) + \
-                              len(game.board.get_pieces(Color.BLACK))
-                if total_pieces > 16:
-                    phase = 'opening'
-                elif total_pieces > 8:
-                    phase = 'middlegame'
-                else:
-                    phase = 'endgame'
-
                 game_moves.append({
                     'piece_type': piece_type,
                     'category': category,
-                    'distance': distance,
-                    'phase': phase
+                    'distance': distance
                 })
 
             # Make move
@@ -219,7 +199,6 @@ class CheckersHeadlessTrainer:
                 piece_type=move_data['piece_type'],
                 move_category=move_data['category'],
                 distance=move_data['distance'],
-                phase=move_data['phase'],
                 result=result,
                 final_score=score
             )
@@ -303,13 +282,13 @@ class CheckersHeadlessTrainer:
 
         patterns = self.prioritizer.get_top_patterns(limit)
 
-        print(f"{'Piece':<8} {'Category':<15} {'Distance':<10} {'Phase':<12} {'Games':<8} {'Win%':<8} {'Priority':<10}")
+        print(f"{'Piece':<8} {'Category':<15} {'Distance':<10} {'Games':<8} {'Win%':<8} {'Priority':<10}")
         print(f"{'-'*80}")
 
         for pattern in patterns:
-            piece_type, category, distance, phase, times_seen, win_rate, confidence, priority = pattern
+            piece_type, category, distance, times_seen, win_rate, confidence, priority = pattern
             win_pct = win_rate * 100
-            print(f"{piece_type:<8} {category:<15} {distance:<10} {phase:<12} {times_seen:<8} {win_pct:<8.1f} {priority:<10.1f}")
+            print(f"{piece_type:<8} {category:<15} {distance:<10} {times_seen:<8} {win_pct:<8.1f} {priority:<10.1f}")
 
         print(f"{'='*70}\n")
 

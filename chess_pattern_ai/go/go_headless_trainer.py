@@ -113,30 +113,8 @@ class GoHeadlessTrainer:
                 # Distance from board center
                 distance = self._distance_from_center(move.position)
 
-            # Determine game phase (based on move count)
-            # Go games typically last 150-200 moves on 19x19, 40-80 on 9x9
-            move_count = len(game.board.move_history)
-            total_intersections = self.board_size * self.board_size
-
-            if self.board_size == 9:
-                # 9x9 games are shorter
-                if move_count < 20:
-                    phase = 'opening'
-                elif move_count < 50:
-                    phase = 'middlegame'
-                else:
-                    phase = 'endgame'
-            else:  # 19x19
-                # 19x19 games are longer
-                if move_count < 60:
-                    phase = 'opening'
-                elif move_count < 150:
-                    phase = 'middlegame'
-                else:
-                    phase = 'endgame'
-
             # Get priority from learned patterns (query cache directly)
-            key = (piece_type, category, distance, phase)
+            key = self.prioritizer.pattern_key(piece_type, category, distance)
 
             if key in self.prioritizer.move_priorities:
                 priority = self.prioritizer.move_priorities[key]['priority']
@@ -210,29 +188,10 @@ class GoHeadlessTrainer:
 
                     distance = self._distance_from_center(move.position)
 
-                # Phase calculation
-                move_count = len(game.board.move_history)
-
-                if self.board_size == 9:
-                    if move_count < 20:
-                        phase = 'opening'
-                    elif move_count < 50:
-                        phase = 'middlegame'
-                    else:
-                        phase = 'endgame'
-                else:  # 19x19
-                    if move_count < 60:
-                        phase = 'opening'
-                    elif move_count < 150:
-                        phase = 'middlegame'
-                    else:
-                        phase = 'endgame'
-
                 game_moves.append({
                     'piece_type': piece_type,
                     'category': category,
-                    'distance': distance,
-                    'phase': phase
+                    'distance': distance
                 })
 
             # Make move
@@ -271,7 +230,6 @@ class GoHeadlessTrainer:
                 piece_type=move_data['piece_type'],
                 move_category=move_data['category'],
                 distance=move_data['distance'],
-                phase=move_data['phase'],
                 result=result,
                 final_score=score
             )
@@ -356,13 +314,13 @@ class GoHeadlessTrainer:
 
         patterns = self.prioritizer.get_top_patterns(limit)
 
-        print(f"{'Piece':<8} {'Category':<15} {'Distance':<10} {'Phase':<12} {'Games':<8} {'Win%':<8} {'Priority':<10}")
+        print(f"{'Piece':<8} {'Category':<15} {'Distance':<10} {'Games':<8} {'Win%':<8} {'Priority':<10}")
         print(f"{'-'*80}")
 
         for pattern in patterns:
-            piece_type, category, distance, phase, times_seen, win_rate, confidence, priority = pattern
+            piece_type, category, distance, times_seen, win_rate, confidence, priority = pattern
             win_pct = win_rate * 100
-            print(f"{piece_type:<8} {category:<15} {distance:<10} {phase:<12} {times_seen:<8} {win_pct:<8.1f} {priority:<10.1f}")
+            print(f"{piece_type:<8} {category:<15} {distance:<10} {times_seen:<8} {win_pct:<8.1f} {priority:<10.1f}")
 
         print(f"{'='*70}\n")
 

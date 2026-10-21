@@ -75,17 +75,8 @@ class ArimaaHeadlessTrainer:
             # Get distance metric
             distance = self.scorer.get_distance_metric(step, game.board)
 
-            # Determine game phase
-            total_pieces = len(game.board.pieces_gold) + len(game.board.pieces_silver)
-            if total_pieces > 24:
-                phase = 'opening'
-            elif total_pieces > 16:
-                phase = 'middlegame'
-            else:
-                phase = 'endgame'
-
             # Get priority from learned patterns
-            key = ('step', category, distance, phase)
+            key = self.prioritizer.pattern_key('step', category, distance)
 
             if key in self.prioritizer.move_priorities:
                 priority = self.prioritizer.move_priorities[key]['priority']
@@ -143,19 +134,10 @@ class ArimaaHeadlessTrainer:
                 category = self.scorer.get_move_category(game_before, new_game, step, Color.GOLD)
                 distance = self.scorer.get_distance_metric(step, game_before.board)
 
-                total_pieces = len(game_before.board.pieces_gold) + len(game_before.board.pieces_silver)
-                if total_pieces > 24:
-                    phase = 'opening'
-                elif total_pieces > 16:
-                    phase = 'middlegame'
-                else:
-                    phase = 'endgame'
-
                 turn_steps.append({
                     'piece_type': 'step',
                     'category': category,
-                    'distance': distance,
-                    'phase': phase
+                    'distance': distance
                 })
 
             current_game = new_game
@@ -228,7 +210,6 @@ class ArimaaHeadlessTrainer:
                 piece_type=step_data['piece_type'],
                 move_category=step_data['category'],
                 distance=step_data['distance'],
-                phase=step_data['phase'],
                 result=result,
                 final_score=score
             )
@@ -298,14 +279,14 @@ class ArimaaHeadlessTrainer:
 
         patterns = self.prioritizer.get_top_patterns(limit)
 
-        print(f"{'Type':<8} {'Category':<18} {'Dist':<6} {'Phase':<12} "
+        print(f"{'Type':<8} {'Category':<18} {'Dist':<6} "
               f"{'Games':<8} {'Win%':<8} {'Priority':<10}")
         print(f"{'-'*90}")
 
         for pattern in patterns:
-            piece_type, category, distance, phase, times_seen, win_rate, confidence, priority = pattern
+            piece_type, category, distance, times_seen, win_rate, confidence, priority = pattern
             win_pct = win_rate * 100
-            print(f"{piece_type:<8} {category:<18} {distance:<6} {phase:<12} "
+            print(f"{piece_type:<8} {category:<18} {distance:<6} "
                   f"{times_seen:<8} {win_pct:<8.1f} {priority:<10.1f}")
 
         print(f"{'='*70}\n")

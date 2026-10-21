@@ -117,25 +117,6 @@ class HexHeadlessTrainer:
         center = self.board_size // 2
         return max(abs(row - center), abs(col - center))
 
-    def get_game_phase(self, total_stones: int, board_fill_percent: float) -> str:
-        """
-        Determine game phase based on move count and board fill
-
-        Args:
-            total_stones: Total stones on board
-            board_fill_percent: Percentage of board filled (0-100)
-
-        Returns: 'opening', 'middlegame', or 'endgame'
-        """
-        total_capacity = self.board_size * self.board_size
-
-        if total_stones < 10 or board_fill_percent < 5:
-            return 'opening'
-        elif board_fill_percent < 70:
-            return 'middlegame'
-        else:
-            return 'endgame'
-
     def select_move(self, game: HexGame, ai_color: Color,
                    use_learning: bool = True) -> Move:
         """
@@ -167,14 +148,8 @@ class HexHeadlessTrainer:
             # Calculate distance from center
             distance = self.distance_from_center(move.position[0], move.position[1])
 
-            # Determine game phase
-            total_stones = sum(1 for stone in game.board.stones)
-            total_capacity = self.board_size * self.board_size
-            board_fill_percent = (total_stones / total_capacity) * 100
-            phase = self.get_game_phase(total_stones, board_fill_percent)
-
             # Get priority from learned patterns (query cache directly)
-            key = (piece_type, category, distance, phase)
+            key = self.prioritizer.pattern_key(piece_type, category, distance)
 
             if key in self.prioritizer.move_priorities:
                 priority = self.prioritizer.move_priorities[key]['priority']
@@ -245,16 +220,10 @@ class HexHeadlessTrainer:
 
                 distance = self.distance_from_center(move.position[0], move.position[1])
 
-                total_stones = sum(1 for stone in game.board.stones)
-                total_capacity = self.board_size * self.board_size
-                board_fill_percent = (total_stones / total_capacity) * 100
-                phase = self.get_game_phase(total_stones, board_fill_percent)
-
                 game_moves.append({
                     'piece_type': piece_type,
                     'category': category,
-                    'distance': distance,
-                    'phase': phase
+                    'distance': distance
                 })
 
             # Make move
@@ -294,7 +263,6 @@ class HexHeadlessTrainer:
                 piece_type=move_data['piece_type'],
                 move_category=move_data['category'],
                 distance=move_data['distance'],
-                phase=move_data['phase'],
                 result=result,
                 final_score=score
             )
@@ -379,13 +347,13 @@ class HexHeadlessTrainer:
 
         patterns = self.prioritizer.get_top_patterns(limit)
 
-        print(f"{'Piece':<8} {'Category':<10} {'Distance':<10} {'Phase':<12} {'Games':<8} {'Win%':<8} {'Priority':<10}")
+        print(f"{'Piece':<8} {'Category':<10} {'Distance':<10} {'Games':<8} {'Win%':<8} {'Priority':<10}")
         print(f"{'-'*76}")
 
         for pattern in patterns:
-            piece_type, category, distance, phase, times_seen, win_rate, confidence, priority = pattern
+            piece_type, category, distance, times_seen, win_rate, confidence, priority = pattern
             win_pct = win_rate * 100
-            print(f"{piece_type:<8} {category:<10} {distance:<10} {phase:<12} {times_seen:<8} {win_pct:<8.1f} {priority:<10.1f}")
+            print(f"{piece_type:<8} {category:<10} {distance:<10} {times_seen:<8} {win_pct:<8.1f} {priority:<10.1f}")
 
         print(f"{'='*70}\n")
 

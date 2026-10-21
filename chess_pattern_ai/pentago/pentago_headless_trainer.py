@@ -72,17 +72,8 @@ class PentagoHeadlessTrainer:
             # Get distance metric
             distance = self.scorer.get_distance_metric(move, game.board)
 
-            # Determine game phase
-            marble_count = game.board.marble_count
-            if marble_count < 12:
-                phase = 'opening'
-            elif marble_count < 28:
-                phase = 'middlegame'
-            else:
-                phase = 'endgame'
-
             # Get priority from learned patterns
-            key = ('marble', category, distance, phase)
+            key = self.prioritizer.pattern_key('marble', category, distance)
 
             if key in self.prioritizer.move_priorities:
                 priority = self.prioritizer.move_priorities[key]['priority']
@@ -148,19 +139,10 @@ class PentagoHeadlessTrainer:
                 )
                 distance = self.scorer.get_distance_metric(move, board_before)
 
-                marble_count = board_before.marble_count
-                if marble_count < 12:
-                    phase = 'opening'
-                elif marble_count < 28:
-                    phase = 'middlegame'
-                else:
-                    phase = 'endgame'
-
                 game_moves.append({
                     'piece_type': 'marble',
                     'category': category,
-                    'distance': distance,
-                    'phase': phase
+                    'distance': distance
                 })
 
             game = new_game
@@ -207,7 +189,6 @@ class PentagoHeadlessTrainer:
                 piece_type=move_data['piece_type'],
                 move_category=move_data['category'],
                 distance=move_data['distance'],
-                phase=move_data['phase'],
                 result=result,
                 final_score=score
             )
@@ -277,14 +258,14 @@ class PentagoHeadlessTrainer:
 
         patterns = self.prioritizer.get_top_patterns(limit)
 
-        print(f"{'Piece':<8} {'Category':<15} {'Distance':<10} {'Phase':<12} "
+        print(f"{'Piece':<8} {'Category':<15} {'Distance':<10} "
               f"{'Games':<8} {'Win%':<8} {'Priority':<10}")
         print(f"{'-'*90}")
 
         for pattern in patterns:
-            piece_type, category, distance, phase, times_seen, win_rate, confidence, priority = pattern
+            piece_type, category, distance, times_seen, win_rate, confidence, priority = pattern
             win_pct = win_rate * 100
-            print(f"{piece_type:<8} {category:<15} {distance:<10} {phase:<12} "
+            print(f"{piece_type:<8} {category:<15} {distance:<10} "
                   f"{times_seen:<8} {win_pct:<8.1f} {priority:<10.1f}")
 
         print(f"{'='*70}\n")

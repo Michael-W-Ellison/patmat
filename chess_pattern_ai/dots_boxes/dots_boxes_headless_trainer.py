@@ -106,25 +106,6 @@ class DotsBoxesHeadlessTrainer:
 
         return max(abs(int(avg_row) - center), abs(int(avg_col) - center))
 
-    def get_game_phase(self, boxes_completed: int, legal_edges_count: int) -> str:
-        """
-        Determine game phase based on boxes completed
-
-        Args:
-            boxes_completed: Total boxes completed so far
-            legal_edges_count: Remaining legal edges
-
-        Returns: 'opening', 'middlegame', or 'endgame'
-        """
-        total_boxes = (self.board_size - 1) * (self.board_size - 1)  # 4x4 = 16 boxes
-
-        if boxes_completed < total_boxes * 0.2:
-            return 'opening'
-        elif boxes_completed < total_boxes * 0.8:
-            return 'middlegame'
-        else:
-            return 'endgame'
-
     def select_move(self, game: DotsBoxesGame, ai_color: Color,
                    use_learning: bool = True) -> Edge:
         """
@@ -146,10 +127,6 @@ class DotsBoxesHeadlessTrainer:
         # Score each move using learned patterns
         move_scores = []
 
-        red_boxes, blue_boxes = game.board.get_box_counts()
-        boxes_completed = red_boxes + blue_boxes
-        legal_edges = game.board.get_legal_edges()
-
         for edge in legal_moves:
             # Extract move features for pattern matching
             piece_type = 'edge'
@@ -160,11 +137,8 @@ class DotsBoxesHeadlessTrainer:
             # Calculate distance from center
             distance = self.distance_from_center(edge.dot1, edge.dot2)
 
-            # Determine game phase
-            phase = self.get_game_phase(boxes_completed, len(legal_edges))
-
             # Get priority from learned patterns (query cache directly)
-            key = (piece_type, category, distance, phase)
+            key = self.prioritizer.pattern_key(piece_type, category, distance)
 
             if key in self.prioritizer.move_priorities:
                 priority = self.prioritizer.move_priorities[key]['priority']
@@ -233,16 +207,10 @@ class DotsBoxesHeadlessTrainer:
 
                 distance = self.distance_from_center(move.dot1, move.dot2)
 
-                red_boxes, blue_boxes = game.board.get_box_counts()
-                boxes_completed = red_boxes + blue_boxes
-                legal_edges = game.board.get_legal_edges()
-                phase = self.get_game_phase(boxes_completed, len(legal_edges))
-
                 game_moves.append({
                     'piece_type': piece_type,
                     'category': category,
-                    'distance': distance,
-                    'phase': phase
+                    'distance': distance
                 })
 
             # Make move
@@ -284,7 +252,6 @@ class DotsBoxesHeadlessTrainer:
                 piece_type=move_data['piece_type'],
                 move_category=move_data['category'],
                 distance=move_data['distance'],
-                phase=move_data['phase'],
                 result=result,
                 final_score=score
             )
@@ -369,13 +336,13 @@ class DotsBoxesHeadlessTrainer:
 
         patterns = self.prioritizer.get_top_patterns(limit)
 
-        print(f"{'Piece':<8} {'Category':<14} {'Distance':<10} {'Phase':<12} {'Games':<8} {'Win%':<8} {'Priority':<10}")
+        print(f"{'Piece':<8} {'Category':<14} {'Distance':<10} {'Games':<8} {'Win%':<8} {'Priority':<10}")
         print(f"{'-'*80}")
 
         for pattern in patterns:
-            piece_type, category, distance, phase, times_seen, win_rate, confidence, priority = pattern
+            piece_type, category, distance, times_seen, win_rate, confidence, priority = pattern
             win_pct = win_rate * 100
-            print(f"{piece_type:<8} {category:<14} {distance:<10} {phase:<12} {times_seen:<8} {win_pct:<8.1f} {priority:<10.1f}")
+            print(f"{piece_type:<8} {category:<14} {distance:<10} {times_seen:<8} {win_pct:<8.1f} {priority:<10.1f}")
 
         print(f"{'='*70}\n")
 

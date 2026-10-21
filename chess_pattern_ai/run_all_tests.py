@@ -114,7 +114,7 @@ def test_core_imports():
     # Test core modules
     core_modules = [
         ('learnable_move_prioritizer', 'LearnableMovePrioritizer'),
-        ('game_scorer', 'BaseScorer'),
+        ('game_scorer', 'GameScorer'),
     ]
 
     os.chdir('chess_pattern_ai')
