@@ -43,6 +43,8 @@ class LearnableMovePrioritizer:
         self.move_priorities = {}
 
         self._init_tables()
+        self._recalculate_priorities()
+        self.conn.commit()
         self._load_priorities()
 
     def _init_tables(self):
@@ -288,6 +290,9 @@ class LearnableMovePrioritizer:
 
         last_ai_move_idx = ai_move_indices[-1] if ai_move_indices else -1
 
+        # Patterns already credited with this game's result
+        credited = set()
+
         for idx, (fen_before, move_uci, move_san) in enumerate(moves):
             if not self._sync_board(board, fen_before):
                 continue
@@ -309,6 +314,15 @@ class LearnableMovePrioritizer:
             # MOVE-LEVEL SCORING: Calculate immediate observable effect
             move_score = self._calculate_move_score(board, move, ai_color, is_last_move, result)
 
+            key = self.pattern_key(
+                characteristics['piece_type'],
+                characteristics['move_category'],
+                characteristics['distance_from_start'],
+                characteristics['repetition_count'],
+                characteristics['moves_since_progress'],
+                characteristics['total_material_level']
+            )
+
             # Update statistics for this move type with MOVE score, not GAME score
             self._update_move_statistics(
                 characteristics['piece_type'],
@@ -318,11 +332,39 @@ class LearnableMovePrioritizer:
                 move_score,  # Use move score, not final_score!
                 repetition_count=characteristics['repetition_count'],
                 moves_since_progress=characteristics['moves_since_progress'],
-                total_material_level=characteristics['total_material_level']
+                total_material_level=characteristics['total_material_level'],
+                count_game=key not in credited
             )
+            credited.add(key)
 
             board.push(move)
 
+        self._recalculate_priorities()
+        self.conn.commit()
+
+    def record_game_patterns(self, patterns: List[Dict], result: str, final_score: float):
+        """
+        Record the patterns of one game for trainers that score at game level
+
+        Args:
+            patterns: Dicts with 'piece_type', 'category' and 'distance', one per move
+            result: 'win', 'loss', or 'draw'
+            final_score: Game score, credited to every move
+        """
+        credited = set()
+        for pattern in patterns:
+            key = self.pattern_key(pattern['piece_type'], pattern['category'], pattern['distance'])
+            self._update_move_statistics(
+                piece_type=pattern['piece_type'],
+                move_category=pattern['category'],
+                distance=pattern['distance'],
+                result=result,
+                final_score=final_score,
+                count_game=key not in credited
+            )
+            credited.add(key)
+
+        self._recalculate_priorities()
         self.conn.commit()
 
     @staticmethod
@@ -422,8 +464,15 @@ class LearnableMovePrioritizer:
                                 distance: int,
                                 result: str, final_score: float,
                                 repetition_count: int = 0, moves_since_progress: int = 0,
-                                total_material_level: str = 'medium'):
-        """Update win/loss statistics and score for a move pattern"""
+                                total_material_level: str = 'medium',
+                                count_game: bool = True):
+        """
+        Update win/loss statistics and score for a move pattern
+
+        times_seen and the score count every move. games_won/lost/drawn count
+        games, so pass count_game=False for repeat occurrences of the pattern
+        within the same game. priority_score is set by _recalculate_priorities().
+        """
 
         # Get current stats
         self.cursor.execute('''
@@ -446,36 +495,22 @@ class LearnableMovePrioritizer:
             times_seen, won, lost, drawn = 1, 0, 0, 0
             total_score = final_score
 
-        # Update based on result
-        if result == 'win':
-            won += 1
-        elif result == 'loss':
-            lost += 1
-        else:
-            drawn += 1
+        # Update based on result (once per game)
+        if count_game:
+            if result == 'win':
+                won += 1
+            elif result == 'loss':
+                lost += 1
+            else:
+                drawn += 1
 
-        # Calculate win rate and confidence
+        # Calculate win rate (per game) and average score (per move)
         total_games = won + lost + drawn
         win_rate = won / total_games if total_games > 0 else 0.0
-        avg_score = total_score / total_games if total_games > 0 else 0.0
+        avg_score = total_score / times_seen
 
         # Confidence increases with more observations
-        confidence = min(1.0, total_games / 50.0)  # Max confidence at 50+ games
-
-        # Priority score: DIFFERENTIAL SCORE-BASED!
-        # Moves with high avg_score (material advantage + win bonus) get priority
-        #
-        # Score ranges (with differential scoring):
-        #   Best wins: ~1590 (win + ahead + fast)
-        #   Average wins: ~1050 (win + even + slow)
-        #   Draws ahead: ~300
-        #   Draws behind: ~-300
-        #   Losses close: ~-800 (lost but fought well)
-        #   Losses crushed: ~-1500 (got destroyed)
-        #
-        # Normalize -1500 to +1600 → 0 to 100
-        normalized_score = (avg_score + 1500) / 31  # -1500 to +1600 → 0 to 100
-        priority_score = normalized_score * confidence  # 0-100, confidence-weighted
+        confidence = min(1.0, times_seen / 50.0)  # Max confidence at 50+ observations
 
         # Insert or update
         self.cursor.execute('''
@@ -483,8 +518,8 @@ class LearnableMovePrioritizer:
                 (piece_type, move_category, distance_from_start,
                  repetition_count, moves_since_progress, total_material_level,
                  times_seen, games_won, games_lost, games_drawn,
-                 win_rate, total_score, avg_score, confidence, priority_score, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                 win_rate, total_score, avg_score, confidence, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
             ON CONFLICT(piece_type, move_category, distance_from_start,
                         repetition_count, moves_since_progress, total_material_level)
             DO UPDATE SET
@@ -496,14 +531,38 @@ class LearnableMovePrioritizer:
                 total_score = ?,
                 avg_score = ?,
                 confidence = ?,
-                priority_score = ?,
                 updated_at = datetime('now')
         ''', (
             piece_type, move_category, distance,
             repetition_count, moves_since_progress, total_material_level,
-            times_seen, won, lost, drawn, win_rate, total_score, avg_score, confidence, priority_score,
-            times_seen, won, lost, drawn, win_rate, total_score, avg_score, confidence, priority_score
+            times_seen, won, lost, drawn, win_rate, total_score, avg_score, confidence,
+            times_seen, won, lost, drawn, win_rate, total_score, avg_score, confidence
         ))
+
+    def _recalculate_priorities(self):
+        """
+        Set priority_score (0-100) for every pattern from its avg_score rank.
+
+        Score scales differ widely between games (and chess move scores
+        include +/-10000 outliers), so priority uses the pattern's percentile
+        among all patterns in this database rather than a fixed range.
+        Mid-rank percentile: ties share a value and a lone pattern gets 50.
+        The percentile is blended toward a neutral 50 by confidence, so
+        rarely seen patterns stay close to the default priorities.
+        """
+        self.cursor.execute('''
+            UPDATE learned_move_patterns
+            SET priority_score = 50.0 + (ranked.percentile - 50.0) * learned_move_patterns.confidence
+            FROM (
+                SELECT id,
+                       100.0 * ((RANK() OVER (ORDER BY avg_score) - 1)
+                                + (COUNT(*) OVER (PARTITION BY avg_score) - 1) / 2.0
+                                + 0.5)
+                             / COUNT(*) OVER () AS percentile
+                FROM learned_move_patterns
+            ) AS ranked
+            WHERE ranked.id = learned_move_patterns.id
+        ''')
 
     def _load_priorities(self):
         """Load learned move priorities from database"""

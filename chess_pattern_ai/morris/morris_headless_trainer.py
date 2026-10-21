@@ -189,15 +189,7 @@ class MorrisHeadlessTrainer:
             print(f"{'='*70}\n")
 
         # Record game for learning
-        for move_data in game_moves:
-            self.prioritizer._update_move_statistics(
-                piece_type=move_data['piece_type'],
-                move_category=move_data['category'],
-                distance=move_data['distance'],
-                result=result,
-                final_score=score
-            )
-        self.prioritizer.conn.commit()
+        self.prioritizer.record_game_patterns(game_moves, result, score)
 
         return result, score, rounds
 

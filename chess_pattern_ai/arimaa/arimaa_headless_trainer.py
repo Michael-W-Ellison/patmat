@@ -205,15 +205,7 @@ class ArimaaHeadlessTrainer:
             print(f"{'='*70}\n")
 
         # Record game for learning
-        for step_data in all_steps:
-            self.prioritizer._update_move_statistics(
-                piece_type=step_data['piece_type'],
-                move_category=step_data['category'],
-                distance=step_data['distance'],
-                result=result,
-                final_score=score
-            )
-        self.prioritizer.conn.commit()
+        self.prioritizer.record_game_patterns(all_steps, result, score)
 
         return result, score, turns
 
