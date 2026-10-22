@@ -17,6 +17,8 @@ import random
 from datetime import datetime
 from game_scorer import GameScorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
+from general_move_patterns import GeneralPatternLearner, extract_features, universal_db_path
+from chess_adapter import ChessAdapter
 
 
 class HeadlessTrainer:
@@ -25,6 +27,10 @@ class HeadlessTrainer:
     def __init__(self, db_path='headless_training.db'):
         self.scorer = GameScorer()
         self.prioritizer = LearnableMovePrioritizer(db_path)
+        # Game-independent patterns, shared with the other games' trainers
+        self.general = GeneralPatternLearner(universal_db_path(db_path))
+        self.adapter = ChessAdapter()
+        self.last_general_features = None
 
         self.games_played = 0
         self.wins = 0
@@ -55,7 +61,10 @@ class HeadlessTrainer:
         best_move = None
         best_score = -999999
 
-        for move in legal_moves[:15]:
+        candidates = legal_moves[:15]
+        general_features = extract_features(self.adapter, board, ai_color, candidates)
+
+        for move, features in zip(candidates, general_features):
             # Get material evaluation after the opponent's best reply (one-ply lookahead)
             board.push(move)
             ai_mat = self.scorer._calculate_material(board, ai_color)
@@ -71,6 +80,9 @@ class HeadlessTrainer:
             # - total_material_level (AI will learn: low → draw → avoid trades)
             priority = self.prioritizer.get_move_priority(board, move)
 
+            # Game-independent pattern value, same scale as the priority (-50..+50)
+            priority += self.general.value(features)
+
             # Combine material + learned patterns
             # Priority scaled by 20 means a priority-72 move gets +1440 bonus
             score = material_score + (priority * 20)
@@ -78,6 +90,7 @@ class HeadlessTrainer:
             if score > best_score:
                 best_score = score
                 best_move = move
+                self.last_general_features = features
 
         return best_move
 
@@ -115,6 +128,7 @@ class HeadlessTrainer:
         """Play a complete game until natural conclusion"""
         board = chess.Board()
         game_moves = []
+        general_features = []
         move_count = 0
 
         # Play until game naturally ends (checkmate, stalemate, etc.)
@@ -128,6 +142,7 @@ class HeadlessTrainer:
                     move_san = board.san(move)
                     board.push(move)
                     game_moves.append((fen_before, move.uci(), move_san))
+                    general_features.append(self.last_general_features)
 
                     if verbose:
                         ai_mat = self.scorer._calculate_material(board, ai_color)
@@ -193,6 +208,7 @@ class HeadlessTrainer:
 
         # Record for learning
         self.prioritizer.record_game_moves(game_moves, ai_color, result, final_score)
+        self.general.record_game(general_features, result, 'chess')
 
         # Store result details
         self.game_results.append({
@@ -319,6 +335,7 @@ class HeadlessTrainer:
     def close(self):
         """Clean up resources"""
         self.prioritizer.close()
+        self.general.close()
 
 
 def main():
