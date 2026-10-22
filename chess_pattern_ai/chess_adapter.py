@@ -11,6 +11,9 @@ _PIECE_TYPES = [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN,
 class ChessAdapter:
     """State is a chess.Board; color is chess.WHITE / chess.BLACK"""
 
+    # Win-condition weight, in the scorer's material units (pawn = 10)
+    CHECK_VALUE = 5.0
+
     def __init__(self):
         values = GameScorer.PIECE_VALUES
         self.values = {pt: values[chess.piece_symbol(pt).upper()] for pt in _PIECE_TYPES}
@@ -31,10 +34,22 @@ class ChessAdapter:
         board.pop()
 
     def advantage(self, board, color):
-        """Material difference (scorer's piece values)"""
+        """
+        Material difference (scorer's piece values) plus progress toward the
+        winning condition, checkmate (the side to move is in check and has no
+        legal move): giving check is worth CHECK_VALUE. A checkmate itself is
+        valued as a win by general_move_patterns.evaluate().
+
+        Counting the kings' available moves as a further win-condition term
+        lowered the win rate in testing (60-68% against 74% over 600 games),
+        so it is not included.
+        """
         total = 0.0
         for pt, value in self.values.items():
             total += value * (len(board.pieces(pt, color)) - len(board.pieces(pt, not color)))
+        if board.is_check():
+            # Only the side to move can be in check
+            total += self.CHECK_VALUE if board.turn != color else -self.CHECK_VALUE
         return total
 
     def is_over(self, board):

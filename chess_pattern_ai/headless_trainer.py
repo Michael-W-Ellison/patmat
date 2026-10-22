@@ -17,7 +17,7 @@ import random
 from datetime import datetime
 from game_scorer import GameScorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
-from general_move_patterns import GeneralPatternLearner, extract_features, universal_db_path
+from general_move_patterns import GeneralPatternLearner, analyze_candidates, evaluate, universal_db_path
 from chess_adapter import ChessAdapter
 
 
@@ -50,27 +50,28 @@ class HeadlessTrainer:
         }
 
     def play_ai_move(self, board, ai_color):
-        """AI move selection using learned patterns + material evaluation"""
+        """AI move selection using learned patterns + position evaluation"""
         if board.is_game_over():
             return None
 
         legal_moves = list(board.legal_moves)
         legal_moves = self.prioritizer.sort_moves_by_priority(board, legal_moves)
 
-        # Evaluate moves using BOTH material AND learned patterns
+        # Evaluate moves using BOTH the position evaluation AND learned patterns
         best_move = None
-        best_score = -999999
+        best_score = float('-inf')
 
         candidates = legal_moves[:15]
-        general_features = extract_features(self.adapter, board, ai_color, candidates)
+        # One-ply lookahead over every opponent reply: material, progress toward
+        # checkmate, and finished games valued by their result (see ChessAdapter)
+        analysis = analyze_candidates(self.adapter, board, ai_color, candidates,
+                                      max_replies=float('inf'))
+        value_now = evaluate(self.adapter, board, ai_color)
 
-        for move, features in zip(candidates, general_features):
-            # Get material evaluation after the opponent's best reply (one-ply lookahead)
-            board.push(move)
-            ai_mat = self.scorer._calculate_material(board, ai_color)
-            opp_mat = self.scorer._calculate_material(board, not ai_color)
-            material_score = ai_mat - opp_mat - self._best_reply_material_gain(board)
-            board.pop()
+        for move, result in zip(candidates, analysis):
+            features = result['features']
+            # Evaluation after the opponent's best reply
+            position_score = value_now + result['net']
 
             # Get learned priority for this move (0-100 scale)
             # Higher priority = historically better outcomes
@@ -83,9 +84,9 @@ class HeadlessTrainer:
             # Game-independent pattern value, same scale as the priority (-50..+50)
             priority += self.general.value(features)
 
-            # Combine material + learned patterns
+            # Combine position evaluation + learned patterns
             # Priority scaled by 20 means a priority-72 move gets +1440 bonus
-            score = material_score + (priority * 20)
+            score = position_score + (priority * 20)
 
             if score > best_score:
                 best_score = score
@@ -93,23 +94,6 @@ class HeadlessTrainer:
                 self.last_general_features = features
 
         return best_move
-
-    def _best_reply_material_gain(self, board):
-        """Most material the side to move can win with one move (captures and promotions)"""
-        values = self.scorer.PIECE_VALUES
-        best_gain = 0
-        for reply in board.legal_moves:
-            gain = 0
-            if board.is_en_passant(reply):
-                gain += values['P']
-            else:
-                captured = board.piece_at(reply.to_square)
-                if captured:
-                    gain += values[captured.symbol().upper()]
-            if reply.promotion:
-                gain += values[chess.piece_symbol(reply.promotion).upper()] - values['P']
-            best_gain = max(best_gain, gain)
-        return best_gain
 
     def play_opponent_move(self, board):
         """Random opponent with 30% capture bias"""
