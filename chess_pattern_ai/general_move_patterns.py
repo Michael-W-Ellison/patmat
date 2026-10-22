@@ -25,7 +25,9 @@ A game takes part by providing an adapter with:
     legal_moves(state, color) -> list of moves
     apply(state, move)        -> new state (state itself unchanged)
     advantage(state, color)   -> float, color's measure minus the opponent's,
-                                 from the game's own scorer (higher = better)
+                                 from the game's own scorer (higher = better);
+                                 it should measure progress toward the game's
+                                 winning condition, not only material
     is_over(state)            -> bool
     winner(state)             -> winning color, or None (draw / not over)
     to_move(state)            -> color to move
@@ -47,6 +49,7 @@ DB_NAME = 'universal_move_patterns.db'
 MAX_REPLIES = 30       # opponent replies examined per candidate (sampled above this)
 MAX_CANDIDATES = 12    # candidates a trainer should pass in (its best by its own score)
 EPSILON = 1e-9
+WIN_VALUE = 1_000_000.0  # value of a won position; above any adapter's advantage
 
 
 def universal_db_path(training_db_path: str) -> str:
@@ -62,16 +65,36 @@ def _sign_class(value: float) -> str:
     return '0'
 
 
-def extract_features(adapter, state, color, candidates: Sequence,
-                     rng: random.Random = random, max_replies: int = MAX_REPLIES) -> List[str]:
+def evaluate(adapter, state, color) -> float:
     """
-    Describe each candidate move with game-independent features.
+    Value of a position for color, judged first by the game's winning condition:
+    a finished game is worth +WIN_VALUE (won), -WIN_VALUE (lost) or 0 (draw);
+    otherwise the adapter's advantage measure.
+    """
+    if adapter.is_over(state):
+        winner = adapter.winner(state)
+        if winner is None:
+            return 0.0
+        return WIN_VALUE if winner == color else -WIN_VALUE
+    return adapter.advantage(state, color)
+
+
+def analyze_candidates(adapter, state, color, candidates: Sequence,
+                       rng: random.Random = random,
+                       max_replies: int = MAX_REPLIES) -> List[Dict]:
+    """
+    Evaluate each candidate move one ply deep and describe it with
+    game-independent features.
 
     Returns:
-        One feature string per candidate, in the same order
+        One dict per candidate, in the same order:
+        - 'features': feature string (see the module docstring)
+        - 'gain': evaluate() change caused by the move
+        - 'net':  evaluate() change after the opponent's best examined reply
+                  (equal to gain when the move ends the game or keeps the turn)
     """
     opp = adapter.opponent(color)
-    adv_now = adapter.advantage(state, color)
+    value_now = evaluate(adapter, state, color)
     info = []
 
     in_place = hasattr(adapter, 'push') and hasattr(adapter, 'pop')
@@ -88,36 +111,44 @@ def extract_features(adapter, state, color, candidates: Sequence,
 
     for move in candidates:
         after = play(state, move)
-        gain = adapter.advantage(after, color) - adv_now
-        entry = {'gain': gain, 'replies': None, 'net': gain, 'threat': 'safe', 'mob': None}
+        entry = {'replies': None, 'threat': 'safe', 'mob': None}
 
         if adapter.is_over(after):
             winner = adapter.winner(after)
             entry['threat'] = ('wins_now' if winner == color
                                else 'draws_now' if winner is None else 'loses_now')
             entry['mob'] = 'terminal'
-        elif adapter.to_move(after) == color:
-            entry['mob'] = 'extra_turn'
+            entry['gain'] = entry['net'] = evaluate(adapter, after, color) - value_now
         else:
-            replies = adapter.legal_moves(after, opp)
-            entry['replies'] = len(replies)
-            if len(replies) > max_replies:
-                replies = rng.sample(list(replies), max_replies)
+            entry['gain'] = entry['net'] = adapter.advantage(after, color) - value_now
+            if adapter.to_move(after) == color:
+                entry['mob'] = 'extra_turn'
+            else:
+                replies = adapter.legal_moves(after, opp)
+                entry['replies'] = len(replies)
+                if len(replies) > max_replies:
+                    replies = rng.sample(list(replies), max_replies)
 
-            worst = None
-            for reply in list(replies):
-                after_reply = play(after, reply)
-                if adapter.is_over(after_reply):
-                    winner = adapter.winner(after_reply)
-                    if winner == opp:
-                        entry['threat'] = 'allows_loss'
-                    elif winner is None and entry['threat'] == 'safe':
-                        entry['threat'] = 'allows_draw'
-                value = adapter.advantage(after_reply, color)
-                worst = value if worst is None else min(worst, value)
-                unplay(after_reply)
-            if worst is not None:
-                entry['net'] = worst - adv_now
+                worst = None
+                for reply in list(replies):
+                    after_reply = play(after, reply)
+                    if adapter.is_over(after_reply):
+                        winner = adapter.winner(after_reply)
+                        if winner == opp:
+                            entry['threat'] = 'allows_loss'
+                            value = -WIN_VALUE
+                        elif winner is None:
+                            if entry['threat'] == 'safe':
+                                entry['threat'] = 'allows_draw'
+                            value = 0.0
+                        else:
+                            value = WIN_VALUE
+                    else:
+                        value = adapter.advantage(after_reply, color)
+                    worst = value if worst is None else min(worst, value)
+                    unplay(after_reply)
+                if worst is not None:
+                    entry['net'] = worst - value_now
         unplay(after)
         info.append(entry)
 
@@ -125,7 +156,6 @@ def extract_features(adapter, state, color, candidates: Sequence,
     reply_counts = [e['replies'] for e in info if e['replies'] is not None]
     median_replies = statistics.median(reply_counts) if reply_counts else 0
 
-    features = []
     for e in info:
         if e['gain'] > EPSILON:
             gain_class = 'best' if e['gain'] >= best_gain - EPSILON else 'positive'
@@ -141,8 +171,46 @@ def extract_features(adapter, state, color, candidates: Sequence,
             else:
                 mob = 'neutral'
 
-        features.append(f"gain={gain_class}|net={_sign_class(e['net'])}|mob={mob}|threat={e['threat']}")
-    return features
+        e['features'] = f"gain={gain_class}|net={_sign_class(e['net'])}|mob={mob}|threat={e['threat']}"
+    return [{'features': e['features'], 'gain': e['gain'], 'net': e['net']} for e in info]
+
+
+def decisive_value(net: float) -> float:
+    """
+    The part of an analyze_candidates() 'net' value decided by the winning
+    condition: about +WIN_VALUE for a move that wins, -WIN_VALUE for one that
+    lets the opponent win at once, else 0 (game scales are left alone)
+    """
+    return net if abs(net) >= WIN_VALUE / 2 else 0.0
+
+
+def winning_moves(adapter, state, color, moves: Sequence) -> List:
+    """Moves that achieve the game's winning condition immediately"""
+    in_place = hasattr(adapter, 'push') and hasattr(adapter, 'pop')
+    wins = []
+    for move in moves:
+        if in_place:
+            adapter.push(state, move)
+            after = state
+        else:
+            after = adapter.apply(state, move)
+        if adapter.is_over(after) and adapter.winner(after) == color:
+            wins.append(move)
+        if in_place:
+            adapter.pop(state)
+    return wins
+
+
+def extract_features(adapter, state, color, candidates: Sequence,
+                     rng: random.Random = random, max_replies: int = MAX_REPLIES) -> List[str]:
+    """
+    Describe each candidate move with game-independent features.
+
+    Returns:
+        One feature string per candidate, in the same order
+    """
+    return [entry['features'] for entry in
+            analyze_candidates(adapter, state, color, candidates, rng, max_replies)]
 
 
 class GeneralPatternLearner:

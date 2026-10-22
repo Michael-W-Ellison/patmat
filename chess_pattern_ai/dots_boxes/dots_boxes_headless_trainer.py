@@ -23,7 +23,8 @@ from dots_boxes.dots_boxes_board import DotsBoxesBoard, Color, Edge
 from dots_boxes.dots_boxes_game import DotsBoxesGame
 from dots_boxes.dots_boxes_scorer import DotsBoxesScorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
-from general_move_patterns import (GeneralPatternLearner, extract_features,
+from general_move_patterns import (GeneralPatternLearner, analyze_candidates,
+                                   decisive_value, winning_moves,
                                    universal_db_path, MAX_CANDIDATES)
 from dots_boxes.dots_boxes_adapter import DotsBoxesAdapter
 
@@ -167,14 +168,21 @@ class DotsBoxesHeadlessTrainer:
         # Game-independent patterns for the best candidates (and an exploration move)
         move_scores.sort(key=lambda x: x[1], reverse=True)
         candidates = move_scores[:MAX_CANDIDATES]
+        # Moves that achieve the winning condition at once are always candidates
+        candidates += [(move, 0.0) for move in winning_moves(
+            self.adapter, game, ai_color, [move for move, _ in move_scores[MAX_CANDIDATES:]])]
         explore = random.random() < 0.1  # 10% exploration
         if explore:
             explore_move = random.choice(legal_moves)
             if all(move is not explore_move for move, _ in candidates):
                 candidates.append((explore_move, 0.0))
-        features = extract_features(self.adapter, game, ai_color, [move for move, _ in candidates])
-        scored = [(move, score + self.general.value(f), f)
-                  for (move, score), f in zip(candidates, features)]
+        analysis = analyze_candidates(self.adapter, game, ai_color,
+                                      [move for move, _ in candidates])
+        # A win now, or a loss the opponent can force at once, decides first;
+        # otherwise the existing score plus the general-pattern value
+        scored = [(move, score + decisive_value(a['net']) + self.general.value(a['features']),
+                   a['features'])
+                  for (move, score), a in zip(candidates, analysis)]
 
         # Select move based on priorities (with exploration)
         if explore:

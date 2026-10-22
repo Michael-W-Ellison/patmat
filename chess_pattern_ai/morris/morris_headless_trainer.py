@@ -26,7 +26,8 @@ from morris.morris_board import MorrisBoard, Color
 from morris.morris_game import MorrisGame, MorrisMove, GamePhase
 from morris.morris_scorer import MorrisScorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
-from general_move_patterns import (GeneralPatternLearner, extract_features,
+from general_move_patterns import (GeneralPatternLearner, analyze_candidates,
+                                   decisive_value, winning_moves,
                                    universal_db_path, MAX_CANDIDATES)
 from morris.morris_adapter import MorrisAdapter
 
@@ -116,14 +117,20 @@ class MorrisHeadlessTrainer:
 
         # Game-independent patterns for the best candidates (and an exploration move)
         candidates = move_scores[:MAX_CANDIDATES]
+        # Moves that achieve the winning condition at once are always candidates
+        candidates += [(move, 0.0) for move in winning_moves(
+            self.adapter, game, game.current_player, [move for move, _ in move_scores[MAX_CANDIDATES:]])]
         if explore:
             explore_move = random.choice(legal_moves)
             if all(move is not explore_move for move, _ in candidates):
                 candidates.append((explore_move, 0.0))
-        features = extract_features(self.adapter, game, game.current_player,
-                                    [move for move, _ in candidates])
-        scored = [(move, score + self.general.value(f), f)
-                  for (move, score), f in zip(candidates, features)]
+        analysis = analyze_candidates(self.adapter, game, game.current_player,
+                                      [move for move, _ in candidates])
+        # A win now, or a loss the opponent can force at once, decides first;
+        # otherwise the existing score plus the general-pattern value
+        scored = [(move, score + decisive_value(a['net']) + self.general.value(a['features']),
+                   a['features'])
+                  for (move, score), a in zip(candidates, analysis)]
 
         if explore:
             chosen = next(entry for entry in scored if entry[0] is explore_move)

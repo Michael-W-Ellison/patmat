@@ -30,7 +30,8 @@ from arimaa.arimaa_board import ArimaaBoard, Color
 from arimaa.arimaa_game import ArimaaGame, ArimaaStep
 from arimaa.arimaa_scorer import ArimaaScorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
-from general_move_patterns import (GeneralPatternLearner, extract_features,
+from general_move_patterns import (GeneralPatternLearner, analyze_candidates,
+                                   decisive_value, winning_moves,
                                    universal_db_path, MAX_CANDIDATES)
 from arimaa.arimaa_adapter import ArimaaAdapter
 
@@ -115,15 +116,21 @@ class ArimaaHeadlessTrainer:
             # Select step with highest priority
             return step_scores[0][0]
         candidates = step_scores[:MAX_CANDIDATES]
+        # Moves that achieve the winning condition at once are always candidates
+        candidates += [(step, 0.0) for step in winning_moves(
+            self.adapter, game, game.current_player, [step for step, _ in step_scores[MAX_CANDIDATES:]])]
         explore = random.random() < exploration_rate
         if explore:
             explore_step = random.choice(legal_steps)
             if all(step is not explore_step for step, _ in candidates):
                 candidates.append((explore_step, 0.0))
-        features = extract_features(self.adapter, game, game.current_player,
-                                    [step for step, _ in candidates])
-        scored = [(step, score + self.general.value(f), f)
-                  for (step, score), f in zip(candidates, features)]
+        analysis = analyze_candidates(self.adapter, game, game.current_player,
+                                      [step for step, _ in candidates])
+        # A win now, or a loss the opponent can force at once, decides first;
+        # otherwise the existing score plus the general-pattern value
+        scored = [(step, score + decisive_value(a['net']) + self.general.value(a['features']),
+                   a['features'])
+                  for (step, score), a in zip(candidates, analysis)]
 
         if explore:
             chosen = next(entry for entry in scored if entry[0] is explore_step)
