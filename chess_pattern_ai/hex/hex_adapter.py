@@ -16,16 +16,15 @@ class HexAdapter:
     - get_neighbors: precomputed table (same lists)
     - is_connected_to_start: memoized per color, and start cells already in a
       found group are not flood-filled again (same set of stones)
-    - get_connection_strength: same breadth-first search, stopping at the
-      first goal cell reached (the minimum the full search returns), and
-      cached by the start-connected positions it depends on
+    - get_connection_strength: same breadth-first search (opponent stones
+      block it), stopping at the first goal cell reached, which is the
+      minimum the full search returns
     Values are the same as the game's own methods.
     """
 
     def __init__(self):
         self.scorer = HexScorer()
         self._neighbor_tables = {}
-        self._distances = {}   # (size, color, start-connected positions) -> distance
 
     def _neighbors(self, size):
         table = self._neighbor_tables.get(size)
@@ -37,10 +36,11 @@ class HexAdapter:
         return table
 
     @staticmethod
-    def _distance_to_goal(neighbors, visited, axis, goal):
+    def _distance_to_goal(neighbors, start, axis, goal, blocked):
         """HexBoard.get_connection_strength's search, stopping at the first goal cell"""
+        visited = start | blocked
         frontier = []
-        for pos in visited.copy():
+        for pos in start:
             for neighbor_pos in neighbors[pos]:
                 if neighbor_pos not in visited:
                     if neighbor_pos[axis] == goal:
@@ -93,28 +93,23 @@ class HexAdapter:
                 connected = set()
                 found = set()
                 for pos in start_positions:
-                    if pos not in found:
+                    stone = board.board[pos[0]][pos[1]]
+                    if stone is not None and stone.color == color and pos not in found:
                         group = board.get_connected_group(pos)
                         connected.update(group)
                         found.update(stone.position for stone in group)
                 memo[color] = connected
             return connected
 
-        distances = self._distances
-
         def get_connection_strength(color):
             connected = is_connected_to_start(color)
             if not connected:
                 return (0, float('inf'))
-            # The search ignores stones, so the distance depends only on these positions
-            visited = frozenset(stone.position for stone in connected)
-            key = (size, color, visited)
-            dist = distances.get(key)
-            if dist is None:
-                if len(distances) > 200000:
-                    distances.clear()
-                dist = distances[key] = self._distance_to_goal(
-                    neighbors, set(visited), 0 if color == Color.RED else 1, size - 1)
+            # Opponent stones are marked visited so the search cannot pass through them
+            blocked = {stone.position for stone in board.stones if stone.color != color}
+            dist = self._distance_to_goal(
+                neighbors, {stone.position for stone in connected},
+                0 if color == Color.RED else 1, size - 1, blocked)
             return (len(connected), dist)
 
         board.is_connected_to_start = is_connected_to_start
