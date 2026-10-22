@@ -41,7 +41,7 @@ class LOAHeadlessTrainer:
         self.prioritizer = LearnableMovePrioritizer(db_path)
         self.scorer = LOAScorer()
         # Game-independent patterns, shared with the other games' trainers
-        self.general = GeneralPatternLearner(universal_db_path(db_path))
+        self.general = GeneralPatternLearner(universal_db_path(db_path), 'loa')
         self.adapter = LOAAdapter()
         self.last_general_features = None
 

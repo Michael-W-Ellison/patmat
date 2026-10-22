@@ -16,9 +16,10 @@ possible replies, so the same pattern means the same thing in every game:
           otherwise allows_loss / allows_draw if a reply ends it, else safe
 
 All games record into one database, so evidence learned in one game is used
-in the others. Each game's lift is measured against that game's own win
-rate (win_lift scope = game name), so games with very different win rates
-can share patterns. Forgetting and ranking are the same as for game-specific
+in the others, weighted lower than a game's own evidence (see
+GeneralPatternLearner). Each game's lift is measured against that game's own
+win rate (win_lift scope = game name), so games with very different win
+rates can share patterns. Forgetting and ranking are the same as for game-specific
 patterns (see win_lift.py).
 
 A game takes part by providing an adapter with:
@@ -214,12 +215,29 @@ def extract_features(adapter, state, color, candidates: Sequence,
 
 
 class GeneralPatternLearner:
-    """Learns which game-independent move patterns help win, across all games"""
+    """
+    Learns which game-independent move patterns help win, in each game and
+    across games.
 
-    TABLE = 'general_move_patterns'
+    Evidence is kept per (pattern, game). A game ranks a pattern mainly by
+    its own evidence; evidence from the other games is weighted lower: it
+    enters as a prior worth at most CROSS_GAME_GAMES games at its average
+    lift, however much of it there is. So imported evidence guides a game
+    while its own evidence is scarce and gives way as its own grows:
 
-    def __init__(self, db_path: str = DB_NAME):
+        lift = (own lift_sum + imported mean lift * k) / (own games + k + PRIOR_GAMES)
+        k    = min(imported games, CROSS_GAME_GAMES)
+
+    With no imported evidence this is the plain win lift (see win_lift.py).
+    """
+
+    TABLE = 'general_pattern_evidence'
+    LEGACY_TABLE = 'general_move_patterns'   # summed over games; imported as game ''
+    CROSS_GAME_GAMES = 10.0
+
+    def __init__(self, db_path: str = DB_NAME, game_name: str = ''):
         self.db_path = db_path
+        self.game_name = game_name
         # Several trainers may share this database; wait for locks instead of failing
         self.conn = sqlite3.connect(db_path, timeout=60)
         self.cursor = self.conn.cursor()
@@ -228,33 +246,68 @@ class GeneralPatternLearner:
         self.cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS {self.TABLE} (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                features TEXT NOT NULL UNIQUE,
+                features TEXT NOT NULL,
+                game TEXT NOT NULL,             -- game the evidence came from ('' = unknown)
                 times_seen INTEGER DEFAULT 0,
                 confidence REAL DEFAULT 0.0,
                 priority_score REAL DEFAULT 50.0,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(features, game)
             )
         ''')
         win_lift.ensure_columns(self.cursor, self.TABLE)
+        self._import_legacy()
         self.conn.commit()
         self._load_values()
 
+    def _import_legacy(self):
+        """
+        Databases from before per-game evidence hold one row per pattern summed
+        over all games; that evidence cannot be split, so it is kept as
+        evidence from an unknown game (imported evidence for every game)
+        """
+        legacy = self.cursor.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (self.LEGACY_TABLE,)).fetchone()
+        if not legacy or self.cursor.execute(f"SELECT 1 FROM {self.TABLE} LIMIT 1").fetchone():
+            return
+        self.cursor.execute(f'''
+            INSERT INTO {self.TABLE} (features, game, times_seen, decayed_games,
+                                      decayed_wins, lift_sum, win_lift, confidence, priority_score)
+            SELECT features, '', times_seen, decayed_games, decayed_wins, lift_sum,
+                   win_lift, confidence, priority_score
+            FROM {self.LEGACY_TABLE}
+        ''')
+
     def _load_values(self):
-        self.values = {
-            features: 50.0 * lift
-            for features, lift in self.cursor.execute(
-                f"SELECT features, win_lift FROM {self.TABLE}")
-        }
+        own: Dict[str, List[float]] = {}
+        imported: Dict[str, List[float]] = {}
+        for features, game, games, lift_sum in self.cursor.execute(
+                f"SELECT features, game, decayed_games, lift_sum FROM {self.TABLE}"):
+            target = own if game == self.game_name else imported
+            totals = target.setdefault(features, [0.0, 0.0])
+            totals[0] += games
+            totals[1] += lift_sum
+
+        self.values = {}
+        for features in own.keys() | imported.keys():
+            own_games, own_sum = own.get(features, (0.0, 0.0))
+            imp_games, imp_sum = imported.get(features, (0.0, 0.0))
+            k = min(imp_games, self.CROSS_GAME_GAMES)
+            prior = (imp_sum / imp_games) * k if imp_games > 0 else 0.0
+            lift = (own_sum + prior) / (own_games + k + win_lift.PRIOR_GAMES)
+            self.values[features] = 50.0 * lift
 
     def value(self, features: str) -> float:
         """
-        Learned value of a general pattern, on the game-specific priority scale
-        (50 * win lift, -50..+50, 0 = no evidence either way)
+        Learned value of a general pattern for this game, on the game-specific
+        priority scale (50 * win lift, -50..+50, 0 = no evidence either way)
         """
         return self.values.get(features, 0.0)
 
-    def record_game(self, features_used: List[str], result: str, game_name: str):
-        """Credit the general patterns used in one game with its result"""
+    def record_game(self, features_used: List[str], result: str, game_name: str = None):
+        """Credit the general patterns used in one game of game_name (default: this learner's game)"""
+        game = self.game_name if game_name is None else game_name
         counts: Dict[str, int] = {}
         for features in features_used:
             counts[features] = counts.get(features, 0) + 1
@@ -262,28 +315,23 @@ class GeneralPatternLearner:
         ids = []
         for features, count in counts.items():
             self.cursor.execute(f'''
-                INSERT INTO {self.TABLE} (features, times_seen) VALUES (?, ?)
-                ON CONFLICT(features) DO UPDATE SET
+                INSERT INTO {self.TABLE} (features, game, times_seen) VALUES (?, ?, ?)
+                ON CONFLICT(features, game) DO UPDATE SET
                     times_seen = times_seen + excluded.times_seen,
                     updated_at = datetime('now')
-            ''', (features, count))
+            ''', (features, game, count))
             ids.append(self.cursor.execute(
-                f"SELECT id FROM {self.TABLE} WHERE features = ?", (features,)).fetchone()[0])
+                f"SELECT id FROM {self.TABLE} WHERE features = ? AND game = ?",
+                (features, game)).fetchone()[0])
 
-        win_lift.record_game(self.cursor, self.TABLE, ids, won=(result == 'win'), scope=game_name)
+        win_lift.record_game(self.cursor, self.TABLE, ids, won=(result == 'win'), scope=game)
         self.conn.commit()
         self._load_values()
 
     def get_top_patterns(self, limit: int = 10, avoid: bool = False) -> List[tuple]:
-        """Best (or, with avoid=True, worst) general patterns by win lift"""
-        order = 'ASC' if avoid else 'DESC'
-        return self.cursor.execute(f'''
-            SELECT features, times_seen, decayed_games, win_lift, confidence
-            FROM {self.TABLE}
-            WHERE confidence > 0.2
-            ORDER BY win_lift {order}
-            LIMIT ?
-        ''', (limit,)).fetchall()
+        """Best (or, with avoid=True, worst) general patterns for this game: (features, value)"""
+        ranked = sorted(self.values.items(), key=lambda item: item[1], reverse=not avoid)
+        return ranked[:limit]
 
     def close(self):
         if self.conn:

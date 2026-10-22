@@ -41,7 +41,7 @@ class MorrisHeadlessTrainer:
         self.prioritizer = LearnableMovePrioritizer(db_path)
         self.scorer = MorrisScorer()
         # Game-independent patterns, shared with the other games' trainers
-        self.general = GeneralPatternLearner(universal_db_path(db_path))
+        self.general = GeneralPatternLearner(universal_db_path(db_path), 'morris')
         self.adapter = MorrisAdapter()
         self.last_general_features = None
 

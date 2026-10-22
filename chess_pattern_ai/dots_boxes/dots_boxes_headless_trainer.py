@@ -43,7 +43,7 @@ class DotsBoxesHeadlessTrainer:
         self.scorer = DotsBoxesScorer()
         self.board_size = 5  # Standard 5x5 dots (4x4 boxes)
         # Game-independent patterns, shared with the other games' trainers
-        self.general = GeneralPatternLearner(universal_db_path(db_path))
+        self.general = GeneralPatternLearner(universal_db_path(db_path), 'dots_boxes')
         self.adapter = DotsBoxesAdapter()
         self.last_general_features = None
 

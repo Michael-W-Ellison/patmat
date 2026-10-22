@@ -41,7 +41,7 @@ class Connect4HeadlessTrainer:
         self.prioritizer = LearnableMovePrioritizer(db_path)
         self.scorer = Connect4Scorer()
         # Game-independent patterns, shared with the other games' trainers
-        self.general = GeneralPatternLearner(universal_db_path(db_path))
+        self.general = GeneralPatternLearner(universal_db_path(db_path), 'connect4')
         self.adapter = Connect4Adapter()
         self.last_general_features = None
 

@@ -45,7 +45,7 @@ class ArimaaHeadlessTrainer:
         self.prioritizer = LearnableMovePrioritizer(db_path)
         self.scorer = ArimaaScorer()
         # Game-independent patterns, shared with the other games' trainers
-        self.general = GeneralPatternLearner(universal_db_path(db_path))
+        self.general = GeneralPatternLearner(universal_db_path(db_path), 'arimaa')
         self.adapter = ArimaaAdapter()
         self.last_general_features = None
 

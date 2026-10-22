@@ -43,7 +43,7 @@ class BreakthroughHeadlessTrainer:
         self.scorer = BreakthroughScorer()
         self.board_size = 8
         # Game-independent patterns, shared with the other games' trainers
-        self.general = GeneralPatternLearner(universal_db_path(db_path))
+        self.general = GeneralPatternLearner(universal_db_path(db_path), 'breakthrough')
         self.adapter = BreakthroughAdapter()
         self.last_general_features = None
 

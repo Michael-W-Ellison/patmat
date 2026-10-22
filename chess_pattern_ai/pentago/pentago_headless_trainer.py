@@ -40,7 +40,7 @@ class PentagoHeadlessTrainer:
         self.prioritizer = LearnableMovePrioritizer(db_path)
         self.scorer = PentagoScorer()
         # Game-independent patterns, shared with the other games' trainers
-        self.general = GeneralPatternLearner(universal_db_path(db_path))
+        self.general = GeneralPatternLearner(universal_db_path(db_path), 'pentago')
         self.adapter = PentagoAdapter()
         self.last_general_features = None
 
