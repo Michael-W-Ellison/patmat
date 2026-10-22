@@ -22,6 +22,9 @@ from connect4.connect4_board import Connect4Board, Color, Move
 from connect4.connect4_game import Connect4Game
 from connect4.connect4_scorer import Connect4Scorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
+from general_move_patterns import (GeneralPatternLearner, extract_features,
+                                   universal_db_path, MAX_CANDIDATES)
+from connect4.connect4_adapter import Connect4Adapter
 
 
 class Connect4HeadlessTrainer:
@@ -36,6 +39,10 @@ class Connect4HeadlessTrainer:
         self.db_path = db_path
         self.prioritizer = LearnableMovePrioritizer(db_path)
         self.scorer = Connect4Scorer()
+        # Game-independent patterns, shared with the other games' trainers
+        self.general = GeneralPatternLearner(universal_db_path(db_path))
+        self.adapter = Connect4Adapter()
+        self.last_general_features = None
 
         # Statistics
         self.games_played = 0
@@ -138,13 +145,26 @@ class Connect4HeadlessTrainer:
 
             move_scores.append((move, priority))
 
+        # Game-independent patterns for the best candidates (and an exploration move)
+        move_scores.sort(key=lambda x: x[1], reverse=True)
+        candidates = move_scores[:MAX_CANDIDATES]
+        explore = random.random() < 0.1  # 10% exploration
+        if explore:
+            explore_move = random.choice(legal_moves)
+            if all(move is not explore_move for move, _ in candidates):
+                candidates.append((explore_move, 0.0))
+        features = extract_features(self.adapter, game, ai_color, [move for move, _ in candidates])
+        scored = [(move, score + self.general.value(f), f)
+                  for (move, score), f in zip(candidates, features)]
+
         # Select move based on priorities (with exploration)
-        if random.random() < 0.1:  # 10% exploration
-            return random.choice(legal_moves)
+        if explore:
+            chosen = next(entry for entry in scored if entry[0] is explore_move)
         else:
-            # Choose move with highest priority
-            move_scores.sort(key=lambda x: x[1], reverse=True)
-            return move_scores[0][0]
+            # Choose move with highest priority plus general patterns
+            chosen = max(scored, key=lambda x: x[1])
+        self.last_general_features = chosen[2]
+        return chosen[0]
 
     def play_game(self, ai_color: Color, verbose: bool = False) -> Tuple[str, float, int]:
         """
@@ -159,6 +179,7 @@ class Connect4HeadlessTrainer:
 
         # Track moves for learning
         game_moves = []
+        general_features = []
 
         if verbose:
             print(f"\n{'='*70}")
@@ -172,6 +193,8 @@ class Connect4HeadlessTrainer:
             # Select move
             if current_color == ai_color:
                 move = self.select_move(game, ai_color, use_learning=True)
+                if move is not None:
+                    general_features.append(self.last_general_features)
             else:
                 # Opponent uses random moves (bootstrapping)
                 legal_moves = game.get_legal_moves(current_color)
@@ -225,6 +248,7 @@ class Connect4HeadlessTrainer:
 
         # Record game for learning (directly update statistics)
         self.prioritizer.record_game_patterns(game_moves, result, score)
+        self.general.record_game(general_features, result, 'connect4')
 
         return result, score, rounds
 
