@@ -18,12 +18,12 @@ import time
 from typing import List, Tuple
 from collections import defaultdict
 
-from checkers.checkers_board import CheckersBoard, Color, Move, PieceType
+from checkers.checkers_board import CheckersBoard, Color, Move
 from checkers.checkers_game import CheckersGame
 from checkers.checkers_scorer import CheckersScorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
-from general_move_patterns import (GeneralPatternLearner, extract_features,
-                                   universal_db_path, MAX_CANDIDATES)
+from general_move_patterns import (GeneralPatternLearner, analyze_candidates,
+                                   universal_db_path)
 from checkers.checkers_adapter import CheckersAdapter
 
 
@@ -72,10 +72,15 @@ class CheckersHeadlessTrainer:
         if not use_learning:
             return random.choice(legal_moves)
 
+        # One-ply lookahead over every opponent reply: material, progress toward
+        # the winning condition, and finished games valued by their result
+        analysis = analyze_candidates(self.adapter, game, ai_color, legal_moves,
+                                      max_replies=float('inf'))
+
         # Score each move using learned patterns
         move_scores = []
 
-        for move in legal_moves:
+        for move, result in zip(legal_moves, analysis):
             # Extract move features for pattern matching
             piece_type = 'king' if move.piece.type.name == 'KING' else 'man'
 
@@ -107,55 +112,25 @@ class CheckersHeadlessTrainer:
                 else:  # quiet
                     priority = 30.0
 
-            # One-ply lookahead: material won minus the most the opponent can win back
+            # Evaluation change after the opponent's best reply
             # (a man, 100 material, is worth 10 priority points)
-            net_material = self._net_material_after_reply(game, move, ai_color)
-
-            move_scores.append((move, priority + net_material / 10))
+            move_scores.append((move, priority + result['net'] / 10, result['features']))
 
         # Game-independent patterns for the best candidates (and an exploration move)
         move_scores.sort(key=lambda x: x[1], reverse=True)
-        candidates = move_scores[:MAX_CANDIDATES]
         explore = random.random() < 0.1  # 10% exploration
         if explore:
             explore_move = random.choice(legal_moves)
-            if all(move is not explore_move for move, _ in candidates):
-                candidates.append((explore_move, 0.0))
-        features = extract_features(self.adapter, game, ai_color, [move for move, _ in candidates])
-        scored = [(move, score + self.general.value(f), f)
-                  for (move, score), f in zip(candidates, features)]
+        scored = [(move, score + self.general.value(f), f) for move, score, f in move_scores]
 
         # Select move based on priorities (with exploration)
         if explore:
             chosen = next(entry for entry in scored if entry[0] is explore_move)
         else:
-            # Choose move with highest priority plus lookahead material and general patterns
+            # Choose move with highest priority plus lookahead evaluation and general patterns
             chosen = max(scored, key=lambda x: x[1])
         self.last_general_features = chosen[2]
         return chosen[0]
-
-    def _move_material_gain(self, move: Move) -> float:
-        """Material the mover gains: captured pieces plus promotion to king"""
-        values = self.scorer.PIECE_VALUES
-        gain = sum(values[captured.type] for captured in move.captured_pieces)
-
-        if move.piece.type == PieceType.MAN:
-            promotion_row = 0 if move.piece.color == Color.RED else 7
-            if move.to_pos[0] == promotion_row:
-                gain += values[PieceType.KING] - values[PieceType.MAN]
-
-        return gain
-
-    def _net_material_after_reply(self, game: CheckersGame, move: Move, ai_color: Color) -> float:
-        """Material gained by move minus the opponent's best material gain in reply"""
-        board_after = game.board.copy()
-        board_after.make_move(move)
-
-        opp_color = Color.BLACK if ai_color == Color.RED else Color.RED
-        replies = CheckersGame(board_after).get_legal_moves(opp_color)
-        best_reply_gain = max((self._move_material_gain(reply) for reply in replies), default=0)
-
-        return self._move_material_gain(move) - best_reply_gain
 
     def play_game(self, ai_color: Color, verbose: bool = False) -> Tuple[str, float, int]:
         """
