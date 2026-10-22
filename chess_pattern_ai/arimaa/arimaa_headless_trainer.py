@@ -30,6 +30,9 @@ from arimaa.arimaa_board import ArimaaBoard, Color
 from arimaa.arimaa_game import ArimaaGame, ArimaaStep
 from arimaa.arimaa_scorer import ArimaaScorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
+from general_move_patterns import (GeneralPatternLearner, extract_features,
+                                   universal_db_path, MAX_CANDIDATES)
+from arimaa.arimaa_adapter import ArimaaAdapter
 
 
 class ArimaaHeadlessTrainer:
@@ -40,6 +43,10 @@ class ArimaaHeadlessTrainer:
         self.db_path = db_path
         self.prioritizer = LearnableMovePrioritizer(db_path)
         self.scorer = ArimaaScorer()
+        # Game-independent patterns, shared with the other games' trainers
+        self.general = GeneralPatternLearner(universal_db_path(db_path))
+        self.adapter = ArimaaAdapter()
+        self.last_general_features = None
 
         # Statistics
         self.games_played = 0
@@ -49,7 +56,8 @@ class ArimaaHeadlessTrainer:
         self.total_score = 0
 
     def select_step(self, game: ArimaaGame, legal_steps: List[ArimaaStep],
-                    exploration_rate: float = 0.2) -> ArimaaStep:
+                    exploration_rate: float = 0.2,
+                    use_general: bool = False) -> ArimaaStep:
         """
         Select a step using learned patterns + exploration.
 
@@ -58,8 +66,8 @@ class ArimaaHeadlessTrainer:
         if not legal_steps:
             raise ValueError("No legal steps available")
 
-        # Exploration: random step
-        if random.random() < exploration_rate:
+        # Exploration: random step (with use_general, the learning side explores below)
+        if not use_general and random.random() < exploration_rate:
             return random.choice(legal_steps)
 
         # Exploitation: use learned patterns
@@ -101,17 +109,38 @@ class ArimaaHeadlessTrainer:
 
             step_scores.append((step, priority))
 
-        # Select step with highest priority
+        # Game-independent patterns for the best candidates (and an exploration step)
         step_scores.sort(key=lambda x: x[1], reverse=True)
-        return step_scores[0][0]
+        if not use_general:
+            # Select step with highest priority
+            return step_scores[0][0]
+        candidates = step_scores[:MAX_CANDIDATES]
+        explore = random.random() < exploration_rate
+        if explore:
+            explore_step = random.choice(legal_steps)
+            if all(step is not explore_step for step, _ in candidates):
+                candidates.append((explore_step, 0.0))
+        features = extract_features(self.adapter, game, game.current_player,
+                                    [step for step, _ in candidates])
+        scored = [(step, score + self.general.value(f), f)
+                  for (step, score), f in zip(candidates, features)]
 
-    def execute_turn(self, game: ArimaaGame, max_steps: int = 4, verbose: bool = False) -> Tuple[ArimaaGame, List[dict]]:
+        if explore:
+            chosen = next(entry for entry in scored if entry[0] is explore_step)
+        else:
+            # Highest priority plus general-pattern value
+            chosen = max(scored, key=lambda x: x[1])
+        self.last_general_features = chosen[2]
+        return chosen[0]
+
+    def execute_turn(self, game: ArimaaGame, max_steps: int = 4, verbose: bool = False) -> Tuple[ArimaaGame, List[dict], List[str]]:
         """
         Execute a complete turn (up to 4 steps).
 
-        Returns: (new_game, step_data_list)
+        Returns: (new_game, step_data_list, general_features_list)
         """
         turn_steps = []
+        turn_features = []  # Gold's general-pattern features, one per step
         current_game = game
 
         for step_num in range(max_steps):
@@ -124,7 +153,8 @@ class ArimaaHeadlessTrainer:
 
             # Select step
             step = self.select_step(current_game, legal_steps,
-                                   exploration_rate=0.2 if game.current_player == Color.GOLD else 0.5)
+                                   exploration_rate=0.2 if game.current_player == Color.GOLD else 0.5,
+                                   use_general=game.current_player == Color.GOLD)
 
             # Record step data
             game_before = current_game
@@ -139,13 +169,14 @@ class ArimaaHeadlessTrainer:
                     'category': category,
                     'distance': distance
                 })
+                turn_features.append(self.last_general_features)
 
             current_game = new_game
 
             if verbose:
                 print(f"  Step {step_num + 1}: {step} ({category if game.current_player == Color.GOLD else 'opponent'})")
 
-        return current_game, turn_steps
+        return current_game, turn_steps, turn_features
 
     def play_game(self, verbose: bool = False) -> Tuple[str, float, int]:
         """
@@ -155,6 +186,7 @@ class ArimaaHeadlessTrainer:
         """
         game = ArimaaGame()
         all_steps = []  # Track all steps for learning
+        general_features = []  # Gold's general-pattern features
         turns = 0
 
         if verbose:
@@ -164,8 +196,9 @@ class ArimaaHeadlessTrainer:
 
         while not game.is_game_over() and turns < 100:
             # Execute turn (up to 4 steps)
-            game, turn_steps = self.execute_turn(game, verbose=verbose)
+            game, turn_steps, turn_features = self.execute_turn(game, verbose=verbose)
             all_steps.extend(turn_steps)
+            general_features.extend(turn_features)
             turns += 1
 
             if verbose and turns % 5 == 0:
@@ -206,6 +239,7 @@ class ArimaaHeadlessTrainer:
 
         # Record game for learning
         self.prioritizer.record_game_patterns(all_steps, result, score)
+        self.general.record_game(general_features, result, 'arimaa')
 
         return result, score, turns
 

@@ -25,6 +25,9 @@ from pentago.pentago_board import PentagoBoard, Color
 from pentago.pentago_game import PentagoGame, PentagoMove
 from pentago.pentago_scorer import PentagoScorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
+from general_move_patterns import (GeneralPatternLearner, extract_features,
+                                   universal_db_path, MAX_CANDIDATES)
+from pentago.pentago_adapter import PentagoAdapter
 
 
 class PentagoHeadlessTrainer:
@@ -35,6 +38,10 @@ class PentagoHeadlessTrainer:
         self.db_path = db_path
         self.prioritizer = LearnableMovePrioritizer(db_path)
         self.scorer = PentagoScorer()
+        # Game-independent patterns, shared with the other games' trainers
+        self.general = GeneralPatternLearner(universal_db_path(db_path))
+        self.adapter = PentagoAdapter()
+        self.last_general_features = None
 
         # Statistics
         self.games_played = 0
@@ -44,7 +51,8 @@ class PentagoHeadlessTrainer:
         self.total_score = 0
 
     def select_move(self, game: PentagoGame, legal_moves: List[PentagoMove],
-                    exploration_rate: float = 0.15) -> PentagoMove:
+                    exploration_rate: float = 0.15,
+                    use_general: bool = False) -> PentagoMove:
         """
         Select a move using learned patterns + exploration.
 
@@ -53,8 +61,8 @@ class PentagoHeadlessTrainer:
         if not legal_moves:
             raise ValueError("No legal moves available")
 
-        # Exploration: random move
-        if random.random() < exploration_rate:
+        # Exploration: random move (with use_general, the learning side explores below)
+        if not use_general and random.random() < exploration_rate:
             return random.choice(legal_moves)
 
         # Exploitation: use learned patterns
@@ -96,9 +104,29 @@ class PentagoHeadlessTrainer:
 
             move_scores.append((move, priority))
 
-        # Select move with highest priority
+        # Game-independent patterns for the best candidates (and an exploration move)
         move_scores.sort(key=lambda x: x[1], reverse=True)
-        return move_scores[0][0]
+        if not use_general:
+            # Select move with highest priority
+            return move_scores[0][0]
+        candidates = move_scores[:MAX_CANDIDATES]
+        explore = random.random() < exploration_rate
+        if explore:
+            explore_move = random.choice(legal_moves)
+            if all(move is not explore_move for move, _ in candidates):
+                candidates.append((explore_move, 0.0))
+        features = extract_features(self.adapter, game, game.current_player,
+                                    [move for move, _ in candidates])
+        scored = [(move, score + self.general.value(f), f)
+                  for (move, score), f in zip(candidates, features)]
+
+        if explore:
+            chosen = next(entry for entry in scored if entry[0] is explore_move)
+        else:
+            # Highest priority plus general-pattern value
+            chosen = max(scored, key=lambda x: x[1])
+        self.last_general_features = chosen[2]
+        return chosen[0]
 
     def play_game(self, verbose: bool = False) -> Tuple[str, float, int]:
         """
@@ -108,6 +136,7 @@ class PentagoHeadlessTrainer:
         """
         game = PentagoGame()
         game_moves = []  # Track moves for learning
+        general_features = []  # White's general-pattern features
         rounds = 0
 
         if verbose:
@@ -123,7 +152,9 @@ class PentagoHeadlessTrainer:
 
             # Select move (White uses learning, Black random for now)
             if game.current_player == Color.WHITE:
-                move = self.select_move(game, legal_moves, exploration_rate=0.15)
+                move = self.select_move(game, legal_moves, exploration_rate=0.15,
+                                        use_general=True)
+                general_features.append(self.last_general_features)
             else:
                 # Black plays with some strategy (not purely random)
                 move = self.select_move(game, legal_moves, exploration_rate=0.5)
@@ -185,6 +216,7 @@ class PentagoHeadlessTrainer:
 
         # Record game for learning
         self.prioritizer.record_game_patterns(game_moves, result, score)
+        self.general.record_game(general_features, result, 'pentago')
 
         return result, score, rounds
 
