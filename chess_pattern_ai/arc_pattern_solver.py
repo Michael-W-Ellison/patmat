@@ -33,8 +33,8 @@ Pattern families:
                      fewest cells, objects or largest object
   I build            outputs built from scratch: a constant output; parts of
                      the input (cut at separator lines or into halves /
-                     thirds) combined by AND / OR / XOR / NOR / difference or
-                     overlaid; or every output cell computed from its input
+                     thirds) taken, combined by AND / OR / XOR / NOR /
+                     difference, or overlaid; or every output cell computed from its input
                      neighbourhood by a rule learned from the examples
 
 Conditions: family A maps one property, or two at once, to an action (keep,
@@ -717,6 +717,11 @@ def build_patterns(pairs, bg) -> List[Pattern]:
                     return ps
             return None
 
+        for k in range(len(parts0)):
+            take = lambda a, k=k, parts_of=parts_of: (lambda ps: None if ps is None or k >= len(ps) else ps[k])(parts_of(a))
+            if all((lambda o: o is not None and o.shape == b.shape and np.array_equal(o, b))(_safe(take, a))
+                   for a, b in pairs):
+                found.append(Pattern('I', f'{sname}: part {k}', 2, take))
         if len(parts0) == 2:
             # the colour where the operation holds, and the colour elsewhere (any two output colours)
             colors = sorted({int(v) for b in outs for v in np.unique(b)})
