@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Lines of Action adapter for game-independent pattern learning (see general_move_patterns.py)"""
 
+from grid_vocabulary import Grid
+
+from .loa_board import Color
 from .loa_game import LOAGame
 from .loa_scorer import LOAScorer
 
@@ -89,6 +92,15 @@ class LOAAdapter:
         for piece in pieces:
             score += s._position_value(piece.position)
         return score
+
+    def to_grid(self, game):
+        """
+        8x8 square Grid in the board's own coordinates (row 0 is the top
+        row, black's starting row). Empty 0; black 1, white 2. Groups are
+        components(..., diagonal=True) (8-neighbour connectivity).
+        """
+        return Grid([[0 if p is None else (1 if p.color == Color.BLACK else 2) for p in row]
+                     for row in game.board.board], 'square')
 
     def is_over(self, game):
         return game.is_game_over()

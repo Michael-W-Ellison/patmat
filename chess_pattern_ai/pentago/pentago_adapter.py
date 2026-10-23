@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Pentago adapter for game-independent pattern learning (see general_move_patterns.py)"""
 
+from grid_vocabulary import Grid
+
 from .pentago_board import PentagoBoard, Color
 from .pentago_game import PentagoGame
 from .pentago_scorer import PentagoScorer
@@ -107,6 +109,14 @@ class PentagoAdapter:
                 value[col] = s.THREAT_5
         return {Color.WHITE: value[Color.WHITE] - value[Color.BLACK],
                 Color.BLACK: value[Color.BLACK] - value[Color.WHITE]}
+
+    def to_grid(self, game):
+        """
+        6x6 square Grid in the board's own coordinates (row 0 is the top
+        row, quadrants 0/1 on rows 0-2). Empty 0; white 1, black 2.
+        """
+        return Grid([[0 if m is None else (1 if m.color == Color.WHITE else 2) for m in row]
+                     for row in game.board.board], 'square')
 
     def is_over(self, game):
         return game.is_game_over()

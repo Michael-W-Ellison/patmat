@@ -7,6 +7,8 @@ to_move() returns that player, so general_move_patterns classifies the step
 as extra_turn; after the turn's last step the opponent is to move.
 """
 
+from grid_vocabulary import Grid
+
 from .arimaa_board import ArimaaBoard, Color
 from .arimaa_scorer import ArimaaScorer
 
@@ -64,6 +66,17 @@ class ArimaaAdapter:
         lone.pieces_gold = {piece} if piece.color == Color.GOLD else set()
         lone.pieces_silver = set() if piece.color == Color.GOLD else {piece}
         return self.scorer._evaluate_color(lone, piece.color)
+
+    def to_grid(self, game):
+        """
+        8x8 square Grid in the board's own coordinates (row 0 is gold's
+        rabbit row; gold's goal is the bottom row 7, silver's the top row 0).
+        Empty 0; gold piece = its strength (rabbit 1, cat 2, dog 3, horse 4,
+        camel 5, elephant 6); silver piece = 6 + strength (rabbit 7 ...
+        elephant 12). Trap squares are not marked (an empty trap is 0).
+        """
+        return Grid([[0 if p is None else p.type.strength + (0 if p.color == Color.GOLD else 6)
+                      for p in row] for row in game.board.board], 'square')
 
     def is_over(self, game):
         return game.is_game_over()
