@@ -44,6 +44,13 @@ Pattern families:
                      (same shape or size, in line, inside, nearest); a colour
                      map read from a key of two-cell pieces; the region
                      bounded by marker cells
+  K rays             every cell of a seed colour casts rays (one direction, a
+                     line both ways, the 4 orthogonal / diagonal or all 8
+                     directions) in its own or a fixed colour; at an obstacle
+                     a ray stops, passes over it, turns left / right, steps
+                     around it or reverses; diagonal rays may bounce off the
+                     top / bottom, side or all edges; only rays that hit (or miss) an obstacle may be
+                     drawn; crossings of different rays may take a colour
 
 Conditions: family A maps one property, or two at once, to an action (keep,
 delete, recolour, or adopt the colour of the one element an object
@@ -1165,6 +1172,128 @@ def role_patterns(pairs, bg) -> List[Pattern]:
     return panel_patterns(pairs, bg) + marker_patterns(pairs, bg) + legend_patterns(pairs, bg)
 
 
+# ------------------------------------------------------------- family K
+
+DIRS = {'N': (-1, 0), 'S': (1, 0), 'E': (0, 1), 'W': (0, -1),
+        'NE': (-1, 1), 'NW': (-1, -1), 'SE': (1, 1), 'SW': (1, -1)}
+DIR_SETS = dict({d: (d,) for d in DIRS}, **{
+    'N+S': ('N', 'S'), 'E+W': ('E', 'W'), 'orthogonal': ('N', 'S', 'E', 'W'),
+    'diagonal': ('NE', 'NW', 'SE', 'SW'), 'all 8': tuple(DIRS)})
+ON_OBSTACLE = ('stop', 'pass', 'turn left', 'turn right', 'step around left', 'step around right', 'reverse')
+RAY_SELECT = ('any', 'hit', 'free')
+
+
+def _turn(d: Tuple[int, int], left: bool) -> Tuple[int, int]:
+    dr, dc = d
+    return (-dc, dr) if left else (dc, -dr)
+
+
+def _first_obstacle(a: Array, bg: int, r: int, c: int, d: Tuple[int, int]) -> bool:
+    h, w = a.shape
+    r, c = r + d[0], c + d[1]
+    while 0 <= r < h and 0 <= c < w:
+        if a[r, c] != bg:
+            return True
+        r, c = r + d[0], c + d[1]
+    return False
+
+
+def cast_rays(a: Array, bg: int, seed: Optional[int], dirs: Sequence[str], color: Optional[int], on_obstacle: str,
+              bounce: Optional[str], select: str, cross: Optional[int]) -> Array:
+    """
+    Every cell of the seed colour (every non-background cell if seed is
+    None) casts a ray in each direction. Rays paint background cells;
+    obstacles are the input's non-background cells. Diagonal rays may
+    bounce off the top / bottom edges ('rows'), the side edges ('cols') or
+    all edges ('all').
+    """
+    h, w = a.shape
+    out = a.copy()
+    owner = np.full(a.shape, -1, dtype=int)        # which ray painted a cell
+    limit = 2 * (h + w) + 4
+    ray_id = 0
+    for r, c in zip(*np.nonzero(a != bg if seed is None else a == seed)):
+        col = int(a[r, c]) if color is None else color
+        for name in dirs:
+            d = DIRS[name]
+            ray_id += 1
+            if select != 'any' and _first_obstacle(a, bg, r, c, d) != (select == 'hit'):
+                continue
+            y, x, steps, turns = r, c, 0, 0
+            while steps < limit and turns < 4:
+                ny, nx = y + d[0], x + d[1]
+                if not (0 <= ny < h and 0 <= nx < w):
+                    out_r, out_c = not 0 <= ny < h, not 0 <= nx < w
+                    if bounce and d[0] and d[1] and (bounce == 'all' or (out_r, out_c) == (bounce == 'rows', bounce == 'cols')):
+                        d = (-d[0] if out_r else d[0], -d[1] if out_c else d[1])
+                        steps += 1
+                        continue
+                    break
+                if a[ny, nx] != bg:
+                    if on_obstacle == 'stop':
+                        break
+                    if on_obstacle == 'pass':
+                        y, x = ny, nx
+                        steps += 1
+                        continue
+                    turns += 1
+                    if on_obstacle in ('turn left', 'turn right'):
+                        d = _turn(d, on_obstacle == 'turn left')
+                        continue
+                    if on_obstacle == 'reverse':
+                        d = (-d[0], -d[1])
+                        continue
+                    side = _turn(d, on_obstacle == 'step around left')
+                    sy, sx = y + side[0], x + side[1]
+                    if not (0 <= sy < h and 0 <= sx < w) or a[sy, sx] != bg:
+                        break
+                    ny, nx = sy, sx
+                if out[ny, nx] == bg:
+                    out[ny, nx] = col
+                elif cross is not None and owner[ny, nx] not in (-1, ray_id) and out[ny, nx] != col:
+                    out[ny, nx] = cross
+                owner[ny, nx] = ray_id
+                y, x = ny, nx
+                steps += 1
+    return out
+
+
+def ray_patterns(pairs, bg) -> List[Pattern]:
+    found = []
+    if any(a.shape != b.shape for a, b in pairs):
+        return found
+    # rays only paint background cells
+    if not all(np.all(a[a != b] == bg) for a, b in pairs) or all(np.array_equal(a, b) for a, b in pairs):
+        return found
+    seeds = [None] + sorted(set.intersection(*[set(np.unique(a).tolist()) - {bg} for a, _ in pairs]))
+    added = sorted({int(v) for a, b in pairs for v in np.unique(b[a != b])})
+    a0, b0 = pairs[0]
+    for seed in seeds:
+        for color in [None] + added:
+            # crossings differ only between rays of different colours (rays in their seeds' colours)
+            crosses = [None] + (added if color is None else [])
+            for dname, dirs in DIR_SETS.items():
+                for on_obstacle in ON_OBSTACLE:
+                    for select in RAY_SELECT:
+                        diagonal = any(DIRS[x][0] and DIRS[x][1] for x in dirs)
+                        for bounce in ((None, 'rows', 'cols', 'all') if diagonal else (None,)):
+                            for cross in crosses:
+                                args = (seed, dirs, color, on_obstacle, bounce, select, cross)
+                                if not np.array_equal(cast_rays(a0, bg, *args), b0):
+                                    continue
+                                if not all(np.array_equal(cast_rays(a, bg, *args), b) for a, b in pairs[1:]):
+                                    continue
+                                cost = 3 + (on_obstacle != 'stop') + (select != 'any') + (bounce is not None) \
+                                    + (cross is not None)
+                                found.append(Pattern(
+                                    'K', f'rays from {"every element" if seed is None else seed} {dname} in {"own colour" if color is None else color},'
+                                         f' at obstacle {on_obstacle}, {select} rays'
+                                         f'{f", bounce off {bounce} edges" if bounce else ""}'
+                                         f'{f", crossings {cross}" if cross is not None else ""}',
+                                    cost, lambda t, args=args: cast_rays(t, bg, *args)))
+    return found
+
+
 # ------------------------------------------------------------- family G
 
 def _structural_steps(bg) -> List[Tuple[str, Callable, float]]:
@@ -1200,7 +1329,7 @@ def combination_patterns(pairs, bg, deadline: float) -> List[Pattern]:
     found = []
     second = (object_action_patterns, select_crop_patterns, _lite_transforms, move_patterns,
               resize_patterns, relation_patterns, count_patterns, build_patterns,
-              role_patterns)
+              role_patterns, ray_patterns)
     for name1, step1, cost1 in _structural_steps(bg):
         if time.time() > deadline:
             break
@@ -1227,7 +1356,7 @@ def combination_patterns(pairs, bg, deadline: float) -> List[Pattern]:
 
 FAMILIES = {'A': object_action_patterns, 'B': select_crop_patterns, 'C': transform_patterns,
             'D': move_patterns, 'E': resize_patterns, 'F': relation_patterns,
-            'H': count_patterns, 'I': build_patterns, 'J': role_patterns}
+            'H': count_patterns, 'I': build_patterns, 'J': role_patterns, 'K': ray_patterns}
 COMBINATION_SECONDS = 60     # time budget for combinations, used only when no single pattern fits
 
 

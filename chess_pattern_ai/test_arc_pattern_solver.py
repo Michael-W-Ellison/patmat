@@ -273,5 +273,66 @@ class TestRoles(unittest.TestCase):
         self.assertTrue(right(best(t), t))
 
 
+class TestRays(unittest.TestCase):
+    def test_ray_stops_at_wall(self):                # family K
+        pairs = [([[2, 0, 0, 0, 5], [0, 0, 0, 0, 5]], [[2, 2, 2, 2, 5], [0, 0, 0, 0, 5]]),
+                 ([[0, 0, 0, 0, 0, 0], [0, 2, 0, 0, 5, 0], [0, 0, 0, 0, 0, 0]],
+                  [[0, 0, 0, 0, 0, 0], [0, 2, 2, 2, 5, 0], [0, 0, 0, 0, 0, 0]])]
+        t = task(pairs, [[0, 2, 0, 5, 0], [2, 0, 0, 0, 0]], [[0, 2, 2, 5, 0], [2, 2, 2, 2, 2]])
+        e = best(t)
+        self.assertTrue(right(e, t))
+
+    def test_ray_turns_at_obstacle(self):            # family K
+        # rays go up and turn right (east) when blocked
+        g1 = [[0, 0, 0, 0], [5, 0, 0, 0], [0, 0, 0, 0], [3, 0, 0, 0]]
+        o1 = [[0, 0, 0, 0], [5, 0, 0, 0], [3, 3, 3, 3], [3, 0, 0, 0]]
+        g2 = [[0, 5, 0, 0, 0], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0], [0, 3, 0, 0, 0]]
+        o2 = [[0, 5, 0, 0, 0], [0, 3, 3, 3, 3], [0, 3, 0, 0, 0], [0, 3, 0, 0, 0]]
+        test = [[0, 0, 0], [0, 0, 5], [0, 0, 0], [0, 0, 3], [0, 0, 0]]
+        out = [[0, 0, 0], [0, 0, 5], [0, 0, 3], [0, 0, 3], [0, 0, 0]]
+        t = task([(g1, o1), (g2, o2)], test, out)
+        e = best(t)
+        self.assertTrue(right(e, t))
+        self.assertEqual(e['family'], 'K')
+
+    def test_crossing_lines(self):                   # family K
+        def make(points, size):
+            g = np.zeros(size, dtype=int)
+            o = np.zeros(size, dtype=int)
+            for (r, c), v in points:
+                g[r, c] = v
+            for (r, c), v in points:
+                o[r, :] = np.where(o[r, :] == 0, v, 2)
+                o[:, c] = np.where(o[:, c] == 0, v, 2)
+            for (r, c), v in points:
+                o[r, c] = v
+            return g.tolist(), o.tolist()
+        p1 = make([((1, 1), 8), ((4, 3), 5)], (6, 6))
+        p2 = make([((0, 4), 4), ((3, 1), 3)], (5, 6))
+        test = make([((2, 2), 6), ((5, 0), 7)], (7, 5))
+        t = task([p1, p2], *test)
+        self.assertTrue(right(best(t), t))
+
+    def test_diagonal_bounce(self):                  # family K
+        def make(r, c, h, w):
+            g = np.zeros((h, w), dtype=int)
+            g[r, c] = 4
+            o = g.copy()
+            dr, dc = -1, 1
+            for _ in range(2 * (h + w)):
+                nr, nc = r + dr, c + dc
+                if not 0 <= nr < h:
+                    dr = -dr
+                    continue
+                if not 0 <= nc < w:
+                    break
+                r, c = nr, nc
+                o[r, c] = 4
+            return g.tolist(), o.tolist()
+        t = task([make(4, 0, 5, 7), make(2, 0, 3, 6)], *make(3, 0, 4, 9))
+        e = best(t)
+        self.assertTrue(right(e, t))
+
+
 if __name__ == '__main__':
     unittest.main()
