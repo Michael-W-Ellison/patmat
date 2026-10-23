@@ -53,6 +53,10 @@ class ChessAdapter:
             total += self.CHECK_VALUE if board.turn != color else -self.CHECK_VALUE
         return total
 
+    def grid_values(self, color):
+        """Values that to_grid uses for color's pieces"""
+        return {1, 2, 3, 4, 5, 6} if color == chess.WHITE else {7, 8, 9, 10, 11, 12}
+
     def to_grid(self, board):
         """
         8x8 square Grid: row = rank index (row 0 is rank 1, White's back

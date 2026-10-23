@@ -93,6 +93,10 @@ class LOAAdapter:
             score += s._position_value(piece.position)
         return score
 
+    def grid_values(self, color):
+        """Values that to_grid uses for color's pieces"""
+        return {1} if color == Color.BLACK else {2}
+
     def to_grid(self, game):
         """
         8x8 square Grid in the board's own coordinates (row 0 is the top

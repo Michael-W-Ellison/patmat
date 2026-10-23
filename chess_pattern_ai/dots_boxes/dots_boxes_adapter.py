@@ -27,6 +27,10 @@ class DotsBoxesAdapter:
     WALL = 1
     BOX_OWNER = {Color.RED: 2, Color.BLUE: 3}
 
+    def grid_values(self, color):
+        """Values that to_grid uses for boxes owned by color"""
+        return {2} if color == Color.RED else {3}
+
     def to_grid(self, game) -> Grid:
         """
         The board as a (2*BOXES+1) x (2*BOXES+1) lattice Grid (9 x 9 for the

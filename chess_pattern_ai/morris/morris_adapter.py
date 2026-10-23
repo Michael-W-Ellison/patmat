@@ -46,6 +46,10 @@ class MorrisAdapter:
         """Scorer's evaluation (material, mills, potential mills, phase bonuses), color minus opponent"""
         return self.scorer.score_game(game, color)
 
+    def grid_values(self, color):
+        """Values that to_grid uses for color's pieces"""
+        return {1} if color == Color.WHITE else {2}
+
     def to_grid(self, game):
         """
         'graph' Grid: the 24 points embedded in the standard 7x7 layout

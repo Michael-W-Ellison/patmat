@@ -110,6 +110,10 @@ class PentagoAdapter:
         return {Color.WHITE: value[Color.WHITE] - value[Color.BLACK],
                 Color.BLACK: value[Color.BLACK] - value[Color.WHITE]}
 
+    def grid_values(self, color):
+        """Values that to_grid uses for color's pieces"""
+        return {1} if color == Color.WHITE else {2}
+
     def to_grid(self, game):
         """
         6x6 square Grid in the board's own coordinates (row 0 is the top

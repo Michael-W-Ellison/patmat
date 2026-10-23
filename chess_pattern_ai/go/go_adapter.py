@@ -119,6 +119,10 @@ class GoAdapter:
                     territory[borders.pop()] += size
         return territory
 
+    def grid_values(self, color):
+        """Values that to_grid uses for color's pieces"""
+        return {1} if color == Color.BLACK else {2}
+
     def to_grid(self, game) -> Grid:
         """
         The board as a grid_vocabulary Grid (topology 'square'; groups and

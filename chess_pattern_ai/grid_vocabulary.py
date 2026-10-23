@@ -17,7 +17,8 @@ or an ARC grid:
   runs of one value enclosed by another (Othello flips)
 - enclosed: regions of non-wall cells that cannot reach the border
 - symmetries: which reflections / rotations leave a grid or region unchanged
-- counts / describe: value counts and a summary of all of the above
+- counts / cells_of / describe: value counts, cells holding given
+  values, and a summary of all of the above
 
 Topologies:
 - 'square': 8 compass directions; connectivity uses 4 neighbours
@@ -348,7 +349,14 @@ def symmetries(grid_or_array, region: Optional[Region] = None) -> Dict[str, bool
 # --------------------------------------------------------------- summary
 
 def counts(grid: Grid) -> Counter:
+    """How many valid cells hold each value (the empty value included)"""
     return Counter(int(grid.cells[p]) for p in grid.positions())
+
+
+def cells_of(grid: Grid, values: Iterable[int]) -> List[Pos]:
+    """Valid cells holding any of `values`"""
+    wanted = set(values)
+    return [p for p in grid.positions() if grid[p] in wanted]
 
 
 def describe(grid: Grid, diagonal: bool = False) -> Dict:

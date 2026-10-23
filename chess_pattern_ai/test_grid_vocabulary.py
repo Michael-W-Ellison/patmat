@@ -3,7 +3,7 @@
 
 import unittest
 
-from grid_vocabulary import (Grid, adjacent_cells, between, bracketed, components,
+from grid_vocabulary import (Grid, adjacent_cells, between, bracketed, cells_of, components,
                              counts, describe, enclosed, lines, longest_line,
                              symmetries, touches)
 
@@ -131,6 +131,7 @@ class TestSummary(unittest.TestCase):
         self.assertEqual(d['values'][1], {'cells': 2, 'regions': 1, 'largest_region': 2, 'longest_line': 2})
         self.assertEqual(d['objects'], 2)
         self.assertEqual(counts(g)[0], 6)
+        self.assertEqual(cells_of(g, [1, 2]), [(0, 0), (0, 1), (2, 2)])
 
 
 if __name__ == '__main__':

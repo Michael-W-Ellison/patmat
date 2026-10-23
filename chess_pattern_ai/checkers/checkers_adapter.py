@@ -37,6 +37,10 @@ class CheckersAdapter:
         return (self.scorer.calculate_material(game.board, color)
                 - self.scorer.calculate_material(game.board, opp))
 
+    def grid_values(self, color):
+        """Values that to_grid uses for color's pieces"""
+        return {1, 2} if color == Color.RED else {3, 4}
+
     def to_grid(self, game):
         """
         8x8 square Grid in the board's own coordinates (row 0 is the top,

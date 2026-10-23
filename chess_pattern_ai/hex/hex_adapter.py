@@ -116,6 +116,10 @@ class HexAdapter:
         board.is_connected_to_start = is_connected_to_start
         board.get_connection_strength = get_connection_strength
 
+    def grid_values(self, color):
+        """Values that to_grid uses for color's pieces"""
+        return {1} if color == Color.RED else {2}
+
     def to_grid(self, game) -> Grid:
         """
         The board as a grid_vocabulary Grid (topology 'hex', odd rows shifted

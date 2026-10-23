@@ -67,6 +67,10 @@ class ArimaaAdapter:
         lone.pieces_silver = set() if piece.color == Color.GOLD else {piece}
         return self.scorer._evaluate_color(lone, piece.color)
 
+    def grid_values(self, color):
+        """Values that to_grid uses for color's pieces"""
+        return {1, 2, 3, 4, 5, 6} if color == Color.GOLD else {7, 8, 9, 10, 11, 12}
+
     def to_grid(self, game):
         """
         8x8 square Grid in the board's own coordinates (row 0 is gold's

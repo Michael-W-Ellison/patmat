@@ -38,6 +38,10 @@ class GomokuAdapter:
         return (self.scorer.count_threats(game.board, color)
                 - self.scorer.count_threats(game.board, self.opponent(color)))
 
+    def grid_values(self, color):
+        """Values that to_grid uses for color's pieces"""
+        return {1} if color == Color.BLACK else {2}
+
     def to_grid(self, game):
         """
         size x size square Grid in the board's own coordinates (row 0 is the
