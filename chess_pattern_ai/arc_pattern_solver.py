@@ -11,8 +11,8 @@ the learned game relations (arc_relation_solver.game_score on the test
 prediction) breaking ties, and a second distinct answer as attempt two.
 
 Pattern families:
-  A object_actions   each object is kept, deleted or recoloured according to
-                     one of its properties (value -> action learned from pairs)
+  A object_actions   each object is kept, deleted, recoloured or takes a touching
+                     element's colour, according to its properties
   B select_crop      the output is the region of one object, chosen by a
                      property (largest, smallest, the unique value, a given
                      value), optionally rotated / reflected
@@ -21,6 +21,17 @@ Pattern families:
   D move             objects shifted by a vector learned per property value,
                      or slid in a direction until blocked
   E resize           scaling, tiling with per-tile transforms, self-similar tiling
+  F relations        objects approach the nearest object in line until blocked;
+                     a template object is stamped onto every marker object
+  G combinations     a structural first step (rotate / reflect, crop to the
+                     foreground or a chosen object, gravity, keep / remove
+                     objects) followed by any single pattern on its result;
+                     searched only when no single pattern fits
+
+Conditions: family A maps one property, or two at once, to an action (keep,
+delete, recolour, or adopt the colour of the one element an object
+touches); family B selects by one property, or filters by one property's
+value and then selects by another.
 """
 
 from collections import Counter
@@ -58,28 +69,66 @@ def _safe(fn, a):
 
 # ------------------------------------------------------------- family A
 
-def _object_action(o: Obj, a: Array, b: Array, bg: int):
+def _touching_colors(o: Obj, a: Array, bg: int) -> set:
+    """Colours of non-background cells next to the object but not part of it"""
+    h, w = a.shape
+    out = set()
+    for r, c in o.cells:
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            rr, cc = r + dr, c + dc
+            if 0 <= rr < h and 0 <= cc < w and (rr, cc) not in o.cells and a[rr, cc] != bg:
+                out.add(int(a[rr, cc]))
+    return out
+
+
+def _object_actions(o: Obj, a: Array, b: Array, bg: int) -> Optional[set]:
+    """Every action that explains what happened to the object (None: no simple action does)"""
     inp = [int(a[p]) for p in o.cells]
     out = [int(b[p]) for p in o.cells]
     if inp == out:
-        return 'keep'
+        return {'keep'}
     if all(v == bg for v in out):
-        return 'delete'
+        return {'delete'}
     if len(set(out)) == 1:
-        return ('recolor', out[0])
+        acts = {('recolor', out[0])}
+        if _touching_colors(o, a, bg) == {out[0]}:
+            acts.add('adopt')        # took the colour of the one element it touches
+        return acts
     return None
 
 
-def _apply_actions(a: Array, objs: List[Obj], actions, bg: int) -> Array:
+# Preferred explanation when several fit every object with a value
+_ACTION_ORDER = {'keep': 0, 'delete': 1, 'adopt': 3}
+
+
+def _apply_actions(a: Array, objs: List[Obj], actions, bg: int) -> Optional[Array]:
     out = a.copy()
     for o, act in zip(objs, actions):
         if act == 'delete':
             for p in o.cells:
                 out[p] = bg
+        elif act == 'adopt':
+            touching = _touching_colors(o, a, bg)
+            if len(touching) != 1:
+                return None
+            color = next(iter(touching))
+            for p in o.cells:
+                out[p] = color
         elif isinstance(act, tuple):
             for p in o.cells:
                 out[p] = act[1]
     return out
+
+
+def _learn_mapping(rows, key) -> Optional[Dict]:
+    """value -> action consistent over all objects (None if some value has no common action)"""
+    allowed: Dict[object, set] = {}
+    for props, acts in rows:
+        v = key(props)
+        allowed[v] = allowed.get(v, acts) & acts
+        if not allowed[v]:
+            return None
+    return {v: min(acts, key=lambda x: (_ACTION_ORDER.get(x, 2), str(x))) for v, acts in allowed.items()}
 
 
 def object_action_patterns(pairs, bg) -> List[Pattern]:
@@ -87,7 +136,7 @@ def object_action_patterns(pairs, bg) -> List[Pattern]:
         return []
     found = []
     for mode in SEGMENTATIONS:
-        rows = []           # (props, action)
+        rows = []           # (props, acceptable actions)
         ok = True
         for a, b in pairs:
             objs = segment(a, bg, mode)
@@ -99,34 +148,47 @@ def object_action_patterns(pairs, bg) -> List[Pattern]:
                 ok = False
                 break
             for o in objs:
-                act = _object_action(o, a, b, bg)
-                if act is None:
+                acts = _object_actions(o, a, b, bg)
+                if acts is None:
                     ok = False
                     break
-                rows.append((o.props, act))
+                rows.append((o.props, acts))
             if not ok:
                 break
-        if not ok or not rows or all(act == 'keep' for _, act in rows):
+        if not ok or not rows or all(acts == {'keep'} for _, acts in rows):
             continue
-        for prop in RULE_PROPERTIES:
-            mapping = {}
-            for props, act in rows:
-                v = props[prop]
-                if mapping.setdefault(v, act) != act:
-                    mapping = None
-                    break
-            if mapping is None:
-                continue
 
-            def predict(t, mode=mode, prop=prop, mapping=mapping):
+        def make(key, mapping, mode=mode):
+            def predict(t):
                 objs = segment(t, bg, mode)
-                acts = [mapping.get(o.props[prop]) for o in objs]
+                acts = [mapping.get(key(o.props)) for o in objs]
                 if any(x is None for x in acts):
                     return None
                 return _apply_actions(t, objs, acts, bg)
+            return predict
 
+        single = 0
+        for prop in RULE_PROPERTIES:
+            key = lambda props, prop=prop: props[prop]
+            mapping = _learn_mapping(rows, key)
+            if mapping is None:
+                continue
+            single += 1
             found.append(Pattern('A', f'objects[{mode}] by {prop}: {len(mapping)} rules',
-                                 1 + len(mapping) + PROPERTY_COST.get(prop, 0), predict))
+                                 1 + len(mapping) + PROPERTY_COST.get(prop, 0), make(key, mapping)))
+        if single:
+            continue
+        # Conditions on two properties at once (only when no single property explains it)
+        props = [p for p in RULE_PROPERTIES if p not in ('pattern', 'shape')]
+        for i, p1 in enumerate(props):
+            for p2 in props[i + 1:]:
+                key = lambda pr, p1=p1, p2=p2: (pr[p1], pr[p2])
+                mapping = _learn_mapping(rows, key)
+                if mapping is None:
+                    continue
+                found.append(Pattern('A', f'objects[{mode}] by {p1}+{p2}: {len(mapping)} rules',
+                                     3 + len(mapping) + PROPERTY_COST.get(p1, 0) + PROPERTY_COST.get(p2, 0),
+                                     make(key, mapping)))
     return found
 
 
@@ -171,30 +233,59 @@ def select_crop_patterns(pairs, bg) -> List[Pattern]:
                     match.append(ids)
                 if any(not m for m in match):
                     continue
+                before = len(found)
                 for prop in RULE_PROPERTIES:
                     selectors = ['unique', 'max', 'min']
                     first = seg[0][next(iter(match[0]))].props[prop]
                     selectors.append(('eq', first))
                     for how in selectors:
-                        good = True
-                        for objs, m in zip(seg, match):
-                            sel = _select(objs, prop, how)
-                            if sel is None or objs.index(sel) not in m:
-                                good = False
-                                break
-                        if not good:
+                        if _selects(seg, match, None, prop, how):
+                            cost = 2 + (1 if isinstance(how, tuple) else 0) + (tname != 'identity') \
+                                + (crop_mode == 'object') + PROPERTY_COST.get(prop, 0)
+                            found.append(Pattern('B', f'crop[{mode},{crop_mode}] {prop} {_how(how)} +{tname}',
+                                                 cost, _crop_predict(bg, mode, None, prop, how, crop_mode, tf)))
+                if len(found) > before:
+                    continue
+                # Two properties: keep the objects with one property value, then select by another
+                props = [p for p in RULE_PROPERTIES if p not in ('pattern', 'shape')]
+                for fprop in props:
+                    fval = seg[0][next(iter(match[0]))].props[fprop]
+                    for prop in props:
+                        if prop == fprop:
                             continue
-
-                        def predict(t, mode=mode, prop=prop, how=how, cm=crop_mode, tf=tf):
-                            objs = segment(t, bg, mode)
-                            sel = _select(objs, prop, how) if objs else None
-                            return None if sel is None else tf(_crops(t, sel, bg)[cm])
-
-                        cost = 2 + (1 if isinstance(how, tuple) else 0) + (tname != 'identity') \
-                            + (crop_mode == 'object') + PROPERTY_COST.get(prop, 0)
-                        found.append(Pattern('B', f'crop[{mode},{crop_mode}] {prop} {how if isinstance(how, str) else "=" + str(how[1])[:20]} +{tname}',
-                                             cost, predict))
+                        for how in ('unique', 'max', 'min'):
+                            if _selects(seg, match, (fprop, fval), prop, how):
+                                cost = 4 + (tname != 'identity') + (crop_mode == 'object') \
+                                    + PROPERTY_COST.get(prop, 0) + PROPERTY_COST.get(fprop, 0)
+                                found.append(Pattern('B', f'crop[{mode},{crop_mode}] {fprop}={str(fval)[:20]} then {prop} {how} +{tname}',
+                                                     cost, _crop_predict(bg, mode, (fprop, fval), prop, how, crop_mode, tf)))
     return found
+
+
+def _how(how) -> str:
+    return how if isinstance(how, str) else '=' + str(how[1])[:20]
+
+
+def _filtered_select(objs: List[Obj], filt, prop: str, how) -> Optional[Obj]:
+    if filt is not None:
+        objs = [o for o in objs if o.props[filt[0]] == filt[1]]
+    return _select(objs, prop, how) if objs else None
+
+
+def _selects(seg, match, filt, prop, how) -> bool:
+    """Whether the selector picks, in every pair, an object whose crop gives the output"""
+    for objs, m in zip(seg, match):
+        sel = _filtered_select(objs, filt, prop, how)
+        if sel is None or objs.index(sel) not in m:
+            return False
+    return True
+
+
+def _crop_predict(bg, mode, filt, prop, how, crop_mode, tf):
+    def predict(t):
+        sel = _filtered_select(segment(t, bg, mode), filt, prop, how)
+        return None if sel is None else tf(_crops(t, sel, bg)[crop_mode])
+    return predict
 
 
 # ------------------------------------------------------------- family C
@@ -368,21 +459,177 @@ def resize_patterns(pairs, bg) -> List[Pattern]:
     return found
 
 
+# ------------------------------------------------------------- family F
+
+def _approach(a: Array, objs: List[Obj], moving: List[bool], bg: int) -> Optional[Array]:
+    """Each moving object slides toward the nearest still object in line with it until blocked"""
+    out = a.copy()
+    for i, o in enumerate(objs):
+        if not moving[i]:
+            continue
+        r0, c0, r1, c1 = o.bbox
+        best = None
+        for j, t in enumerate(objs):
+            if j == i or moving[j]:
+                continue
+            R0, C0, R1, C1 = t.bbox
+            if r0 <= R1 and R0 <= r1:
+                d, dist = ('E', C0 - c1) if C0 > c1 else ('W', c0 - C1) if C1 < c0 else (None, 0)
+            elif c0 <= C1 and C0 <= c1:
+                d, dist = ('S', R0 - r1) if R0 > r1 else ('N', r0 - R1) if R1 < r0 else (None, 0)
+            else:
+                continue
+            if d and (best is None or dist < best[1]):
+                best = (d, dist)
+        if best is not None:
+            out = _slide(out, [o], [True], best[0], bg)
+    return out
+
+
+def _stamp(a: Array, template: Obj, markers: List[Obj], align: str) -> Optional[Array]:
+    """Copy the template onto every marker, aligned by the marker's colour or by centre"""
+    cells = {p: int(a[p]) for p in template.cells}
+    tr0, tc0, tr1, tc1 = template.bbox
+    out = a.copy()
+    h, w = a.shape
+    for m in markers:
+        mr0, mc0, mr1, mc1 = m.bbox
+        if align == 'color':
+            anchors = [p for p, v in cells.items() if v == m.props['color']]
+            if len(anchors) != 1:
+                return None
+            dr, dc = mr0 - anchors[0][0], mc0 - anchors[0][1]
+        else:
+            if (mr0 + mr1 - tr0 - tr1) % 2 or (mc0 + mc1 - tc0 - tc1) % 2:
+                return None
+            dr, dc = (mr0 + mr1 - tr0 - tr1) // 2, (mc0 + mc1 - tc0 - tc1) // 2
+        for (r, c), v in cells.items():
+            rr, cc = r + dr, c + dc
+            if not (0 <= rr < h and 0 <= cc < w):
+                return None
+            out[rr, cc] = v
+    return out
+
+
+def relation_patterns(pairs, bg) -> List[Pattern]:
+    """Patterns that relate elements to each other: approach until touching, stamp at markers"""
+    if any(a.shape != b.shape for a, b in pairs):
+        return []
+    found = []
+    for mode in SEGMENTATIONS:
+        seg = [segment(a, bg, mode) for a, _ in pairs]
+        if any(len(objs) < 2 for objs in seg):
+            continue
+        # Approach: objects with a property value move toward the others
+        for prop in ('color', 'is_largest', 'is_smallest', 'unique_color', 'size', 'n_colors'):
+            for v in sorted({o.props[prop] for objs in seg for o in objs}, key=str):
+                sel = lambda o, prop=prop, v=v: o.props[prop] == v
+                if all((lambda o: o is not None and np.array_equal(o, b))(
+                        _approach(a, objs, [sel(o) for o in objs], bg))
+                       for (a, b), objs in zip(pairs, seg)):
+                    def predict(t, mode=mode, sel=sel):
+                        objs = segment(t, bg, mode)
+                        return _approach(t, objs, [sel(o) for o in objs], bg)
+                    found.append(Pattern('F', f'approach[{mode}] {prop}={v}', 4, predict))
+        # Stamp: a template chosen by a property is copied onto every other object
+        for prop in ('size', 'n_colors', 'unique_shape', 'unique_color', 'height', 'width'):
+            for how in ('max', 'min', 'unique'):
+                for align in ('color', 'center'):
+                    def run(a, objs, prop=prop, how=how, align=align):
+                        template = _select(objs, prop, how)
+                        if template is None:
+                            return None
+                        return _stamp(a, template, [o for o in objs if o is not template], align)
+                    if all((lambda o: o is not None and np.array_equal(o, b))(run(a, objs))
+                           for (a, b), objs in zip(pairs, seg)):
+                        def predict(t, mode=mode, run=run):
+                            return run(t, segment(t, bg, mode))
+                        found.append(Pattern('F', f'stamp[{mode}] template {prop} {how} align {align}', 5, predict))
+    return found
+
+
+# ------------------------------------------------------------- family G
+
+def _structural_steps(bg) -> List[Tuple[str, Callable, float]]:
+    """First steps of a combination: change the grid's frame or keep part of it"""
+    from arc_relation_solver import crop, gravity, select_objects
+    steps = [(g, f, 1) for g, f in GEOMETRIC.items()]
+    steps.append(('crop foreground', lambda a: crop(a, bg, 'foreground', False), 1))
+    for d in ('S', 'N', 'E', 'W'):
+        steps.append((f'gravity {d}', lambda a, d=d: gravity(a, bg, d), 1))
+    for rule in ('keep_largest', 'keep_smallest', 'remove_largest', 'remove_smallest'):
+        steps.append((rule, lambda a, r=rule: select_objects(a, bg, r, False), 1))
+    for mode in ('multi8', 'color4', 'multi4'):
+        for prop in ('size', 'n_colors', 'unique_color', 'unique_shape', 'holes', 'color_count'):
+            for how in ('max', 'min', 'unique'):
+                def step(a, mode=mode, prop=prop, how=how):
+                    sel = _select(segment(a, bg, mode), prop, how)
+                    return None if sel is None else _crops(a, sel, bg)['bbox']
+                steps.append((f'crop[{mode}] {prop} {how}', step, 2))
+    return steps
+
+
+_LITE = ('color_map', 'fill_enclosed', 'symmetry_complete', 'gravity', 'extend_lines', 'halo',
+         'connect') + tuple(GEOMETRIC)
+
+
+def _lite_transforms(pairs, bg) -> List[Pattern]:
+    return [p for p in transform_patterns(pairs, bg) if p.name.split(':')[0] in _LITE]
+
+
+def combination_patterns(pairs, bg, deadline: float) -> List[Pattern]:
+    """A structural first step followed by any single pattern found on its result"""
+    import time
+    found = []
+    second = (object_action_patterns, select_crop_patterns, _lite_transforms, move_patterns,
+              resize_patterns, relation_patterns)
+    for name1, step1, cost1 in _structural_steps(bg):
+        if time.time() > deadline:
+            break
+        mids = [_safe(step1, a) for a, _ in pairs]
+        if any(m is None for m in mids) or all(m.shape == a.shape and np.array_equal(m, a)
+                                                for m, (a, _) in zip(mids, pairs)):
+            continue
+        mid_pairs = [(m, b) for m, (_, b) in zip(mids, pairs)]
+        for family in second:
+            if time.time() > deadline:
+                break
+            for pat in family(mid_pairs, bg):
+                if all((lambda o: o is not None and o.shape == b.shape and np.array_equal(o, b))(
+                        _safe(pat.predict, m)) for m, b in mid_pairs):
+                    def predict(t, s1=step1, p2=pat.predict):
+                        m = _safe(s1, t)
+                        return None if m is None else p2(m)
+                    found.append(Pattern('G', f'{name1} -> {pat.family}:{pat.name}',
+                                         cost1 + pat.complexity + 1, predict))
+    return found
+
+
 # --------------------------------------------------------------- solve
 
 FAMILIES = {'A': object_action_patterns, 'B': select_crop_patterns, 'C': transform_patterns,
-            'D': move_patterns, 'E': resize_patterns}
+            'D': move_patterns, 'E': resize_patterns, 'F': relation_patterns}
+COMBINATION_SECONDS = 60     # time budget for combinations, used only when no single pattern fits
 
 
-def find_patterns(task: Dict, families: Sequence[str] = tuple(FAMILIES)) -> Tuple[List[Dict], int]:
-    """Patterns consistent with every training pair, with their test predictions"""
+def find_patterns(task: Dict, families: Sequence[str] = tuple(FAMILIES),
+                  combinations: bool = True) -> Tuple[List[Dict], int]:
+    """
+    Patterns consistent with every training pair, with their test predictions.
+
+    Combinations (family G) are searched only when no single pattern fits,
+    within COMBINATION_SECONDS.
+    """
+    import time
     pairs = [(np.array(p['input']), np.array(p['output'])) for p in task['train']]
     tests = [np.array(t['input']) for t in task['test']]
     bg = background([a for a, _ in pairs])
     proposed = 0
     consistent = []
-    for fam in families:
-        for pat in FAMILIES[fam](pairs, bg):
+
+    def collect(patterns):
+        nonlocal proposed
+        for pat in patterns:
             proposed += 1
             if not all((lambda o: o is not None and o.shape == b.shape and np.array_equal(o, b))(_safe(pat.predict, a))
                        for a, b in pairs):
@@ -392,6 +639,11 @@ def find_patterns(task: Dict, families: Sequence[str] = tuple(FAMILIES)) -> Tupl
                 continue
             consistent.append({'family': pat.family, 'name': pat.name, 'complexity': pat.complexity,
                                'preds': preds})
+
+    for fam in families:
+        collect(FAMILIES[fam](pairs, bg))
+    if combinations and not consistent:
+        collect(combination_patterns(pairs, bg, time.time() + COMBINATION_SECONDS))
     return consistent, proposed
 
 
