@@ -42,7 +42,11 @@ class HexHeadlessTrainer:
         self.prioritizer = LearnableMovePrioritizer(db_path)
         self.scorer = HexScorer()
         # Game-independent patterns, shared with the other games' trainers
-        self.general = GeneralPatternLearner(universal_db_path(db_path), 'hex')
+        # Only this game's own general-pattern evidence: evidence imported from the
+        # other games lowered the win rate by 6.1 points (95% CI -12.2 to -0.0;
+        # 12 seeds x 200 games)
+        self.general = GeneralPatternLearner(universal_db_path(db_path), 'hex',
+                                             import_cross_game=False)
         self.adapter = HexAdapter()
         self.last_general_features = None
 

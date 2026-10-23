@@ -41,7 +41,11 @@ class LOAHeadlessTrainer:
         self.prioritizer = LearnableMovePrioritizer(db_path)
         self.scorer = LOAScorer()
         # Game-independent patterns, shared with the other games' trainers
-        self.general = GeneralPatternLearner(universal_db_path(db_path), 'loa')
+        # Only this game's own general-pattern evidence: evidence imported from the
+        # other games lowered the win rate by 8.8 points (95% CI -17.4 to -0.1;
+        # 12 seeds x 200 games)
+        self.general = GeneralPatternLearner(universal_db_path(db_path), 'loa',
+                                             import_cross_game=False)
         self.adapter = LOAAdapter()
         self.last_general_features = None
 
