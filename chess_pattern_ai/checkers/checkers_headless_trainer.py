@@ -22,6 +22,9 @@ from checkers.checkers_board import CheckersBoard, Color, Move
 from checkers.checkers_game import CheckersGame
 from checkers.checkers_scorer import CheckersScorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
+from general_move_patterns import (GeneralPatternLearner, analyze_candidates,
+                                   universal_db_path)
+from checkers.checkers_adapter import CheckersAdapter
 
 
 class CheckersHeadlessTrainer:
@@ -36,6 +39,10 @@ class CheckersHeadlessTrainer:
         self.db_path = db_path
         self.prioritizer = LearnableMovePrioritizer(db_path)
         self.scorer = CheckersScorer()
+        # Game-independent patterns, shared with the other games' trainers
+        self.general = GeneralPatternLearner(universal_db_path(db_path), 'checkers')
+        self.adapter = CheckersAdapter()
+        self.last_general_features = None
 
         # Statistics
         self.games_played = 0
@@ -65,10 +72,15 @@ class CheckersHeadlessTrainer:
         if not use_learning:
             return random.choice(legal_moves)
 
+        # One-ply lookahead over every opponent reply: material, progress toward
+        # the winning condition, and finished games valued by their result
+        analysis = analyze_candidates(self.adapter, game, ai_color, legal_moves,
+                                      max_replies=float('inf'))
+
         # Score each move using learned patterns
         move_scores = []
 
-        for move in legal_moves:
+        for move, result in zip(legal_moves, analysis):
             # Extract move features for pattern matching
             piece_type = 'king' if move.piece.type.name == 'KING' else 'man'
 
@@ -86,18 +98,8 @@ class CheckersHeadlessTrainer:
             to_row, to_col = move.to_pos
             distance = abs(to_row - from_row) + abs(to_col - from_col)
 
-            # Determine game phase (simple heuristic)
-            total_pieces = len(game.board.get_pieces(Color.RED)) + \
-                          len(game.board.get_pieces(Color.BLACK))
-            if total_pieces > 16:
-                phase = 'opening'
-            elif total_pieces > 8:
-                phase = 'middlegame'
-            else:
-                phase = 'endgame'
-
             # Get priority from learned patterns (query cache directly)
-            key = (piece_type, category, distance, phase)
+            key = self.prioritizer.pattern_key(piece_type, category, distance)
 
             if key in self.prioritizer.move_priorities:
                 priority = self.prioritizer.move_priorities[key]['priority']
@@ -110,15 +112,25 @@ class CheckersHeadlessTrainer:
                 else:  # quiet
                     priority = 30.0
 
-            move_scores.append((move, priority))
+            # Evaluation change after the opponent's best reply
+            # (a man, 100 material, is worth 10 priority points)
+            move_scores.append((move, priority + result['net'] / 10, result['features']))
+
+        # Game-independent patterns for the best candidates (and an exploration move)
+        move_scores.sort(key=lambda x: x[1], reverse=True)
+        explore = random.random() < 0.1  # 10% exploration
+        if explore:
+            explore_move = random.choice(legal_moves)
+        scored = [(move, score + self.general.value(f), f) for move, score, f in move_scores]
 
         # Select move based on priorities (with exploration)
-        if random.random() < 0.1:  # 10% exploration
-            return random.choice(legal_moves)
+        if explore:
+            chosen = next(entry for entry in scored if entry[0] is explore_move)
         else:
-            # Choose move with highest priority
-            move_scores.sort(key=lambda x: x[1], reverse=True)
-            return move_scores[0][0]
+            # Choose move with highest priority plus lookahead evaluation and general patterns
+            chosen = max(scored, key=lambda x: x[1])
+        self.last_general_features = chosen[2]
+        return chosen[0]
 
     def play_game(self, ai_color: Color, verbose: bool = False) -> Tuple[str, float, int]:
         """
@@ -133,6 +145,7 @@ class CheckersHeadlessTrainer:
 
         # Track moves for learning
         game_moves = []
+        general_features = []
 
         if verbose:
             print(f"\n{'='*70}")
@@ -146,6 +159,8 @@ class CheckersHeadlessTrainer:
             # Select move
             if current_color == ai_color:
                 move = self.select_move(game, ai_color, use_learning=True)
+                if move is not None:
+                    general_features.append(self.last_general_features)
             else:
                 # Opponent uses random moves (bootstrapping)
                 legal_moves = game.get_legal_moves(current_color)
@@ -168,20 +183,10 @@ class CheckersHeadlessTrainer:
                 to_row, to_col = move.to_pos
                 distance = abs(to_row - from_row) + abs(to_col - from_col)
 
-                total_pieces = len(game.board.get_pieces(Color.RED)) + \
-                              len(game.board.get_pieces(Color.BLACK))
-                if total_pieces > 16:
-                    phase = 'opening'
-                elif total_pieces > 8:
-                    phase = 'middlegame'
-                else:
-                    phase = 'endgame'
-
                 game_moves.append({
                     'piece_type': piece_type,
                     'category': category,
-                    'distance': distance,
-                    'phase': phase
+                    'distance': distance
                 })
 
             # Make move
@@ -214,16 +219,8 @@ class CheckersHeadlessTrainer:
             print(f"{'='*70}\n")
 
         # Record game for learning (directly update statistics)
-        for move_data in game_moves:
-            self.prioritizer._update_move_statistics(
-                piece_type=move_data['piece_type'],
-                move_category=move_data['category'],
-                distance=move_data['distance'],
-                phase=move_data['phase'],
-                result=result,
-                final_score=score
-            )
-        self.prioritizer.conn.commit()
+        self.prioritizer.record_game_patterns(game_moves, result, score)
+        self.general.record_game(general_features, result, 'checkers')
 
         return result, score, rounds
 
@@ -303,13 +300,13 @@ class CheckersHeadlessTrainer:
 
         patterns = self.prioritizer.get_top_patterns(limit)
 
-        print(f"{'Piece':<8} {'Category':<15} {'Distance':<10} {'Phase':<12} {'Games':<8} {'Win%':<8} {'Priority':<10}")
+        print(f"{'Piece':<8} {'Category':<15} {'Distance':<10} {'Games':<8} {'Win%':<8} {'Priority':<10}")
         print(f"{'-'*80}")
 
         for pattern in patterns:
-            piece_type, category, distance, phase, times_seen, win_rate, confidence, priority = pattern
+            piece_type, category, distance, times_seen, win_rate, confidence, priority = pattern
             win_pct = win_rate * 100
-            print(f"{piece_type:<8} {category:<15} {distance:<10} {phase:<12} {times_seen:<8} {win_pct:<8.1f} {priority:<10.1f}")
+            print(f"{piece_type:<8} {category:<15} {distance:<10} {times_seen:<8} {win_pct:<8.1f} {priority:<10.1f}")
 
         print(f"{'='*70}\n")
 

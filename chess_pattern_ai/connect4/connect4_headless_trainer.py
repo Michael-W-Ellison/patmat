@@ -22,6 +22,10 @@ from connect4.connect4_board import Connect4Board, Color, Move
 from connect4.connect4_game import Connect4Game
 from connect4.connect4_scorer import Connect4Scorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
+from general_move_patterns import (GeneralPatternLearner, analyze_candidates,
+                                   decisive_value, winning_moves,
+                                   universal_db_path, MAX_CANDIDATES)
+from connect4.connect4_adapter import Connect4Adapter
 
 
 class Connect4HeadlessTrainer:
@@ -36,6 +40,10 @@ class Connect4HeadlessTrainer:
         self.db_path = db_path
         self.prioritizer = LearnableMovePrioritizer(db_path)
         self.scorer = Connect4Scorer()
+        # Game-independent patterns, shared with the other games' trainers
+        self.general = GeneralPatternLearner(universal_db_path(db_path), 'connect4')
+        self.adapter = Connect4Adapter()
+        self.last_general_features = None
 
         # Statistics
         self.games_played = 0
@@ -120,18 +128,8 @@ class Connect4HeadlessTrainer:
             # Calculate distance from center column
             distance = self.distance_from_center(move.column)
 
-            # Determine game phase
-            total_pieces = game.get_piece_count(Color.RED) + \
-                          game.get_piece_count(Color.YELLOW)
-            if total_pieces < 9:
-                phase = 'early'
-            elif total_pieces < 30:
-                phase = 'mid'
-            else:
-                phase = 'late'
-
             # Get priority from learned patterns (query cache directly)
-            key = (piece_type, category, distance, phase)
+            key = self.prioritizer.pattern_key(piece_type, category, distance)
 
             if key in self.prioritizer.move_priorities:
                 priority = self.prioritizer.move_priorities[key]['priority']
@@ -148,13 +146,33 @@ class Connect4HeadlessTrainer:
 
             move_scores.append((move, priority))
 
+        # Game-independent patterns for the best candidates (and an exploration move)
+        move_scores.sort(key=lambda x: x[1], reverse=True)
+        candidates = move_scores[:MAX_CANDIDATES]
+        # Moves that achieve the winning condition at once are always candidates
+        candidates += [(move, 0.0) for move in winning_moves(
+            self.adapter, game, ai_color, [move for move, _ in move_scores[MAX_CANDIDATES:]])]
+        explore = random.random() < 0.1  # 10% exploration
+        if explore:
+            explore_move = random.choice(legal_moves)
+            if all(move is not explore_move for move, _ in candidates):
+                candidates.append((explore_move, 0.0))
+        analysis = analyze_candidates(self.adapter, game, ai_color,
+                                      [move for move, _ in candidates])
+        # A win now, or a loss the opponent can force at once, decides first;
+        # otherwise the existing score plus the general-pattern value
+        scored = [(move, score + decisive_value(a['net']) + self.general.value(a['features']),
+                   a['features'])
+                  for (move, score), a in zip(candidates, analysis)]
+
         # Select move based on priorities (with exploration)
-        if random.random() < 0.1:  # 10% exploration
-            return random.choice(legal_moves)
+        if explore:
+            chosen = next(entry for entry in scored if entry[0] is explore_move)
         else:
-            # Choose move with highest priority
-            move_scores.sort(key=lambda x: x[1], reverse=True)
-            return move_scores[0][0]
+            # Choose move with highest priority plus general patterns
+            chosen = max(scored, key=lambda x: x[1])
+        self.last_general_features = chosen[2]
+        return chosen[0]
 
     def play_game(self, ai_color: Color, verbose: bool = False) -> Tuple[str, float, int]:
         """
@@ -169,6 +187,7 @@ class Connect4HeadlessTrainer:
 
         # Track moves for learning
         game_moves = []
+        general_features = []
 
         if verbose:
             print(f"\n{'='*70}")
@@ -182,6 +201,8 @@ class Connect4HeadlessTrainer:
             # Select move
             if current_color == ai_color:
                 move = self.select_move(game, ai_color, use_learning=True)
+                if move is not None:
+                    general_features.append(self.last_general_features)
             else:
                 # Opponent uses random moves (bootstrapping)
                 legal_moves = game.get_legal_moves(current_color)
@@ -198,20 +219,10 @@ class Connect4HeadlessTrainer:
 
                 distance = self.distance_from_center(move.column)
 
-                total_pieces = game.get_piece_count(Color.RED) + \
-                              game.get_piece_count(Color.YELLOW)
-                if total_pieces < 9:
-                    phase = 'early'
-                elif total_pieces < 30:
-                    phase = 'mid'
-                else:
-                    phase = 'late'
-
                 game_moves.append({
                     'piece_type': piece_type,
                     'category': category,
-                    'distance': distance,
-                    'phase': phase
+                    'distance': distance
                 })
 
             # Make move
@@ -244,16 +255,8 @@ class Connect4HeadlessTrainer:
             print(f"{'='*70}\n")
 
         # Record game for learning (directly update statistics)
-        for move_data in game_moves:
-            self.prioritizer._update_move_statistics(
-                piece_type=move_data['piece_type'],
-                move_category=move_data['category'],
-                distance=move_data['distance'],
-                phase=move_data['phase'],
-                result=result,
-                final_score=score
-            )
-        self.prioritizer.conn.commit()
+        self.prioritizer.record_game_patterns(game_moves, result, score)
+        self.general.record_game(general_features, result, 'connect4')
 
         return result, score, rounds
 
@@ -333,13 +336,13 @@ class Connect4HeadlessTrainer:
 
         patterns = self.prioritizer.get_top_patterns(limit)
 
-        print(f"{'Piece':<8} {'Category':<10} {'Distance':<10} {'Phase':<8} {'Games':<8} {'Win%':<8} {'Priority':<10}")
+        print(f"{'Piece':<8} {'Category':<10} {'Distance':<10} {'Games':<8} {'Win%':<8} {'Priority':<10}")
         print(f"{'-'*72}")
 
         for pattern in patterns:
-            piece_type, category, distance, phase, times_seen, win_rate, confidence, priority = pattern
+            piece_type, category, distance, times_seen, win_rate, confidence, priority = pattern
             win_pct = win_rate * 100
-            print(f"{piece_type:<8} {category:<10} {distance:<10} {phase:<8} {times_seen:<8} {win_pct:<8.1f} {priority:<10.1f}")
+            print(f"{piece_type:<8} {category:<10} {distance:<10} {times_seen:<8} {win_pct:<8.1f} {priority:<10.1f}")
 
         print(f"{'='*70}\n")
 

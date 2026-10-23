@@ -26,6 +26,10 @@ from morris.morris_board import MorrisBoard, Color
 from morris.morris_game import MorrisGame, MorrisMove, GamePhase
 from morris.morris_scorer import MorrisScorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
+from general_move_patterns import (GeneralPatternLearner, analyze_candidates,
+                                   decisive_value, winning_moves,
+                                   universal_db_path, MAX_CANDIDATES)
+from morris.morris_adapter import MorrisAdapter
 
 
 class MorrisHeadlessTrainer:
@@ -36,6 +40,10 @@ class MorrisHeadlessTrainer:
         self.db_path = db_path
         self.prioritizer = LearnableMovePrioritizer(db_path)
         self.scorer = MorrisScorer()
+        # Game-independent patterns, shared with the other games' trainers
+        self.general = GeneralPatternLearner(universal_db_path(db_path), 'morris')
+        self.adapter = MorrisAdapter()
+        self.last_general_features = None
 
         # Statistics
         self.games_played = 0
@@ -45,17 +53,22 @@ class MorrisHeadlessTrainer:
         self.total_score = 0
 
     def select_move(self, game: MorrisGame, legal_moves: List[Union[MorrisMove, int]],
-                    exploration_rate: float = 0.15) -> Union[MorrisMove, int]:
+                    exploration_rate: float = 0.15,
+                    use_general: bool = False) -> Union[MorrisMove, int]:
         """
         Select a move using learned patterns + exploration.
 
         Uses pattern priorities from database to guide move selection.
+        With use_general (the learning side), game-independent patterns are
+        added to the best candidates' priorities and the chosen move's general
+        features are kept in self.last_general_features.
         """
         if not legal_moves:
             raise ValueError("No legal moves available")
 
         # Exploration: random move
-        if random.random() < exploration_rate:
+        explore = random.random() < exploration_rate
+        if explore and not use_general:
             return random.choice(legal_moves)
 
         # Exploitation: use learned patterns
@@ -71,11 +84,8 @@ class MorrisHeadlessTrainer:
             # Get distance metric
             distance = self.scorer.get_distance_metric(move, game)
 
-            # Determine game phase
-            phase_str = game.phase.value if game.phase else 'unknown'
-
             # Get priority from learned patterns
-            key = ('piece', category, distance, phase_str)
+            key = self.prioritizer.pattern_key('piece', category, distance)
 
             if key in self.prioritizer.move_priorities:
                 priority = self.prioritizer.move_priorities[key]['priority']
@@ -102,7 +112,33 @@ class MorrisHeadlessTrainer:
 
         # Select move with highest priority
         move_scores.sort(key=lambda x: x[1], reverse=True)
-        return move_scores[0][0]
+        if not use_general:
+            return move_scores[0][0]
+
+        # Game-independent patterns for the best candidates (and an exploration move)
+        candidates = move_scores[:MAX_CANDIDATES]
+        # Moves that achieve the winning condition at once are always candidates
+        candidates += [(move, 0.0) for move in winning_moves(
+            self.adapter, game, game.current_player, [move for move, _ in move_scores[MAX_CANDIDATES:]])]
+        if explore:
+            explore_move = random.choice(legal_moves)
+            if all(move is not explore_move for move, _ in candidates):
+                candidates.append((explore_move, 0.0))
+        analysis = analyze_candidates(self.adapter, game, game.current_player,
+                                      [move for move, _ in candidates])
+        # A win now, or a loss the opponent can force at once, decides first;
+        # otherwise the existing score plus the general-pattern value
+        scored = [(move, score + decisive_value(a['net']) + self.general.value(a['features']),
+                   a['features'])
+                  for (move, score), a in zip(candidates, analysis)]
+
+        if explore:
+            chosen = next(entry for entry in scored if entry[0] is explore_move)
+        else:
+            # Highest priority plus general patterns
+            chosen = max(scored, key=lambda x: x[1])
+        self.last_general_features = chosen[2]
+        return chosen[0]
 
     def play_game(self, verbose: bool = False) -> Tuple[str, float, int]:
         """
@@ -112,6 +148,7 @@ class MorrisHeadlessTrainer:
         """
         game = MorrisGame()
         game_moves = []  # Track moves for learning
+        general_features = []  # General patterns of White's (the learner's) moves
         rounds = 0
 
         if verbose:
@@ -128,7 +165,9 @@ class MorrisHeadlessTrainer:
 
             # Select move (White uses learning, Black random for now)
             if game.current_player == Color.WHITE:
-                move = self.select_move(game, legal_moves, exploration_rate=0.15)
+                move = self.select_move(game, legal_moves, exploration_rate=0.15,
+                                        use_general=True)
+                general_features.append(self.last_general_features)
             else:
                 # Black plays with some strategy (not purely random)
                 move = self.select_move(game, legal_moves, exploration_rate=0.5)
@@ -140,13 +179,11 @@ class MorrisHeadlessTrainer:
             if game.current_player == Color.WHITE:
                 category = self.scorer.get_move_category(game_before, new_game, move, Color.WHITE)
                 distance = self.scorer.get_distance_metric(move, game_before)
-                phase_str = game_before.phase.value if game_before.phase else 'unknown'
 
                 game_moves.append({
                     'piece_type': 'piece',
                     'category': category,
-                    'distance': distance,
-                    'phase': phase_str
+                    'distance': distance
                 })
 
             game = new_game
@@ -194,16 +231,8 @@ class MorrisHeadlessTrainer:
             print(f"{'='*70}\n")
 
         # Record game for learning
-        for move_data in game_moves:
-            self.prioritizer._update_move_statistics(
-                piece_type=move_data['piece_type'],
-                move_category=move_data['category'],
-                distance=move_data['distance'],
-                phase=move_data['phase'],
-                result=result,
-                final_score=score
-            )
-        self.prioritizer.conn.commit()
+        self.prioritizer.record_game_patterns(game_moves, result, score)
+        self.general.record_game(general_features, result, 'morris')
 
         return result, score, rounds
 
@@ -269,15 +298,15 @@ class MorrisHeadlessTrainer:
 
         patterns = self.prioritizer.get_top_patterns(limit)
 
-        print(f"{'Piece':<8} {'Category':<15} {'Ring':<6} {'Phase':<12} "
+        print(f"{'Piece':<8} {'Category':<15} {'Ring':<6} "
               f"{'Games':<8} {'Win%':<8} {'Priority':<10}")
         print(f"{'-'*90}")
 
         for pattern in patterns:
-            piece_type, category, distance, phase, times_seen, win_rate, confidence, priority = pattern
+            piece_type, category, distance, times_seen, win_rate, confidence, priority = pattern
             win_pct = win_rate * 100
             ring_name = ['Outer', 'Middle', 'Inner'][distance] if distance < 3 else f"Ring{distance}"
-            print(f"{piece_type:<8} {category:<15} {ring_name:<6} {phase:<12} "
+            print(f"{piece_type:<8} {category:<15} {ring_name:<6} "
                   f"{times_seen:<8} {win_pct:<8.1f} {priority:<10.1f}")
 
         print(f"{'='*70}\n")

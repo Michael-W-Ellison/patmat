@@ -218,7 +218,7 @@ class LOABoard:
         """
         pieces = self.get_pieces(color)
         if not pieces:
-            return True  # No pieces = trivially connected
+            return False  # No pieces: nothing is connected (and nothing has won)
         if len(pieces) == 1:
             return True  # Single piece = connected
 

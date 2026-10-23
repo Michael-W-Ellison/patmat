@@ -13,6 +13,8 @@ Philosophy: Discovers what works through observation, not programming
 import sqlite3
 import logging
 from typing import List, Tuple, Dict, Optional
+
+import win_lift
 try:
     import chess
     CHESS_AVAILABLE = True
@@ -43,10 +45,17 @@ class LearnableMovePrioritizer:
         self.move_priorities = {}
 
         self._init_tables()
+        win_lift.refresh_ranks(self.cursor, 'learned_move_patterns')
+        self.conn.commit()
         self._load_priorities()
+
+        if self.move_priorities:
+            logger.info(f"✓ Loaded {len(self.move_priorities)} learned move patterns")
 
     def _init_tables(self):
         """Create tables for learned move patterns"""
+        self._migrate_legacy_table()
+
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS learned_move_patterns (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,6 +94,9 @@ class LearnableMovePrioritizer:
             )
         ''')
 
+        # Decayed win-lift statistics (pattern forgetting and ranking)
+        win_lift.ensure_columns(self.cursor, 'learned_move_patterns')
+
         # Index for fast lookups
         self.cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_move_pattern_priority
@@ -93,6 +105,42 @@ class LearnableMovePrioritizer:
 
         self.conn.commit()
         logger.info("✓ Learnable move prioritizer tables initialized")
+
+    def _migrate_legacy_table(self):
+        """
+        Move an old-schema learned_move_patterns table out of the way.
+
+        Older databases key patterns on game_phase and/or lack the observable
+        game state columns. Their rows cannot be mapped onto the current key,
+        so the table is renamed (not deleted) and a fresh table is created.
+        """
+        self.cursor.execute("PRAGMA table_info(learned_move_patterns)")
+        columns = {row[1] for row in self.cursor.fetchall()}
+        required = {'repetition_count', 'moves_since_progress', 'total_material_level'}
+        if not columns or (required.issubset(columns) and 'game_phase' not in columns):
+            return
+
+        legacy_name = 'learned_move_patterns_legacy'
+        suffix = 1
+        while self.cursor.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (legacy_name,)).fetchone():
+            suffix += 1
+            legacy_name = f'learned_move_patterns_legacy_{suffix}'
+
+        self.cursor.execute(f"ALTER TABLE learned_move_patterns RENAME TO {legacy_name}")
+        # Index names are database-wide; free the name for the new table
+        self.cursor.execute("DROP INDEX IF EXISTS idx_move_pattern_priority")
+        self.conn.commit()
+        logger.warning(f"Old learned_move_patterns schema found; renamed to {legacy_name}")
+
+    @staticmethod
+    def pattern_key(piece_type: str, move_category: str, distance: int,
+                    repetition_count: int = 0, moves_since_progress: int = 0,
+                    total_material_level: str = 'medium') -> Tuple:
+        """Build the move_priorities lookup key (defaults match the table defaults)"""
+        return (piece_type, move_category, distance,
+                repetition_count, moves_since_progress, total_material_level)
 
     def classify_move(self, board: 'chess.Board', move: 'chess.Move') -> Dict[str, any]:
         """
@@ -232,8 +280,9 @@ class LearnableMovePrioritizer:
             logger.warning("python-chess not available, cannot record moves")
             return
 
+        # One board is kept for the whole game so its move stack holds the
+        # position history that repetition detection needs
         board = chess.Board()
-        move_count = 0
 
         # Pre-count AI's moves to identify the last one
         ai_move_indices = []
@@ -249,10 +298,12 @@ class LearnableMovePrioritizer:
 
         last_ai_move_idx = ai_move_indices[-1] if ai_move_indices else -1
 
+        # Patterns already credited with this game's result
+        credited = set()
+        used_ids = set()
+
         for idx, (fen_before, move_uci, move_san) in enumerate(moves):
-            try:
-                board.set_fen(fen_before)
-            except:
+            if not self._sync_board(board, fen_before):
                 continue
 
             # Only track AI's moves
@@ -272,21 +323,92 @@ class LearnableMovePrioritizer:
             # MOVE-LEVEL SCORING: Calculate immediate observable effect
             move_score = self._calculate_move_score(board, move, ai_color, is_last_move, result)
 
-            # Update statistics for this move type with MOVE score, not GAME score
-            self._update_move_statistics(
+            key = self.pattern_key(
                 characteristics['piece_type'],
                 characteristics['move_category'],
                 characteristics['distance_from_start'],
                 characteristics['repetition_count'],
                 characteristics['moves_since_progress'],
-                characteristics['total_material_level'],
-                result,
-                move_score  # Use move score, not final_score!
+                characteristics['total_material_level']
             )
+
+            # Update statistics for this move type with MOVE score, not GAME score
+            row_id = self._update_move_statistics(
+                characteristics['piece_type'],
+                characteristics['move_category'],
+                characteristics['distance_from_start'],
+                result,
+                move_score,  # Use move score, not final_score!
+                repetition_count=characteristics['repetition_count'],
+                moves_since_progress=characteristics['moves_since_progress'],
+                total_material_level=characteristics['total_material_level'],
+                count_game=key not in credited
+            )
+            credited.add(key)
+            used_ids.add(row_id)
 
             board.push(move)
 
+        self._record_game_result(used_ids, result)
+
+    def record_game_patterns(self, patterns: List[Dict], result: str, final_score: float):
+        """
+        Record the patterns of one game for trainers that score at game level
+
+        Args:
+            patterns: Dicts with 'piece_type', 'category' and 'distance', one per move
+            result: 'win', 'loss', or 'draw'
+            final_score: Game score, credited to every move
+        """
+        credited = set()
+        used_ids = set()
+        for pattern in patterns:
+            key = self.pattern_key(pattern['piece_type'], pattern['category'], pattern['distance'])
+            row_id = self._update_move_statistics(
+                piece_type=pattern['piece_type'],
+                move_category=pattern['category'],
+                distance=pattern['distance'],
+                result=result,
+                final_score=final_score,
+                count_game=key not in credited
+            )
+            credited.add(key)
+            used_ids.add(row_id)
+
+        self._record_game_result(used_ids, result)
+
+    def _record_game_result(self, used_ids, result: str):
+        """Forget a little, credit the patterns used with the game's result, re-rank"""
+        win_lift.record_game(self.cursor, 'learned_move_patterns', used_ids,
+                             won=(result == 'win'), scope='learned_move_patterns')
         self.conn.commit()
+        # Use what this game taught from the next game on
+        self._load_priorities()
+
+    @staticmethod
+    def _sync_board(board: 'chess.Board', fen_before: str) -> bool:
+        """
+        Bring board to fen_before while keeping its move history.
+
+        Callers may record only the AI's moves, so the opponent's reply between
+        two recorded moves is recovered by finding the legal move that leads
+        to the next recorded position. If no single move does, the board is
+        reset to fen_before (history is lost from that point).
+        """
+        if board.fen() == fen_before:
+            return True
+
+        for reply in board.legal_moves:
+            board.push(reply)
+            if board.fen() == fen_before:
+                return True
+            board.pop()
+
+        try:
+            board.set_fen(fen_before)
+        except ValueError:
+            return False
+        return True
 
     def _calculate_move_score(self, board: 'chess.Board', move: 'chess.Move',
                              ai_color: 'chess.Color', is_last_move: bool, game_result: str) -> float:
@@ -358,10 +480,22 @@ class LearnableMovePrioritizer:
 
     def _update_move_statistics(self, piece_type: str, move_category: str,
                                 distance: int,
-                                repetition_count: int, moves_since_progress: int,
-                                total_material_level: str,
-                                result: str, final_score: float):
-        """Update win/loss statistics and score for a move pattern"""
+                                result: str, final_score: float,
+                                repetition_count: int = 0, moves_since_progress: int = 0,
+                                total_material_level: str = 'medium',
+                                count_game: bool = True):
+        """
+        Update lifetime statistics and score for a move pattern
+
+        times_seen and the score count every move. games_won/lost/drawn count
+        games, so pass count_game=False for repeat occurrences of the pattern
+        within the same game. These lifetime counts are for reporting; the
+        rank (priority_score) comes from the decayed win lift, applied per
+        game by _record_game_result().
+
+        Returns:
+            id of the pattern's row
+        """
 
         # Get current stats
         self.cursor.execute('''
@@ -384,36 +518,19 @@ class LearnableMovePrioritizer:
             times_seen, won, lost, drawn = 1, 0, 0, 0
             total_score = final_score
 
-        # Update based on result
-        if result == 'win':
-            won += 1
-        elif result == 'loss':
-            lost += 1
-        else:
-            drawn += 1
+        # Update based on result (once per game)
+        if count_game:
+            if result == 'win':
+                won += 1
+            elif result == 'loss':
+                lost += 1
+            else:
+                drawn += 1
 
-        # Calculate win rate and confidence
+        # Calculate win rate (per game) and average score (per move)
         total_games = won + lost + drawn
         win_rate = won / total_games if total_games > 0 else 0.0
-        avg_score = total_score / total_games if total_games > 0 else 0.0
-
-        # Confidence increases with more observations
-        confidence = min(1.0, total_games / 50.0)  # Max confidence at 50+ games
-
-        # Priority score: DIFFERENTIAL SCORE-BASED!
-        # Moves with high avg_score (material advantage + win bonus) get priority
-        #
-        # Score ranges (with differential scoring):
-        #   Best wins: ~1590 (win + ahead + fast)
-        #   Average wins: ~1050 (win + even + slow)
-        #   Draws ahead: ~300
-        #   Draws behind: ~-300
-        #   Losses close: ~-800 (lost but fought well)
-        #   Losses crushed: ~-1500 (got destroyed)
-        #
-        # Normalize -1500 to +1600 → 0 to 100
-        normalized_score = (avg_score + 1500) / 31  # -1500 to +1600 → 0 to 100
-        priority_score = normalized_score * confidence  # 0-100, confidence-weighted
+        avg_score = total_score / times_seen
 
         # Insert or update
         self.cursor.execute('''
@@ -421,8 +538,8 @@ class LearnableMovePrioritizer:
                 (piece_type, move_category, distance_from_start,
                  repetition_count, moves_since_progress, total_material_level,
                  times_seen, games_won, games_lost, games_drawn,
-                 win_rate, total_score, avg_score, confidence, priority_score, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                 win_rate, total_score, avg_score, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
             ON CONFLICT(piece_type, move_category, distance_from_start,
                         repetition_count, moves_since_progress, total_material_level)
             DO UPDATE SET
@@ -433,15 +550,22 @@ class LearnableMovePrioritizer:
                 win_rate = ?,
                 total_score = ?,
                 avg_score = ?,
-                confidence = ?,
-                priority_score = ?,
                 updated_at = datetime('now')
         ''', (
             piece_type, move_category, distance,
             repetition_count, moves_since_progress, total_material_level,
-            times_seen, won, lost, drawn, win_rate, total_score, avg_score, confidence, priority_score,
-            times_seen, won, lost, drawn, win_rate, total_score, avg_score, confidence, priority_score
+            times_seen, won, lost, drawn, win_rate, total_score, avg_score,
+            times_seen, won, lost, drawn, win_rate, total_score, avg_score
         ))
+
+        return self.cursor.execute('''
+            SELECT id FROM learned_move_patterns
+            WHERE piece_type = ? AND move_category = ?
+              AND distance_from_start = ?
+              AND repetition_count = ? AND moves_since_progress = ?
+              AND total_material_level = ?
+        ''', (piece_type, move_category, distance,
+              repetition_count, moves_since_progress, total_material_level)).fetchone()[0]
 
     def _load_priorities(self):
         """Load learned move priorities from database"""
@@ -463,9 +587,6 @@ class LearnableMovePrioritizer:
                 'win_rate': win_rate,
                 'confidence': confidence
             }
-
-        if self.move_priorities:
-            logger.info(f"✓ Loaded {len(self.move_priorities)} learned move patterns")
 
     def get_move_priority(self, board: 'chess.Board', move: 'chess.Move') -> float:
         """

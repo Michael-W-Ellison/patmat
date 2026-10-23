@@ -25,6 +25,10 @@ from pentago.pentago_board import PentagoBoard, Color
 from pentago.pentago_game import PentagoGame, PentagoMove
 from pentago.pentago_scorer import PentagoScorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
+from general_move_patterns import (GeneralPatternLearner, analyze_candidates,
+                                   decisive_value, winning_moves,
+                                   universal_db_path, MAX_CANDIDATES)
+from pentago.pentago_adapter import PentagoAdapter
 
 
 class PentagoHeadlessTrainer:
@@ -35,6 +39,10 @@ class PentagoHeadlessTrainer:
         self.db_path = db_path
         self.prioritizer = LearnableMovePrioritizer(db_path)
         self.scorer = PentagoScorer()
+        # Game-independent patterns, shared with the other games' trainers
+        self.general = GeneralPatternLearner(universal_db_path(db_path), 'pentago')
+        self.adapter = PentagoAdapter()
+        self.last_general_features = None
 
         # Statistics
         self.games_played = 0
@@ -44,7 +52,8 @@ class PentagoHeadlessTrainer:
         self.total_score = 0
 
     def select_move(self, game: PentagoGame, legal_moves: List[PentagoMove],
-                    exploration_rate: float = 0.15) -> PentagoMove:
+                    exploration_rate: float = 0.15,
+                    use_general: bool = False) -> PentagoMove:
         """
         Select a move using learned patterns + exploration.
 
@@ -53,8 +62,8 @@ class PentagoHeadlessTrainer:
         if not legal_moves:
             raise ValueError("No legal moves available")
 
-        # Exploration: random move
-        if random.random() < exploration_rate:
+        # Exploration: random move (with use_general, the learning side explores below)
+        if not use_general and random.random() < exploration_rate:
             return random.choice(legal_moves)
 
         # Exploitation: use learned patterns
@@ -72,17 +81,8 @@ class PentagoHeadlessTrainer:
             # Get distance metric
             distance = self.scorer.get_distance_metric(move, game.board)
 
-            # Determine game phase
-            marble_count = game.board.marble_count
-            if marble_count < 12:
-                phase = 'opening'
-            elif marble_count < 28:
-                phase = 'middlegame'
-            else:
-                phase = 'endgame'
-
             # Get priority from learned patterns
-            key = ('marble', category, distance, phase)
+            key = self.prioritizer.pattern_key('marble', category, distance)
 
             if key in self.prioritizer.move_priorities:
                 priority = self.prioritizer.move_priorities[key]['priority']
@@ -105,9 +105,35 @@ class PentagoHeadlessTrainer:
 
             move_scores.append((move, priority))
 
-        # Select move with highest priority
+        # Game-independent patterns for the best candidates (and an exploration move)
         move_scores.sort(key=lambda x: x[1], reverse=True)
-        return move_scores[0][0]
+        if not use_general:
+            # Select move with highest priority
+            return move_scores[0][0]
+        candidates = move_scores[:MAX_CANDIDATES]
+        # Moves that achieve the winning condition at once are always candidates
+        candidates += [(move, 0.0) for move in winning_moves(
+            self.adapter, game, game.current_player, [move for move, _ in move_scores[MAX_CANDIDATES:]])]
+        explore = random.random() < exploration_rate
+        if explore:
+            explore_move = random.choice(legal_moves)
+            if all(move is not explore_move for move, _ in candidates):
+                candidates.append((explore_move, 0.0))
+        analysis = analyze_candidates(self.adapter, game, game.current_player,
+                                      [move for move, _ in candidates])
+        # A win now, or a loss the opponent can force at once, decides first;
+        # otherwise the existing score plus the general-pattern value
+        scored = [(move, score + decisive_value(a['net']) + self.general.value(a['features']),
+                   a['features'])
+                  for (move, score), a in zip(candidates, analysis)]
+
+        if explore:
+            chosen = next(entry for entry in scored if entry[0] is explore_move)
+        else:
+            # Highest priority plus general-pattern value
+            chosen = max(scored, key=lambda x: x[1])
+        self.last_general_features = chosen[2]
+        return chosen[0]
 
     def play_game(self, verbose: bool = False) -> Tuple[str, float, int]:
         """
@@ -117,6 +143,7 @@ class PentagoHeadlessTrainer:
         """
         game = PentagoGame()
         game_moves = []  # Track moves for learning
+        general_features = []  # White's general-pattern features
         rounds = 0
 
         if verbose:
@@ -132,7 +159,9 @@ class PentagoHeadlessTrainer:
 
             # Select move (White uses learning, Black random for now)
             if game.current_player == Color.WHITE:
-                move = self.select_move(game, legal_moves, exploration_rate=0.15)
+                move = self.select_move(game, legal_moves, exploration_rate=0.15,
+                                        use_general=True)
+                general_features.append(self.last_general_features)
             else:
                 # Black plays with some strategy (not purely random)
                 move = self.select_move(game, legal_moves, exploration_rate=0.5)
@@ -148,19 +177,10 @@ class PentagoHeadlessTrainer:
                 )
                 distance = self.scorer.get_distance_metric(move, board_before)
 
-                marble_count = board_before.marble_count
-                if marble_count < 12:
-                    phase = 'opening'
-                elif marble_count < 28:
-                    phase = 'middlegame'
-                else:
-                    phase = 'endgame'
-
                 game_moves.append({
                     'piece_type': 'marble',
                     'category': category,
-                    'distance': distance,
-                    'phase': phase
+                    'distance': distance
                 })
 
             game = new_game
@@ -202,16 +222,8 @@ class PentagoHeadlessTrainer:
             print(f"{'='*70}\n")
 
         # Record game for learning
-        for move_data in game_moves:
-            self.prioritizer._update_move_statistics(
-                piece_type=move_data['piece_type'],
-                move_category=move_data['category'],
-                distance=move_data['distance'],
-                phase=move_data['phase'],
-                result=result,
-                final_score=score
-            )
-        self.prioritizer.conn.commit()
+        self.prioritizer.record_game_patterns(game_moves, result, score)
+        self.general.record_game(general_features, result, 'pentago')
 
         return result, score, rounds
 
@@ -277,14 +289,14 @@ class PentagoHeadlessTrainer:
 
         patterns = self.prioritizer.get_top_patterns(limit)
 
-        print(f"{'Piece':<8} {'Category':<15} {'Distance':<10} {'Phase':<12} "
+        print(f"{'Piece':<8} {'Category':<15} {'Distance':<10} "
               f"{'Games':<8} {'Win%':<8} {'Priority':<10}")
         print(f"{'-'*90}")
 
         for pattern in patterns:
-            piece_type, category, distance, phase, times_seen, win_rate, confidence, priority = pattern
+            piece_type, category, distance, times_seen, win_rate, confidence, priority = pattern
             win_pct = win_rate * 100
-            print(f"{piece_type:<8} {category:<15} {distance:<10} {phase:<12} "
+            print(f"{piece_type:<8} {category:<15} {distance:<10} "
                   f"{times_seen:<8} {win_pct:<8.1f} {priority:<10.1f}")
 
         print(f"{'='*70}\n")

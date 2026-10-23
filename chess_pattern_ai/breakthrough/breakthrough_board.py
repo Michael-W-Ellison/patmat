@@ -129,16 +129,17 @@ class BreakthroughBoard:
         # Remove piece from set before changing position (hash changes!)
         self.pieces.discard(piece)
 
-        # Move piece
-        self.board[from_row][from_col] = None
-        self.board[to_row][to_col] = piece
-        piece.position = (to_row, to_col)
-
-        # Remove captured piece if applicable
+        # Remove captured piece first: it stands on the destination square,
+        # so clearing its square after the move would remove the mover
         if move.captured_piece:
             cap_row, cap_col = move.captured_piece.position
             self.board[cap_row][cap_col] = None
             self.pieces.discard(move.captured_piece)
+
+        # Move piece
+        self.board[from_row][from_col] = None
+        self.board[to_row][to_col] = piece
+        piece.position = (to_row, to_col)
 
         # Add piece back to set with new position
         self.pieces.add(piece)

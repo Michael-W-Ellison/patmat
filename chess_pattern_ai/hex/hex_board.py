@@ -209,6 +209,10 @@ class HexBoard:
             start_positions = [(row, 0) for row in range(self.size)]
 
         for pos in start_positions:
+            # Only this color's stones on its start edge begin a connection
+            stone = self.get_stone_at(pos)
+            if stone is None or stone.color != color:
+                continue
             group = self.get_connected_group(pos)
             connected.update(group)
 
@@ -255,8 +259,9 @@ class HexBoard:
         else:  # BLUE
             goal_positions = {(row, self.size - 1) for row in range(self.size)}
 
-        # BFS distance from connected group to goal
+        # BFS distance from connected group to goal; opponent stones block the path
         visited = {stone.position for stone in connected}
+        visited.update(stone.position for stone in self.stones if stone.color != color)
         to_check = [(pos, 0) for stone in connected for pos in self.get_neighbors(stone.position)]
         min_distance = float('inf')
 

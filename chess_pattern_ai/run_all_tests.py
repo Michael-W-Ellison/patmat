@@ -114,7 +114,7 @@ def test_core_imports():
     # Test core modules
     core_modules = [
         ('learnable_move_prioritizer', 'LearnableMovePrioritizer'),
-        ('game_scorer', 'BaseScorer'),
+        ('game_scorer', 'GameScorer'),
     ]
 
     os.chdir('chess_pattern_ai')
@@ -360,8 +360,8 @@ def run_full_test_suite():
 
 
 if __name__ == '__main__':
-    # Change to repository root
-    os.chdir('/home/user/patmat')
+    # Change to repository root (parent of this script's directory)
+    os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     success = run_full_test_suite()
 

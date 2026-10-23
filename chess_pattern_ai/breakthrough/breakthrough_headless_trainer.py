@@ -23,6 +23,10 @@ from breakthrough.breakthrough_board import BreakthroughBoard, Color, Move
 from breakthrough.breakthrough_game import BreakthroughGame
 from breakthrough.breakthrough_scorer import BreakthroughScorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
+from general_move_patterns import (GeneralPatternLearner, analyze_candidates,
+                                   decisive_value, winning_moves,
+                                   universal_db_path, MAX_CANDIDATES)
+from breakthrough.breakthrough_adapter import BreakthroughAdapter
 
 
 class BreakthroughHeadlessTrainer:
@@ -38,6 +42,10 @@ class BreakthroughHeadlessTrainer:
         self.prioritizer = LearnableMovePrioritizer(db_path)
         self.scorer = BreakthroughScorer()
         self.board_size = 8
+        # Game-independent patterns, shared with the other games' trainers
+        self.general = GeneralPatternLearner(universal_db_path(db_path), 'breakthrough')
+        self.adapter = BreakthroughAdapter()
+        self.last_general_features = None
 
         # Statistics
         self.games_played = 0
@@ -97,26 +105,6 @@ class BreakthroughHeadlessTrainer:
             # Distance from goal row 0
             return row
 
-    def get_game_phase(self, pieces_white: int, pieces_black: int) -> str:
-        """
-        Determine game phase based on piece counts
-
-        Args:
-            pieces_white: Number of white pieces
-            pieces_black: Number of black pieces
-
-        Returns: 'opening', 'middlegame', or 'endgame'
-        """
-        total_pieces = pieces_white + pieces_black
-        initial_pieces = 16  # Each side starts with 8 pieces
-
-        if total_pieces > initial_pieces * 1.5:  # Both sides have lots of pieces
-            return 'opening'
-        elif total_pieces > initial_pieces * 0.5:  # Mid game
-            return 'middlegame'
-        else:  # Few pieces left
-            return 'endgame'
-
     def select_move(self, game: BreakthroughGame, ai_color: Color,
                    use_learning: bool = True) -> Move:
         """
@@ -138,9 +126,6 @@ class BreakthroughHeadlessTrainer:
         # Score each move using learned patterns
         move_scores = []
 
-        white_pieces = len(game.board.get_pieces(Color.WHITE))
-        black_pieces = len(game.board.get_pieces(Color.BLACK))
-
         for move in legal_moves:
             # Extract move features for pattern matching
             piece_type = 'pawn'
@@ -151,11 +136,8 @@ class BreakthroughHeadlessTrainer:
             # Calculate distance from goal
             distance = self.distance_from_goal(move.to_pos, ai_color)
 
-            # Determine game phase
-            phase = self.get_game_phase(white_pieces, black_pieces)
-
             # Get priority from learned patterns (query cache directly)
-            key = (piece_type, category, distance, phase)
+            key = self.prioritizer.pattern_key(piece_type, category, distance)
 
             if key in self.prioritizer.move_priorities:
                 priority = self.prioritizer.move_priorities[key]['priority']
@@ -172,13 +154,33 @@ class BreakthroughHeadlessTrainer:
 
             move_scores.append((move, priority))
 
+        # Game-independent patterns for the best candidates (and an exploration move)
+        move_scores.sort(key=lambda x: x[1], reverse=True)
+        candidates = move_scores[:MAX_CANDIDATES]
+        # Moves that achieve the winning condition at once are always candidates
+        candidates += [(move, 0.0) for move in winning_moves(
+            self.adapter, game, ai_color, [move for move, _ in move_scores[MAX_CANDIDATES:]])]
+        explore = random.random() < 0.1  # 10% exploration
+        if explore:
+            explore_move = random.choice(legal_moves)
+            if all(move is not explore_move for move, _ in candidates):
+                candidates.append((explore_move, 0.0))
+        analysis = analyze_candidates(self.adapter, game, ai_color,
+                                      [move for move, _ in candidates])
+        # A win now, or a loss the opponent can force at once, decides first;
+        # otherwise the existing score plus the general-pattern value
+        scored = [(move, score + decisive_value(a['net']) + self.general.value(a['features']),
+                   a['features'])
+                  for (move, score), a in zip(candidates, analysis)]
+
         # Select move based on priorities (with exploration)
-        if random.random() < 0.1:  # 10% exploration
-            return random.choice(legal_moves)
+        if explore:
+            chosen = next(entry for entry in scored if entry[0] is explore_move)
         else:
-            # Choose move with highest priority
-            move_scores.sort(key=lambda x: x[1], reverse=True)
-            return move_scores[0][0]
+            # Choose move with highest priority plus general patterns
+            chosen = max(scored, key=lambda x: x[1])
+        self.last_general_features = chosen[2]
+        return chosen[0]
 
     def play_game(self, ai_color: Color, verbose: bool = False) -> Tuple[str, float, int]:
         """
@@ -193,6 +195,7 @@ class BreakthroughHeadlessTrainer:
 
         # Track moves for learning
         game_moves = []
+        general_features = []
 
         if verbose:
             print(f"\n{'='*70}")
@@ -206,6 +209,8 @@ class BreakthroughHeadlessTrainer:
             # Select move
             if current_color == ai_color:
                 move = self.select_move(game, ai_color, use_learning=True)
+                if move is not None:
+                    general_features.append(self.last_general_features)
             else:
                 # Opponent uses random moves (bootstrapping)
                 legal_moves = game.get_legal_moves(current_color)
@@ -222,15 +227,10 @@ class BreakthroughHeadlessTrainer:
 
                 distance = self.distance_from_goal(move.to_pos, ai_color)
 
-                white_pieces = len(game.board.get_pieces(Color.WHITE))
-                black_pieces = len(game.board.get_pieces(Color.BLACK))
-                phase = self.get_game_phase(white_pieces, black_pieces)
-
                 game_moves.append({
                     'piece_type': piece_type,
                     'category': category,
-                    'distance': distance,
-                    'phase': phase
+                    'distance': distance
                 })
 
             # Make move
@@ -264,16 +264,8 @@ class BreakthroughHeadlessTrainer:
             print(f"{'='*70}\n")
 
         # Record game for learning (directly update statistics)
-        for move_data in game_moves:
-            self.prioritizer._update_move_statistics(
-                piece_type=move_data['piece_type'],
-                move_category=move_data['category'],
-                distance=move_data['distance'],
-                phase=move_data['phase'],
-                result=result,
-                final_score=score
-            )
-        self.prioritizer.conn.commit()
+        self.prioritizer.record_game_patterns(game_moves, result, score)
+        self.general.record_game(general_features, result, 'breakthrough')
 
         return result, score, rounds
 
@@ -354,13 +346,13 @@ class BreakthroughHeadlessTrainer:
 
         patterns = self.prioritizer.get_top_patterns(limit)
 
-        print(f"{'Piece':<8} {'Category':<14} {'Distance':<10} {'Phase':<12} {'Games':<8} {'Win%':<8} {'Priority':<10}")
+        print(f"{'Piece':<8} {'Category':<14} {'Distance':<10} {'Games':<8} {'Win%':<8} {'Priority':<10}")
         print(f"{'-'*80}")
 
         for pattern in patterns:
-            piece_type, category, distance, phase, times_seen, win_rate, confidence, priority = pattern
+            piece_type, category, distance, times_seen, win_rate, confidence, priority = pattern
             win_pct = win_rate * 100
-            print(f"{piece_type:<8} {category:<14} {distance:<10} {phase:<12} {times_seen:<8} {win_pct:<8.1f} {priority:<10.1f}")
+            print(f"{piece_type:<8} {category:<14} {distance:<10} {times_seen:<8} {win_pct:<8.1f} {priority:<10.1f}")
 
         print(f"{'='*70}\n")
 
