@@ -146,5 +146,47 @@ class TestNewCapabilities(unittest.TestCase):
         self.assertEqual(e['family'], 'G')
 
 
+class TestCountingAndBuilding(unittest.TestCase):
+    def test_count_objects_as_row(self):             # family H
+        pairs = [([[1, 0, 1], [0, 0, 0], [1, 0, 0]], [[3, 3, 3]]),
+                 ([[0, 2, 0], [0, 0, 0], [2, 0, 0]], [[3, 3]])]
+        t = task(pairs, [[4, 0, 4, 0], [0, 0, 0, 0], [4, 0, 4, 0]], [[3, 3, 3, 3]])
+        e = best(t)
+        self.assertTrue(right(e, t))
+        self.assertEqual(e['family'], 'H')
+
+    def test_colour_with_most_cells(self):           # family H, comparing
+        pairs = [([[1, 1, 2], [0, 1, 0]], [[1]]), ([[3, 2, 2], [2, 0, 3]], [[2]]),
+                 ([[4, 0, 5], [5, 0, 5]], [[5]])]
+        t = task(pairs, [[6, 7, 7], [6, 6, 0]], [[6]])
+        e = best(t)
+        self.assertTrue(right(e, t))
+        self.assertEqual(e['family'], 'H')
+
+    def test_split_and_combine(self):                # family I
+        def make(l, r):
+            return [x + [5] + y for x, y in zip(l, r)]
+        def both(l, r):
+            return [[2 if x and y else 0 for x, y in zip(a, b)] for a, b in zip(l, r)]
+        L1, R1 = [[1, 0], [1, 1]], [[1, 1], [0, 1]]
+        L2, R2 = [[0, 1], [1, 0]], [[1, 1], [1, 1]]
+        L3, R3 = [[1, 1], [0, 0]], [[1, 0], [1, 0]]
+        t = task([(make(L1, R1), both(L1, R1)), (make(L2, R2), both(L2, R2))], make(L3, R3), both(L3, R3))
+        e = best(t)
+        self.assertTrue(right(e, t))
+        self.assertEqual(e['family'], 'I')
+
+    def test_local_rule(self):                       # family I
+        # cells with exactly one non-background neighbour (line ends) turn 4
+        g1 = [[0, 0, 0, 0, 0], [0, 1, 1, 1, 0], [0, 0, 0, 0, 0]]
+        o1 = [[0, 0, 0, 0, 0], [0, 4, 1, 4, 0], [0, 0, 0, 0, 0]]
+        g2 = [[0, 1, 0], [0, 1, 0], [0, 1, 0], [0, 0, 0]]
+        o2 = [[0, 4, 0], [0, 1, 0], [0, 4, 0], [0, 0, 0]]
+        test = [[0, 0, 0, 0], [1, 1, 1, 1], [0, 0, 0, 0]]
+        t = task([(g1, o1), (g2, o2)], test, [[0, 0, 0, 0], [4, 1, 1, 4], [0, 0, 0, 0]])
+        found, _ = find_patterns(t)
+        self.assertTrue(any(f['family'] == 'I' and right(f, t) for f in found))
+
+
 if __name__ == '__main__':
     unittest.main()

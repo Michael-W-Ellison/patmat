@@ -27,6 +27,15 @@ Pattern families:
                      foreground or a chosen object, gravity, keep / remove
                      objects) followed by any single pattern on its result;
                      searched only when no single pattern fits
+  H count / compare  the output draws a count (objects, cells of a colour,
+                     colours, shapes, sizes, holes) as a row, column or filled
+                     cells; or is filled with the colour that has the most /
+                     fewest cells, objects or largest object
+  I build            outputs built from scratch: a constant output; parts of
+                     the input (cut at separator lines or into halves /
+                     thirds) combined by AND / OR / XOR / NOR / difference or
+                     overlaid; or every output cell computed from its input
+                     neighbourhood by a rule learned from the examples
 
 Conditions: family A maps one property, or two at once, to an action (keep,
 delete, recolour, or adopt the colour of the one element an object
@@ -34,6 +43,7 @@ touches); family B selects by one property, or filters by one property's
 value and then selects by another.
 """
 
+import itertools
 from collections import Counter
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
@@ -548,6 +558,228 @@ def relation_patterns(pairs, bg) -> List[Pattern]:
     return found
 
 
+# ------------------------------------------------------------- family H
+
+def _quantities(pairs, bg) -> List[Tuple[str, Callable[[Array], int]]]:
+    """Things that can be counted in a grid"""
+    colors = sorted({int(v) for a, _ in pairs for v in np.unique(a)} - {bg})
+    qs = [('distinct colours', lambda a: len(set(np.unique(a).tolist()) - {bg}))]
+    for mode in SEGMENTATIONS:
+        qs.append((f'objects[{mode}]', lambda a, m=mode: len(segment(a, bg, m))))
+        qs.append((f'largest object[{mode}]',
+                   lambda a, m=mode: max((o.props['size'] for o in segment(a, bg, m)), default=0)))
+        qs.append((f'smallest object[{mode}]',
+                   lambda a, m=mode: min((o.props['size'] for o in segment(a, bg, m)), default=0)))
+        qs.append((f'distinct shapes[{mode}]',
+                   lambda a, m=mode: len({o.props['shape_canon'] for o in segment(a, bg, m)})))
+        qs.append((f'holes[{mode}]', lambda a, m=mode: sum(o.props['holes'] for o in segment(a, bg, m))))
+    for c in colors:
+        qs.append((f'cells of {c}', lambda a, c=c: int(np.sum(a == c))))
+        for mode in ('color4', 'color8'):
+            qs.append((f'objects of {c}[{mode}]',
+                       lambda a, c=c, m=mode: sum(1 for o in segment(a, bg, m) if o.props['color'] == c)))
+    return qs
+
+
+def _render_count(n: int, how: str, color: int, out_bg: int, shape) -> Optional[Array]:
+    if n <= 0 or n > 900:
+        return None
+    if how == 'row':
+        return np.full((1, n), color, dtype=int)
+    if how == 'column':
+        return np.full((n, 1), color, dtype=int)
+    out = np.full(shape, out_bg, dtype=int)
+    if n > out.size:
+        return None
+    flat = out.ravel() if how == 'fill rows' else out.T.ravel()
+    flat[:n] = color
+    return flat.reshape(out.shape) if how == 'fill rows' else flat.reshape(out.T.shape).T
+
+
+def count_patterns(pairs, bg) -> List[Pattern]:
+    found = []
+    outs = [b for _, b in pairs]
+    out_bg = background(outs)
+    out_colors = sorted({int(v) for b in outs for v in np.unique(b)} - {out_bg}) or [out_bg]
+    fixed_shape = outs[0].shape if all(b.shape == outs[0].shape for b in outs) else None
+    if all(len(set(np.unique(b).tolist()) - {out_bg}) <= 1 for b in outs):
+        renders = ['row', 'column'] + (['fill rows', 'fill columns'] if fixed_shape else [])
+        for qname, q in _quantities(pairs, bg):
+            counts = [q(a) for a, _ in pairs]
+            for how in renders:
+                for color in out_colors:
+                    if not all((lambda o: o is not None and o.shape == b.shape and np.array_equal(o, b))(
+                            _render_count(n, how, color, out_bg, fixed_shape)) for n, (_, b) in zip(counts, pairs)):
+                        continue
+                    fn = lambda a, q=q, how=how, color=color: _render_count(q(a), how, color, out_bg, fixed_shape)
+                    found.append(Pattern('H', f'count {qname} as {how} of {color}', 3, fn))
+    # Comparing: fill with the colour that wins a comparison between colours
+    if all(len(np.unique(b)) == 1 for b in outs):
+        shape_rules = [('input shape', lambda a: a.shape)]
+        if fixed_shape:
+            shape_rules.append((f'{fixed_shape}', lambda a: fixed_shape))
+        measures = {
+            'cells': lambda a, c: int(np.sum(a == c)),
+            'objects': lambda a, c: sum(1 for o in segment(a, bg, 'color8') if o.props['color'] == c),
+            'largest object': lambda a, c: max((o.props['size'] for o in segment(a, bg, 'color8')
+                                                if o.props['color'] == c), default=0),
+        }
+        for mname, m in measures.items():
+            for how in ('most', 'fewest'):
+                def winner(a, m=m, how=how):
+                    colors = [int(v) for v in np.unique(a) if v != bg]
+                    if not colors:
+                        return None
+                    vals = [(m(a, c), c) for c in colors]
+                    best = max(v for v, _ in vals) if how == 'most' else min(v for v, _ in vals)
+                    win = [c for v, c in vals if v == best]
+                    return win[0] if len(win) == 1 else None
+                for sname, shape_fn in shape_rules:
+                    fn = lambda a, w=winner, sf=shape_fn: (lambda c: None if c is None else np.full(sf(a), c, dtype=int))(w(a))
+                    if all((lambda o: o is not None and o.shape == b.shape and np.array_equal(o, b))(_safe(fn, a))
+                           for a, b in pairs):
+                        found.append(Pattern('H', f'colour with {how} {mname}, shape {sname}', 3, fn))
+    return found
+
+
+# ------------------------------------------------------------- family I
+
+def _split(a: Array) -> List[Tuple[str, List[Array]]]:
+    """Ways to cut a grid into equal parts: at separator lines, or into equal halves / thirds"""
+    out = []
+    h, w = a.shape
+    for axis in (0, 1):
+        uniform = {}
+        for i in range(a.shape[axis]):
+            line = a[i, :] if axis == 0 else a[:, i]
+            if len(np.unique(line)) == 1:
+                uniform.setdefault(int(line[0]), []).append(i)
+        for color, lines in sorted(uniform.items()):
+            bounds = [-1] + lines + [a.shape[axis]]
+            parts = [a[s + 1:e, :] if axis == 0 else a[:, s + 1:e]
+                     for s, e in zip(bounds, bounds[1:]) if e - s > 1]
+            if len(parts) >= 2 and all(p.shape == parts[0].shape for p in parts):
+                out.append((f'separators of {color} axis {axis}', parts))
+        for k in (2, 3):
+            n = a.shape[axis]
+            if n % k == 0 and n // k > 0:
+                size = n // k
+                parts = [a[i * size:(i + 1) * size, :] if axis == 0 else a[:, i * size:(i + 1) * size]
+                         for i in range(k)]
+                out.append((f'{k} parts axis {axis}', parts))
+    return out
+
+
+_BOOL_OPS = {'and': np.logical_and, 'or': np.logical_or, 'xor': np.logical_xor,
+             'nor': lambda x, y: ~(x | y), 'a_not_b': lambda x, y: x & ~y, 'b_not_a': lambda x, y: ~x & y}
+
+
+def _local_keys():
+    def nb4(a, r, c):
+        h, w = a.shape
+        return tuple(int(a[r + dr, c + dc]) if 0 <= r + dr < h and 0 <= c + dc < w else -1
+                     for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)))
+
+    def nb8(a, r, c):
+        h, w = a.shape
+        return tuple(int(a[r + dr, c + dc]) if 0 <= r + dr < h and 0 <= c + dc < w else -1
+                     for dr in (-1, 0, 1) for dc in (-1, 0, 1))
+
+    def count8(a, r, c, bg):
+        return sum(1 for v in nb8(a, r, c) if v not in (-1, bg)) - (a[r, c] != bg)
+
+    return {
+        'cell + 4 neighbours': lambda a, r, c, bg: (int(a[r, c]),) + nb4(a, r, c),
+        '3x3 neighbourhood': lambda a, r, c, bg: nb8(a, r, c),
+        'cell + count of 8 neighbours': lambda a, r, c, bg: (int(a[r, c]), count8(a, r, c, bg)),
+        'cell + row/column colours': lambda a, r, c, bg: (int(a[r, c]),
+                                                          frozenset(np.unique(a[r, :]).tolist()) - {bg},
+                                                          frozenset(np.unique(a[:, c]).tolist()) - {bg}),
+    }
+
+
+def build_patterns(pairs, bg) -> List[Pattern]:
+    found = []
+    outs = [b for _, b in pairs]
+    out_bg = background(outs)
+    # Constant output
+    if all(b.shape == outs[0].shape and np.array_equal(b, outs[0]) for b in outs) and len(pairs) > 1:
+        found.append(Pattern('I', 'constant output', 2, lambda a, c=outs[0].copy(): c.copy()))
+    # Split into parts and combine them cell by cell
+    splits0 = _split(pairs[0][0])
+    for sname, parts0 in splits0:
+        if parts0[0].shape != outs[0].shape:
+            continue
+
+        def parts_of(a, sname=sname):
+            for n, ps in _split(a):
+                if n == sname:
+                    return ps
+            return None
+
+        if len(parts0) == 2:
+            colors = sorted({int(v) for b in outs for v in np.unique(b)} - {out_bg})
+            for opname, op in _BOOL_OPS.items():
+                for color in colors[:3]:
+                    def fn(a, op=op, color=color, parts_of=parts_of):
+                        ps = parts_of(a)
+                        if ps is None or len(ps) != 2:
+                            return None
+                        pbg = background(ps)
+                        m = op(ps[0] != pbg, ps[1] != pbg)
+                        return np.where(m, color, out_bg).astype(int)
+                    if all((lambda o: o is not None and o.shape == b.shape and np.array_equal(o, b))(_safe(fn, a))
+                           for a, b in pairs):
+                        found.append(Pattern('I', f'{sname}: {opname} -> {color}', 3, fn))
+        for order in (itertools.permutations(range(len(parts0))) if len(parts0) <= 4 else ()):
+            def overlay(a, order=order, parts_of=parts_of):
+                ps = parts_of(a)
+                if ps is None or len(ps) != len(order):
+                    return None
+                pbg = background(ps)
+                out = np.full(ps[0].shape, pbg, dtype=int)
+                for i in reversed(order):
+                    out = np.where(ps[i] != pbg, ps[i], out)
+                return out
+            if all((lambda o: o is not None and o.shape == b.shape and np.array_equal(o, b))(_safe(overlay, a))
+                   for a, b in pairs):
+                found.append(Pattern('I', f'{sname}: overlay order {order}', 3, overlay))
+    # Local rules: each output cell from the input cell's neighbourhood
+    if all(a.shape == b.shape for a, b in pairs):
+        for kname, key in _local_keys().items():
+            mapping = {}
+            ok = True
+            for a, b in pairs:
+                for r in range(a.shape[0]):
+                    for c in range(a.shape[1]):
+                        k = key(a, r, c, bg)
+                        if mapping.setdefault(k, int(b[r, c])) != int(b[r, c]):
+                            ok = False
+                            break
+                    if not ok:
+                        break
+                if not ok:
+                    break
+            if not ok:
+                continue
+            changes = sum(1 for k, v in mapping.items()
+                          if (k[4] if kname == '3x3 neighbourhood' else k[0]) != v)
+            if changes == 0:
+                continue
+
+            def local(a, key=key, mapping=mapping):
+                out = np.empty_like(a)
+                for r in range(a.shape[0]):
+                    for c in range(a.shape[1]):
+                        v = mapping.get(key(a, r, c, bg))
+                        if v is None:
+                            return None
+                        out[r, c] = v
+                return out
+            found.append(Pattern('I', f'local rule: {kname} ({changes} changing entries)', 3 + changes, local))
+    return found
+
+
 # ------------------------------------------------------------- family G
 
 def _structural_steps(bg) -> List[Tuple[str, Callable, float]]:
@@ -582,7 +814,7 @@ def combination_patterns(pairs, bg, deadline: float) -> List[Pattern]:
     import time
     found = []
     second = (object_action_patterns, select_crop_patterns, _lite_transforms, move_patterns,
-              resize_patterns, relation_patterns)
+              resize_patterns, relation_patterns, count_patterns, build_patterns)
     for name1, step1, cost1 in _structural_steps(bg):
         if time.time() > deadline:
             break
@@ -608,7 +840,8 @@ def combination_patterns(pairs, bg, deadline: float) -> List[Pattern]:
 # --------------------------------------------------------------- solve
 
 FAMILIES = {'A': object_action_patterns, 'B': select_crop_patterns, 'C': transform_patterns,
-            'D': move_patterns, 'E': resize_patterns, 'F': relation_patterns}
+            'D': move_patterns, 'E': resize_patterns, 'F': relation_patterns,
+            'H': count_patterns, 'I': build_patterns}
 COMBINATION_SECONDS = 60     # time budget for combinations, used only when no single pattern fits
 
 
