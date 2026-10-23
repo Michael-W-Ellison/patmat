@@ -32,16 +32,16 @@ class LOAAdapter:
         if not new_game.board.move_piece(move.from_pos, move.to_pos):
             raise ValueError(f"Invalid move: {move}")
 
-        # Connected exactly when there is at most one group; the group counts
-        # are kept on the new state so advantage() need not flood-fill again
+        # Connected exactly when there is one group (LOABoard.is_connected); the
+        # group counts are kept on the new state so advantage() need not flood-fill again
         mover = new_game.current_player
         groups = new_game._adapter_groups = {}
         groups[mover] = new_game.board.count_groups(mover)
-        if groups[mover] <= 1:
+        if groups[mover] == 1:
             new_game.winner = mover
             return new_game
         groups[mover.opposite()] = new_game.board.count_groups(mover.opposite())
-        if groups[mover.opposite()] <= 1:
+        if groups[mover.opposite()] == 1:
             new_game.winner = mover.opposite()
             return new_game
 
@@ -77,13 +77,13 @@ class LOAAdapter:
     def _evaluate_color(self, board, color, groups=None):
         """
         Same value as LOAScorer._evaluate_color with at most one flood fill
-        instead of two: all pieces are connected exactly when there is at most
-        one group.
+        instead of two: all pieces are connected exactly when there is one
+        group.
         """
         s = self.scorer
         if groups is None:
             groups = board.count_groups(color)
-        if groups <= 1:
+        if groups == 1:
             return s.CONNECTED_BONUS
         pieces = board.get_pieces(color)
         score = 0.0

@@ -110,6 +110,9 @@ class PentagoGame:
         elif new_game.board.check_five_in_row(new_game.current_player):
             # Current player wins
             new_game.winner = new_game.current_player
+        elif new_game.board.check_five_in_row(new_game.current_player.opposite()):
+            # The rotation gave only the opponent five in a row: the opponent wins
+            new_game.winner = new_game.current_player.opposite()
         elif new_game.board.is_full():
             # Board full, no winner → draw
             new_game.is_draw = True

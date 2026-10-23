@@ -67,15 +67,16 @@ class MorrisBoard:
     Mills (3 in a row) allow removing opponent pieces.
     """
 
-    # Define adjacency graph (which positions connect to which)
+    # Define adjacency graph (which positions connect to which): two points
+    # are adjacent exactly when they are next to each other on a mill line
     ADJACENCIES = {
         0: [1, 7], 1: [0, 2, 9], 2: [1, 3],
-        3: [2, 11], 4: [5, 11], 5: [4, 6, 13],
+        3: [2, 4, 11], 4: [3, 5], 5: [4, 6, 13],
         6: [5, 7], 7: [0, 6, 15], 8: [9, 15],
-        9: [1, 8, 10, 17], 10: [9, 11], 11: [3, 4, 10, 19],
-        12: [13, 19], 13: [5, 12, 14, 21], 14: [13, 15],
+        9: [1, 8, 10, 17], 10: [9, 11], 11: [3, 10, 12, 19],
+        12: [11, 13], 13: [5, 12, 14, 21], 14: [13, 15],
         15: [7, 8, 14, 23], 16: [17, 23], 17: [9, 16, 18],
-        18: [17, 19], 19: [11, 12, 18], 20: [21, 19],
+        18: [17, 19], 19: [11, 18, 20], 20: [19, 21],
         21: [13, 20, 22], 22: [21, 23], 23: [15, 16, 22]
     }
 
