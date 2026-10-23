@@ -188,5 +188,90 @@ class TestCountingAndBuilding(unittest.TestCase):
         self.assertTrue(any(f['family'] == 'I' and right(f, t) for f in found))
 
 
+class TestRoles(unittest.TestCase):
+    def test_panel_fill_by_role(self):               # family J, panels
+        def grid(n):
+            # n x n panels of 2 x 2 cells separated by lines of 5
+            size = 3 * n - 1
+            g = np.zeros((size, size), dtype=int)
+            for k in range(1, n):
+                g[3 * k - 1, :] = 5
+                g[:, 3 * k - 1] = 5
+            return g
+        def filled(n):
+            g = grid(n)
+            g[0:2, 0:2] = 1
+            c = 3 * (n // 2)
+            g[c:c + 2, c:c + 2] = 2
+            g[-2:, -2:] = 3
+            return g
+        t = task([(grid(3).tolist(), filled(3).tolist()), (grid(5).tolist(), filled(5).tolist())],
+                 grid(7).tolist(), filled(7).tolist())
+        e = best(t)
+        self.assertTrue(right(e, t))
+        self.assertEqual(e['family'], 'J')
+
+    def test_panel_with_unique_colour(self):         # family J, panels
+        g1 = [[8, 8, 3, 8, 8], [4, 8, 3, 8, 8], [3, 3, 3, 3, 3], [8, 8, 3, 8, 8], [8, 8, 3, 8, 8]]
+        g2 = [[1, 1, 2, 1, 1], [1, 1, 2, 1, 1], [2, 2, 2, 2, 2], [1, 1, 2, 1, 6], [1, 1, 2, 1, 1]]
+        test = [[7, 7, 7, 0, 7, 7, 7], [7, 7, 7, 0, 7, 9, 7], [7, 7, 7, 0, 7, 7, 7], [0, 0, 0, 0, 0, 0, 0],
+                [7, 7, 7, 0, 7, 7, 7], [7, 7, 7, 0, 7, 7, 7], [7, 7, 7, 0, 7, 7, 7]]
+        t = task([(g1, [[8, 8], [4, 8]]), (g2, [[1, 6], [1, 1]])], test, [[7, 7, 7], [7, 9, 7], [7, 7, 7]])
+        e = best(t)
+        self.assertTrue(right(e, t))
+
+    def test_block_summary(self):                    # family J, uniform blocks
+        b1 = np.vstack([np.hstack([np.full((2, 3), 2), np.full((2, 1), 8)]),
+                        np.hstack([np.full((3, 3), 3), np.full((3, 1), 5)])])
+        b2 = np.hstack([np.full((4, 2), 4), np.full((4, 3), 1), np.full((4, 1), 6)])
+        b3 = np.vstack([np.full((1, 5), 7), np.full((2, 5), 9), np.full((3, 5), 7)])
+        t = task([(b1.tolist(), [[2, 8], [3, 5]]), (b2.tolist(), [[4, 1, 6]])], b3.tolist(), [[7], [9], [7]])
+        self.assertTrue(right(best(t), t))
+
+    def test_recolour_by_key_shape(self):            # family J, key / legend
+        # grey (5) shapes take the colour of the key shape with the same shape
+        g1 = [[1, 1, 0, 2, 0, 0, 0], [0, 0, 0, 2, 0, 0, 0], [0, 0, 0, 0, 0, 5, 5],
+              [0, 5, 0, 0, 0, 0, 0], [0, 5, 0, 0, 0, 0, 0]]
+        o1 = [[1, 1, 0, 2, 0, 0, 0], [0, 0, 0, 2, 0, 0, 0], [0, 0, 0, 0, 0, 1, 1],
+              [0, 2, 0, 0, 0, 0, 0], [0, 2, 0, 0, 0, 0, 0]]
+        g2 = [[3, 0, 4, 4, 4, 0, 0], [3, 0, 0, 0, 0, 0, 0], [3, 0, 0, 5, 5, 5, 0],
+              [0, 0, 0, 0, 0, 0, 0], [5, 0, 0, 0, 0, 0, 0], [5, 0, 0, 0, 0, 0, 0], [5, 0, 0, 0, 0, 0, 0]]
+        o2 = [[3, 0, 4, 4, 4, 0, 0], [3, 0, 0, 0, 0, 0, 0], [3, 0, 0, 4, 4, 4, 0],
+              [0, 0, 0, 0, 0, 0, 0], [3, 0, 0, 0, 0, 0, 0], [3, 0, 0, 0, 0, 0, 0], [3, 0, 0, 0, 0, 0, 0]]
+        test = [[6, 0, 7, 7, 0, 0], [6, 0, 7, 7, 0, 0], [0, 0, 0, 0, 0, 5], [5, 5, 0, 0, 0, 5], [5, 5, 0, 0, 0, 0]]
+        out = [[6, 0, 7, 7, 0, 0], [6, 0, 7, 7, 0, 0], [0, 0, 0, 0, 0, 6], [7, 7, 0, 0, 0, 6], [7, 7, 0, 0, 0, 0]]
+        t = task([(g1, o1), (g2, o2)], test, out)
+        e = best(t)
+        self.assertTrue(right(e, t))
+        self.assertEqual(e['family'], 'J')
+
+    def test_recolour_by_marker_in_column(self):     # family J, markers
+        g1 = [[2, 0, 0, 6, 0], [0, 0, 0, 0, 0], [5, 5, 0, 5, 5], [5, 5, 0, 5, 5]]
+        o1 = [[2, 0, 0, 6, 0], [0, 0, 0, 0, 0], [2, 2, 0, 6, 6], [2, 2, 0, 6, 6]]
+        g2 = [[0, 1, 0, 0, 8], [0, 0, 0, 0, 0], [0, 5, 0, 5, 5], [0, 5, 0, 5, 5], [0, 0, 0, 0, 0]]
+        o2 = [[0, 1, 0, 0, 8], [0, 0, 0, 0, 0], [0, 1, 0, 8, 8], [0, 1, 0, 8, 8], [0, 0, 0, 0, 0]]
+        test = [[0, 0, 4, 0, 0, 3], [0, 0, 0, 0, 0, 0], [0, 5, 5, 0, 0, 0], [0, 0, 0, 0, 5, 5]]
+        out = [[0, 0, 4, 0, 0, 3], [0, 0, 0, 0, 0, 0], [0, 4, 4, 0, 0, 0], [0, 0, 0, 0, 3, 3]]
+        t = task([(g1, o1), (g2, o2)], test, out)
+        self.assertTrue(right(best(t), t))
+
+    def test_colour_map_from_key(self):              # family J, legend
+        g1 = [[1, 2, 0, 0], [0, 0, 1, 1], [0, 0, 1, 0]]
+        o1 = [[1, 2, 0, 0], [0, 0, 2, 2], [0, 0, 2, 0]]
+        g2 = [[3, 0, 3, 0], [0, 0, 0, 0], [3, 4, 0, 3]]
+        o2 = [[4, 0, 4, 0], [0, 0, 0, 0], [3, 4, 0, 4]]
+        test = [[6, 6, 0, 0], [0, 0, 0, 0], [0, 6, 7, 0]]
+        t = task([(g1, o1), (g2, o2)], test, [[7, 7, 0, 0], [0, 0, 0, 0], [0, 6, 7, 0]])
+        self.assertTrue(right(best(t), t))
+
+    def test_region_bounded_by_markers(self):        # family J, markers
+        g1 = [[0, 0, 0, 0, 0], [0, 4, 0, 4, 0], [0, 0, 3, 0, 0], [0, 4, 0, 4, 0]]
+        g2 = [[4, 0, 0, 4], [0, 1, 2, 0], [0, 2, 1, 0], [4, 0, 0, 4], [0, 0, 0, 0]]
+        test = [[0, 0, 0, 0, 0, 0], [0, 4, 0, 0, 4, 0], [0, 0, 6, 6, 0, 0], [0, 0, 0, 7, 0, 0], [0, 4, 0, 0, 4, 0]]
+        t = task([(g1, [[3]]), (g2, [[1, 2], [2, 1]])],
+                 test, [[6, 6], [0, 7]])
+        self.assertTrue(right(best(t), t))
+
+
 if __name__ == '__main__':
     unittest.main()

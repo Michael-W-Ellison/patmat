@@ -36,6 +36,14 @@ Pattern families:
                      thirds) taken, combined by AND / OR / XOR / NOR /
                      difference, or overlaid; or every output cell computed from its input
                      neighbourhood by a rule learned from the examples
+  J roles            elements that control others: panels of a grid cut by
+                     separator lines (or uniform blocks) - one panel chosen,
+                     a summary with one cell per panel, or each panel kept /
+                     filled by its role (first, centre, last) or contents;
+                     objects of one colour taking the colour of a marker
+                     (same shape or size, in line, inside, nearest); a colour
+                     map read from a key of two-cell pieces; the region
+                     bounded by marker cells
 
 Conditions: family A maps one property, or two at once, to an action (keep,
 delete, recolour, or adopt the colour of the one element an object
@@ -784,6 +792,379 @@ def build_patterns(pairs, bg) -> List[Pattern]:
     return found
 
 
+# ------------------------------------------------------------- family J
+
+def _bands(n: int, cuts: List[int]) -> List[Tuple[int, int]]:
+    """Index ranges [start, end) between separator lines"""
+    out, start = [], 0
+    for cut in sorted(cuts) + [n]:
+        if cut > start:
+            out.append((start, cut))
+        start = cut + 1
+    return out
+
+
+def panel_grid(a: Array, bg: int) -> Optional[Dict]:
+    """
+    The grid as a grid of panels: the regions between full, single lines of
+    one colour (the colour giving the most panels), or else the blocks of
+    one colour formed by runs of identical rows and columns
+    """
+    h, w = a.shape
+    best = None
+    for color in np.unique(a).tolist():
+        if color == bg:
+            continue
+        rows = [i for i in range(h) if np.all(a[i, :] == color)]
+        cols = [j for j in range(w) if np.all(a[:, j] == color)]
+        if any(y - x == 1 for x, y in zip(rows, rows[1:])) or any(y - x == 1 for x, y in zip(cols, cols[1:])):
+            continue        # adjacent lines form a band of colour, not a separator
+        rb, cb = _bands(h, rows), _bands(w, cols)
+        if (rows or cols) and len(rb) * len(cb) >= 2 and \
+                (best is None or len(rb) * len(cb) > len(best['rows']) * len(best['cols'])):
+            best = {'kind': 'separators', 'sep': color, 'rows': rb, 'cols': cb}
+    if best is None:
+        rcuts = [i for i in range(1, h) if not np.array_equal(a[i], a[i - 1])]
+        ccuts = [j for j in range(1, w) if not np.array_equal(a[:, j], a[:, j - 1])]
+        rb = list(zip([0] + rcuts, rcuts + [h]))
+        cb = list(zip([0] + ccuts, ccuts + [w]))
+        if 2 <= len(rb) * len(cb) and len(rb) < h and len(cb) < w:
+            best = {'kind': 'blocks', 'sep': None, 'rows': rb, 'cols': cb}
+    return best
+
+
+def panels(a: Array, bg: int = None) -> Tuple[Optional[Dict], List[Obj]]:
+    """
+    Panels as elements, each with its own properties and its role in the
+    panel grid. Panels are a structure of one grid, so the grid's own
+    background is used.
+    """
+    bg = background([a])
+    g = panel_grid(a, bg)
+    if g is None:
+        return None, []
+    R, C = len(g['rows']), len(g['cols'])
+    out = []
+    for i, (r0, r1) in enumerate(g['rows']):
+        for j, (c0, c1) in enumerate(g['cols']):
+            p = a[r0:r1, c0:c1]
+            fg = p[p != bg]
+            counts = Counter(fg.tolist())
+            role = 'first' if (i, j) == (0, 0) else 'last' if (i, j) == (R - 1, C - 1) else \
+                'center' if R % 2 and C % 2 and (i, j) == (R // 2, C // 2) else 'other'
+            props = {
+                'index': (i, j), 'row': i, 'col': j, 'role': role, 'bg': bg,
+                'count': int(fg.size), 'empty': fg.size == 0,
+                'color': counts.most_common(1)[0][0] if counts else bg,
+                'colors': frozenset(counts), 'n_colors': len(counts),
+                'pattern': bytes(str(p.shape), 'ascii') + p.astype(np.int16).tobytes(),
+                'mask': bytes(str(p.shape), 'ascii') + np.packbits(p != bg).tobytes(),
+            }
+            out.append(Obj(frozenset(), (r0, c0, r1 - 1, c1 - 1), props))
+    patterns = Counter(o.props['pattern'] for o in out)
+    masks = Counter(o.props['mask'] for o in out)
+    colorsets = Counter(o.props['colors'] for o in out)
+    per_color = Counter(c for o in out for c in o.props['colors'])
+    counts = [o.props['count'] for o in out]
+    for o in out:
+        o.props.update({
+            'unique_pattern': patterns[o.props['pattern']] == 1,
+            'unique_mask': masks[o.props['mask']] == 1,
+            'unique_colors': colorsets[o.props['colors']] == 1,
+            'has_unique_color': any(per_color[c] == 1 for c in o.props['colors']),
+            'is_max_count': o.props['count'] == max(counts),
+            'is_min_count': o.props['count'] == min(counts),
+        })
+    return g, out
+
+
+def _region(a: Array, o: Obj) -> Array:
+    r0, c0, r1, c1 = o.bbox
+    return a[r0:r1 + 1, c0:c1 + 1]
+
+
+PANEL_PROPERTIES = ('role', 'index', 'row', 'col', 'count', 'empty', 'color', 'colors', 'n_colors',
+                    'unique_pattern', 'unique_mask', 'unique_colors', 'has_unique_color',
+                    'is_max_count', 'is_min_count', 'mask', 'pattern')
+PANEL_COST = {'pattern': 3, 'mask': 2, 'index': 1}
+
+
+def _panel_actions(p: Array, q: Array, props: Dict) -> Optional[set]:
+    """Every action that turns panel p into q"""
+    bg = props['bg']
+    acts = set()
+    if np.array_equal(p, q):
+        acts.add('keep')
+    if len(np.unique(q)) == 1:
+        acts.add(('fill', int(q.flat[0])))
+    fills = {int(v) for v in np.unique(q[p == bg])} if np.any(p == bg) else set()
+    if len(fills) == 1 and np.array_equal(q, np.where(p == bg, next(iter(fills)), p)):
+        c = next(iter(fills))
+        acts.add(('fill_bg', c))
+        if c == props['color'] and c != bg:
+            acts.add('fill_bg_own')
+    return acts or None
+
+
+def _apply_panel(p: Array, act, props: Dict) -> Array:
+    bg = props['bg']
+    if act == 'keep':
+        return p
+    if act == 'fill_bg_own':
+        return np.where(p == bg, props['color'], p)
+    kind, c = act
+    return np.full(p.shape, c, dtype=int) if kind == 'fill' else np.where(p == bg, c, p)
+
+
+def panel_patterns(pairs, bg) -> List[Pattern]:
+    found = []
+    grids = [panels(a, bg) for a, _ in pairs]
+    if any(g is None for g, _ in grids):
+        return found
+    # 1. The output is one panel, chosen by a property
+    for tname, tf in TRANSFORMS.items():
+        match = [{i for i, o in enumerate(ps) if (lambda c: c.shape == b.shape and np.array_equal(c, b))(
+                     tf(_region(a, o)))} for (a, b), (_, ps) in zip(pairs, grids)]
+        if any(not m for m in match):
+            continue
+        for prop in PANEL_PROPERTIES:
+            first = grids[0][1][next(iter(match[0]))].props[prop]
+            for how in ('unique', 'max', 'min', ('eq', first)):
+                if all((lambda sel: sel is not None and ps.index(sel) in m)(_select(ps, prop, how))
+                       for (_, ps), m in zip(grids, match)):
+                    def predict(t, prop=prop, how=how, tf=tf):
+                        sel = _select(panels(t, bg)[1], prop, how)
+                        return None if sel is None else tf(_region(t, sel))
+                    found.append(Pattern('J', f'panel {prop} {_how(how)} +{tname}',
+                                         2 + (tname != 'identity') + isinstance(how, tuple)
+                                         + PANEL_COST.get(prop, 0), predict))
+    # 2. The output summarises the panels, one cell (or block) per panel
+    for transpose in (False, True):
+        targets, scale = [], None
+        for (a, b), (g, ps) in zip(pairs, grids):
+            R, C = len(g['rows']), len(g['cols'])
+            if transpose:
+                R, C = C, R
+            if b.shape[0] % R or b.shape[1] % C:
+                break
+            k = (b.shape[0] // R, b.shape[1] // C)
+            if scale not in (None, k):
+                break
+            scale = k
+            t = b[::k[0], ::k[1]]
+            if not np.array_equal(np.kron(t, np.ones(k, dtype=int)), b):
+                break
+            targets.append(t.T if transpose else t)
+        else:
+            rows = [(o.props, {int(t[o.props['index']])}) for (_, ps), t in zip(grids, targets) for o in ps]
+            for prop in PANEL_PROPERTIES:
+                if prop == 'color' and all(o == next(iter(acts)) for o, acts in
+                                           ((pr['color'], acts) for pr, acts in rows)):
+                    mapping, cost = None, 3
+                else:
+                    mapping = _learn_mapping(rows, lambda pr, prop=prop: pr[prop])
+                    if mapping is None or len(mapping) == len(rows):
+                        continue
+                    cost = 3 + len(mapping) + PANEL_COST.get(prop, 0)
+
+                def predict(t, prop=prop, mapping=mapping, transpose=transpose, scale=scale):
+                    g, ps = panels(t, bg)
+                    if g is None:
+                        return None
+                    out = np.zeros((len(g['rows']), len(g['cols'])), dtype=int)
+                    for o in ps:
+                        v = o.props['color'] if mapping is None else mapping.get(o.props[prop])
+                        if v is None:
+                            return None
+                        out[o.props['index']] = v
+                    out = out.T if transpose else out
+                    return np.kron(out, np.ones(scale, dtype=int))
+                found.append(Pattern('J', f'panel summary: {"own colour" if mapping is None else prop}'
+                                     f'{" transposed" if transpose else ""} x{scale}', cost, predict))
+    # 3. Each panel is kept, filled, or has its background filled, by a property
+    if all(a.shape == b.shape for a, b in pairs):
+        rows = []
+        for (a, b), (g, ps) in zip(pairs, grids):
+            inside = np.zeros(a.shape, dtype=bool)
+            for o in ps:
+                r0, c0, r1, c1 = o.bbox
+                inside[r0:r1 + 1, c0:c1 + 1] = True
+            if not np.array_equal(a[~inside], b[~inside]):
+                return found
+            for o in ps:
+                acts = _panel_actions(_region(a, o), _region(b, o), o.props)
+                if acts is None:
+                    return found
+                rows.append((o.props, acts))
+        if all(acts == {'keep'} or 'keep' in acts for _, acts in rows):
+            return found
+        for prop in PANEL_PROPERTIES:
+            mapping = _learn_mapping(rows, lambda pr, prop=prop: pr[prop])
+            if mapping is None:
+                continue
+
+            def predict(t, prop=prop, mapping=mapping):
+                g, ps = panels(t, bg)
+                if g is None:
+                    return None
+                out = t.copy()
+                for o in ps:
+                    act = mapping.get(o.props[prop])
+                    if act is None:
+                        return None
+                    r0, c0, r1, c1 = o.bbox
+                    out[r0:r1 + 1, c0:c1 + 1] = _apply_panel(_region(t, o), act, o.props)
+                return out
+            found.append(Pattern('J', f'panels by {prop}: {len(mapping)} rules',
+                                 2 + len(mapping) + PANEL_COST.get(prop, 0), predict))
+    return found
+
+
+def _gap(o1: Obj, o2: Obj) -> int:
+    return min(max(abs(r1 - r2), abs(c1 - c2)) for r1, c1 in o1.cells for r2, c2 in o2.cells)
+
+
+def _overlap(lo1, hi1, lo2, hi2) -> bool:
+    return lo1 <= hi2 and lo2 <= hi1
+
+
+def _nearest_color(o: Obj, others: List[Obj]) -> Optional[int]:
+    if not others:
+        return None
+    d = [_gap(o, x) for x in others]
+    colors = {x.props['color'] for x, v in zip(others, d) if v == min(d)}
+    return colors.pop() if len(colors) == 1 else None
+
+
+def _reference_rules():
+    """Ways a target object finds the element whose colour it takes"""
+    def same(prop):
+        def rule(o, refs):
+            colors = {x.props['color'] for x in refs if x.props[prop] == o.props[prop]}
+            return colors.pop() if len(colors) == 1 else None
+        return rule
+
+    def column(o, refs):
+        return _nearest_color(o, [x for x in refs if _overlap(o.bbox[1], o.bbox[3], x.bbox[1], x.bbox[3])])
+
+    def row(o, refs):
+        return _nearest_color(o, [x for x in refs if _overlap(o.bbox[0], o.bbox[2], x.bbox[0], x.bbox[2])])
+
+    def aligned(o, refs):
+        return _nearest_color(o, [x for x in refs if _overlap(o.bbox[1], o.bbox[3], x.bbox[1], x.bbox[3])
+                                  or _overlap(o.bbox[0], o.bbox[2], x.bbox[0], x.bbox[2])])
+
+    def inside(o, refs):
+        r0, c0, r1, c1 = o.bbox
+        colors = {x.props['color'] for x in refs
+                  if r0 <= x.bbox[0] and x.bbox[2] <= r1 and c0 <= x.bbox[1] and x.bbox[3] <= c1}
+        return colors.pop() if len(colors) == 1 else None
+
+    return {'same shape': same('shape'), 'same shape up to rotation': same('shape_canon'),
+            'same size': same('size'), 'marker in its column': column, 'marker in its row': row,
+            'marker in its row or column': aligned, 'marker inside it': inside,
+            'nearest element': lambda o, refs: _nearest_color(o, refs)}
+
+
+def marker_patterns(pairs, bg) -> List[Pattern]:
+    """Objects of one colour take the colour of a reference element (a key, a marker)"""
+    found = []
+    if any(a.shape != b.shape for a, b in pairs):
+        return found
+    for mode in ('color4', 'color8'):
+        seg = [segment(a, bg, mode) for a, _ in pairs]
+        targets = set()
+        ok = True
+        for (a, b), objs in zip(pairs, seg):
+            covered = np.zeros(a.shape, dtype=bool)
+            for o in objs:
+                cells = tuple(zip(*o.cells))
+                covered[cells] = True
+                after = set(b[cells].tolist())
+                if after != {o.props['color']}:
+                    if len(after) != 1:
+                        ok = False
+                    targets.add(o.props['color'])
+            if not np.array_equal(a[~covered], b[~covered]):
+                ok = False
+        if not ok or len(targets) != 1:
+            continue
+        target = targets.pop()
+        for rname, rule in _reference_rules().items():
+            def predict(t, rule=rule, mode=mode, target=target):
+                objs = segment(t, bg, mode)
+                refs = [x for x in objs if x.props['color'] != target]
+                out = t.copy()
+                for o in objs:
+                    if o.props['color'] == target:
+                        c = rule(o, refs)
+                        if c is None:
+                            return None
+                        out[tuple(zip(*o.cells))] = c
+                return out
+            if all((lambda o: o is not None and np.array_equal(o, b))(_safe(predict, a)) for a, b in pairs):
+                found.append(Pattern('J', f'objects[{mode}] of colour {target} take the colour of the {rname}',
+                                     3, predict))
+    return found
+
+
+def _legend_map(a: Array, bg: int, reverse: bool) -> Tuple[Optional[Dict], set]:
+    """Colour map read from the grid's key: two-cell pieces of two colours (first -> second)"""
+    mapping, cells = {}, set()
+    for o in segment(a, bg, 'multi4'):
+        if o.props['size'] == 2 and o.props['n_colors'] == 2:
+            (p1, p2) = sorted(o.cells)
+            x, y = int(a[p1]), int(a[p2])
+            if reverse:
+                x, y = y, x
+            if mapping.get(x, y) != y:
+                return None, set()
+            mapping[x] = y
+            cells |= set(o.cells)
+    return (mapping or None), cells
+
+
+def legend_patterns(pairs, bg) -> List[Pattern]:
+    found = []
+    if any(a.shape != b.shape for a, b in pairs):
+        return found
+    for reverse in (False, True):
+        def predict(t, reverse=reverse):
+            mapping, cells = _legend_map(t, bg, reverse)
+            if mapping is None:
+                return None
+            out = t.copy()
+            for r in range(t.shape[0]):
+                for c in range(t.shape[1]):
+                    if (r, c) not in cells:
+                        out[r, c] = mapping.get(int(t[r, c]), int(t[r, c]))
+            return out
+        if all((lambda o: o is not None and np.array_equal(o, b) and not np.array_equal(a, b))(_safe(predict, a))
+               for a, b in pairs):
+            found.append(Pattern('J', f'colour map read from the key{" (reversed)" if reverse else ""}', 3, predict))
+    # The region bounded by the cells of one marker colour
+    colors = [int(c) for c in np.unique(pairs[0][0]) if c != bg]
+    for color in colors:
+        for inner in (False, True):
+            def crop_to(t, color=color, inner=inner):
+                rr, cc = np.nonzero(t == color)
+                if rr.size < 2:
+                    return None
+                r0, r1, c0, c1 = rr.min(), rr.max(), cc.min(), cc.max()
+                if inner:
+                    r0, r1, c0, c1 = r0 + 1, r1 - 1, c0 + 1, c1 - 1
+                return t[r0:r1 + 1, c0:c1 + 1] if r0 <= r1 and c0 <= c1 else None
+            if all((lambda o: o is not None and o.shape == b.shape and np.array_equal(o, b))(_safe(crop_to, a))
+                   for a, b in pairs):
+                found.append(Pattern('J', f'region bounded by markers of {color}{" (inside)" if inner else ""}',
+                                     2, crop_to))
+    return found
+
+
+def role_patterns(pairs, bg) -> List[Pattern]:
+    return panel_patterns(pairs, bg) + marker_patterns(pairs, bg) + legend_patterns(pairs, bg)
+
+
 # ------------------------------------------------------------- family G
 
 def _structural_steps(bg) -> List[Tuple[str, Callable, float]]:
@@ -818,7 +1199,8 @@ def combination_patterns(pairs, bg, deadline: float) -> List[Pattern]:
     import time
     found = []
     second = (object_action_patterns, select_crop_patterns, _lite_transforms, move_patterns,
-              resize_patterns, relation_patterns, count_patterns, build_patterns)
+              resize_patterns, relation_patterns, count_patterns, build_patterns,
+              role_patterns)
     for name1, step1, cost1 in _structural_steps(bg):
         if time.time() > deadline:
             break
@@ -845,7 +1227,7 @@ def combination_patterns(pairs, bg, deadline: float) -> List[Pattern]:
 
 FAMILIES = {'A': object_action_patterns, 'B': select_crop_patterns, 'C': transform_patterns,
             'D': move_patterns, 'E': resize_patterns, 'F': relation_patterns,
-            'H': count_patterns, 'I': build_patterns}
+            'H': count_patterns, 'I': build_patterns, 'J': role_patterns}
 COMBINATION_SECONDS = 60     # time budget for combinations, used only when no single pattern fits
 
 
