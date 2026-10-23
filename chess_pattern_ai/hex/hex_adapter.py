@@ -4,6 +4,7 @@
 from .hex_board import Color, HexBoard
 from .hex_game import HexGame
 from .hex_scorer import HexScorer
+from grid_vocabulary import Grid
 
 
 class HexAdapter:
@@ -114,6 +115,20 @@ class HexAdapter:
 
         board.is_connected_to_start = is_connected_to_start
         board.get_connection_strength = get_connection_strength
+
+    def to_grid(self, game) -> Grid:
+        """
+        The board as a grid_vocabulary Grid (topology 'hex', odd rows shifted
+        right, the same neighbours as HexBoard.get_neighbors); cell (r, c) is
+        board.board[r][c], row 0 = the board's row 0
+
+        Values: 0 = empty, 1 = Color.RED stone, 2 = Color.BLUE stone.
+        Red connects top (row 0) to bottom (row size-1); Blue connects left
+        (col 0) to right (col size-1). The game is not changed.
+        """
+        code = {Color.RED: 1, Color.BLUE: 2}
+        return Grid([[0 if stone is None else code[stone.color] for stone in row]
+                     for row in game.board.board], topology='hex')
 
     def advantage(self, game, color):
         """Connection strength difference (scorer's group size + distance-to-goal bonus)"""

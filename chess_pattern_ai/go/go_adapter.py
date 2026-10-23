@@ -4,6 +4,7 @@
 from .go_board import Color, GoBoard, Move, Stone
 from .go_game import GoGame
 from .go_scorer import GoScorer
+from grid_vocabulary import Grid
 
 
 class GoAdapter:
@@ -117,6 +118,19 @@ class GoAdapter:
                 if len(borders) == 1:
                     territory[borders.pop()] += size
         return territory
+
+    def to_grid(self, game) -> Grid:
+        """
+        The board as a grid_vocabulary Grid (topology 'square'; groups and
+        liberties use its 4-neighbour connectivity, as GoBoard.get_neighbors);
+        cell (r, c) is board.board[r][c], row 0 = the board's row 0
+
+        Values: 0 = empty point, 1 = Color.BLACK stone, 2 = Color.WHITE stone.
+        The game is not changed.
+        """
+        code = {Color.BLACK: 1, Color.WHITE: 2}
+        return Grid([[0 if stone is None else code[stone.color] for stone in row]
+                     for row in game.board.board], topology='square')
 
     def advantage(self, game, color):
         """

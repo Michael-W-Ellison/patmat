@@ -4,6 +4,7 @@
 from .breakthrough_board import BreakthroughBoard, Color, Piece
 from .breakthrough_game import BreakthroughGame
 from .breakthrough_scorer import BreakthroughScorer
+from grid_vocabulary import Grid
 
 
 class BreakthroughAdapter:
@@ -45,6 +46,20 @@ class BreakthroughAdapter:
             new_board.pieces.discard(piece)
             new_board.pieces.add(moving)
         return new_board
+
+    def to_grid(self, game) -> Grid:
+        """
+        The board as a grid_vocabulary Grid (8x8, topology 'square'); cell
+        (r, c) is board.board[r][c], row 0 = the board's row 0 (the top)
+
+        Values: 0 = empty, 1 = Color.WHITE piece, 2 = Color.BLACK piece.
+        White starts on rows 0-1 and moves toward row 7 (its goal side is
+        'bottom'); Black starts on rows 6-7 and moves toward row 0 (goal side
+        'top'). The game is not changed.
+        """
+        code = {Color.WHITE: 1, Color.BLACK: 2}
+        return Grid([[0 if piece is None else code[piece.color] for piece in row]
+                     for row in game.board.board], topology='square')
 
     def advantage(self, game, color):
         """Scorer's position score (material + advancement), color minus opponent"""
