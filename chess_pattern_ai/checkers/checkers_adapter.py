@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Checkers adapter for game-independent pattern learning (see general_move_patterns.py)"""
 
-from .checkers_board import Color
+from grid_vocabulary import Grid
+
+from .checkers_board import Color, PieceType
 from .checkers_game import CheckersGame
 from .checkers_scorer import CheckersScorer
 
@@ -34,6 +36,19 @@ class CheckersAdapter:
         opp = self.opponent(color)
         return (self.scorer.calculate_material(game.board, color)
                 - self.scorer.calculate_material(game.board, opp))
+
+    def to_grid(self, game):
+        """
+        8x8 square Grid in the board's own coordinates (row 0 is the top,
+        Black's starting side). Empty 0; red man 1, red king 2, black man 3,
+        black king 4.
+        """
+        cells = [[0] * 8 for _ in range(8)]
+        for piece in game.board.pieces:
+            r, c = piece.position
+            cells[r][c] = ((1 if piece.color == Color.RED else 3)
+                           + (piece.type == PieceType.KING))
+        return Grid(cells, 'square')
 
     def is_over(self, game):
         return game.is_game_over()

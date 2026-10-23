@@ -4,6 +4,7 @@
 import chess
 
 from game_scorer import GameScorer
+from grid_vocabulary import Grid
 
 _PIECE_TYPES = [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING]
 
@@ -51,6 +52,18 @@ class ChessAdapter:
             # Only the side to move can be in check
             total += self.CHECK_VALUE if board.turn != color else -self.CHECK_VALUE
         return total
+
+    def to_grid(self, board):
+        """
+        8x8 square Grid: row = rank index (row 0 is rank 1, White's back
+        rank), column = file (0 = a-file). Empty 0; white pawn, knight,
+        bishop, rook, queen, king 1..6; black pawn..king 7..12.
+        """
+        cells = [[0] * 8 for _ in range(8)]
+        for sq, piece in board.piece_map().items():
+            cells[chess.square_rank(sq)][chess.square_file(sq)] = (
+                piece.piece_type + (0 if piece.color == chess.WHITE else 6))
+        return Grid(cells, 'square')
 
     def is_over(self, board):
         return board.is_game_over()

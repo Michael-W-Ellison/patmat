@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Gomoku adapter for game-independent pattern learning (see general_move_patterns.py)"""
 
+from grid_vocabulary import Grid
+
 from .gomoku_board import Color, GomokuBoard
 from .gomoku_game import GomokuGame
 from .gomoku_scorer import GomokuScorer
@@ -35,6 +37,14 @@ class GomokuAdapter:
         """Weighted threat difference (scorer's open/blocked 2-3-4 line weights)"""
         return (self.scorer.count_threats(game.board, color)
                 - self.scorer.count_threats(game.board, self.opponent(color)))
+
+    def to_grid(self, game):
+        """
+        size x size square Grid in the board's own coordinates (row 0 is the
+        top). Empty 0; black 1, white 2.
+        """
+        return Grid([[0 if s is None else (1 if s.color == Color.BLACK else 2) for s in row]
+                     for row in game.board.board], 'square')
 
     def _over_and_winner(self, game):
         memo = getattr(game, '_general_over', False)

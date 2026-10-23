@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Connect Four adapter for game-independent pattern learning (see general_move_patterns.py)"""
 
+from grid_vocabulary import Grid
+
 from .connect4_board import Color, Move, Piece
 from .connect4_game import Connect4Game
 from .connect4_scorer import Connect4Scorer
@@ -27,6 +29,14 @@ class Connect4Adapter:
         """Threat difference (scorer's count of open lines of three)"""
         return (self.scorer.count_threats(game.board, color)
                 - self.scorer.count_threats(game.board, self.opponent(color)))
+
+    def to_grid(self, game):
+        """
+        6x7 square Grid in the board's own coordinates (row 0 is the top,
+        row 5 the bottom where pieces land first). Empty 0; red 1, yellow 2.
+        """
+        return Grid([[0 if p is None else (1 if p.color == Color.RED else 2) for p in row]
+                     for row in game.board.board], 'square')
 
     def is_over(self, game):
         return game.is_game_over()

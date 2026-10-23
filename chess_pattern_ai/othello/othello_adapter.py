@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Othello adapter for game-independent pattern learning (see general_move_patterns.py)"""
 
+from grid_vocabulary import Grid
+
 from .othello_board import Color
 from .othello_game import OthelloGame
 from .othello_scorer import OthelloScorer
@@ -25,6 +27,14 @@ class OthelloAdapter:
         """Disc difference (scorer's material = disc count)"""
         return (self.scorer.calculate_material(game.board, color)
                 - self.scorer.calculate_material(game.board, self.opponent(color)))
+
+    def to_grid(self, game):
+        """
+        8x8 square Grid in the board's own coordinates (row 0 is the top,
+        rank 8 in the board's notation). Empty 0; black 1, white 2.
+        """
+        return Grid([[0 if d is None else (1 if d.color == Color.BLACK else 2) for d in row]
+                     for row in game.board.board], 'square')
 
     def is_over(self, game):
         return game.is_game_over()
