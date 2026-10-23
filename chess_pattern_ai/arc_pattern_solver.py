@@ -718,28 +718,27 @@ def build_patterns(pairs, bg) -> List[Pattern]:
             return None
 
         if len(parts0) == 2:
-            colors = sorted({int(v) for b in outs for v in np.unique(b)} - {out_bg})
+            # the colour where the operation holds, and the colour elsewhere (any two output colours)
+            colors = sorted({int(v) for b in outs for v in np.unique(b)})
             for opname, op in _BOOL_OPS.items():
-                for color in colors[:3]:
-                    def fn(a, op=op, color=color, parts_of=parts_of):
+                for color, rest in itertools.permutations(colors[:4], 2):
+                    def fn(a, op=op, color=color, rest=rest, parts_of=parts_of):
                         ps = parts_of(a)
                         if ps is None or len(ps) != 2:
                             return None
-                        pbg = background(ps)
-                        m = op(ps[0] != pbg, ps[1] != pbg)
-                        return np.where(m, color, out_bg).astype(int)
+                        m = op(ps[0] != bg, ps[1] != bg)
+                        return np.where(m, color, rest).astype(int)
                     if all((lambda o: o is not None and o.shape == b.shape and np.array_equal(o, b))(_safe(fn, a))
                            for a, b in pairs):
-                        found.append(Pattern('I', f'{sname}: {opname} -> {color}', 3, fn))
+                        found.append(Pattern('I', f'{sname}: {opname} -> {color} else {rest}', 3, fn))
         for order in (itertools.permutations(range(len(parts0))) if len(parts0) <= 4 else ()):
             def overlay(a, order=order, parts_of=parts_of):
                 ps = parts_of(a)
                 if ps is None or len(ps) != len(order):
                     return None
-                pbg = background(ps)
-                out = np.full(ps[0].shape, pbg, dtype=int)
+                out = np.full(ps[0].shape, bg, dtype=int)
                 for i in reversed(order):
-                    out = np.where(ps[i] != pbg, ps[i], out)
+                    out = np.where(ps[i] != bg, ps[i], out)
                 return out
             if all((lambda o: o is not None and o.shape == b.shape and np.array_equal(o, b))(_safe(overlay, a))
                    for a, b in pairs):
