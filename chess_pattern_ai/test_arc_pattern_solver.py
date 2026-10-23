@@ -6,7 +6,7 @@ import unittest
 import numpy as np
 
 from arc_elements import segment
-from arc_pattern_solver import find_patterns, rank
+from arc_pattern_solver import find_patterns, multi_step_patterns, rank
 
 A = np.array
 
@@ -332,6 +332,68 @@ class TestRays(unittest.TestCase):
         t = task([make(4, 0, 5, 7), make(2, 0, 3, 6)], *make(3, 0, 4, 9))
         e = best(t)
         self.assertTrue(right(e, t))
+
+
+class TestParametersAndSteps(unittest.TestCase):
+    def test_move_up_by_height(self):                # family M
+        def make(objs, h, w):
+            g, o = np.zeros((h, w), dtype=int), np.zeros((h, w), dtype=int)
+            for color, c, height in objs:
+                g[h - height:h, c] = color
+                o[h - 2 * height:h - height, c] = color
+            return g.tolist(), o.tolist()
+        t = task([make([(1, 0, 2), (4, 2, 3)], 7, 4), make([(2, 1, 1), (3, 3, 2)], 5, 5)],
+                 *make([(5, 0, 3), (6, 2, 1), (7, 4, 2)], 8, 5))
+        e = best(t)
+        self.assertTrue(right(e, t))
+
+    def test_scale_by_number_of_colours(self):       # family M
+        def up(a, k):
+            return np.kron(np.array(a), np.ones((k, k), dtype=int)).tolist()
+        g1, g2, g3 = [[1, 0], [0, 2]], [[3, 3], [0, 0]], [[4, 5], [6, 0]]
+        t = task([(g1, up(g1, 2)), (g2, up(g2, 1))], g3, up(g3, 3))
+        e = best(t)
+        self.assertTrue(right(e, t))
+        self.assertEqual(e['family'], 'M')
+
+    def test_chain_tile_then_rays(self):             # family L, size step first
+        def make(g):
+            t = np.tile(np.array(g), (2, 2))
+            o = t.copy()
+            for c in range(t.shape[1]):
+                for r in range(t.shape[0]):
+                    if t[r, c] == 2:
+                        rr = r + 1
+                        while rr < t.shape[0] and t[rr, c] == 0:
+                            o[rr, c] = 8
+                            rr += 1
+            return g, o.tolist()
+        t = task([make([[2, 0, 0], [0, 0, 0], [0, 0, 2]]), make([[0, 2], [0, 0], [0, 0]])],
+                 *make([[0, 0, 0, 2], [2, 0, 0, 0], [0, 0, 0, 0]]))
+        e = best(t)
+        self.assertTrue(right(e, t))
+
+    def test_chain_from_subgoal(self):               # family L, part of the change first
+        import time
+        # outline objects in 3 (halo), then fill their holes with 4
+        def make(boxes, h, w):
+            g = np.zeros((h, w), dtype=int)
+            for r, c in boxes:
+                g[r:r + 3, c:c + 3] = 6
+                g[r + 1, c + 1] = 0
+            o = g.copy()
+            for r, c in boxes:
+                o[r + 1, c + 1] = 4
+                for rr in range(r - 1, r + 4):
+                    for cc in range(c - 1, c + 4):
+                        if 0 <= rr < h and 0 <= cc < w and o[rr, cc] == 0:
+                            o[rr, cc] = 3
+            return g, o
+        pairs = [make([(1, 1)], 6, 6), make([(1, 1), (1, 6)], 6, 11)]
+        chains = multi_step_patterns(pairs, 0, time.time() + 60)
+        self.assertTrue(chains)
+        test_in, test_out = make([(2, 2), (6, 1)], 10, 7)
+        self.assertTrue(any(np.array_equal(c.predict(test_in), test_out) for c in chains))
 
 
 if __name__ == '__main__':

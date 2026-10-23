@@ -51,6 +51,15 @@ Pattern families:
                      around it or reverses; diagonal rays may bounce off the
                      top / bottom, side or all edges; only rays that hit (or miss) an obstacle may be
                      drawn; crossings of different rays may take a colour
+  M parameters       amounts taken from the elements: objects move a distance
+                     equal to one of their properties (height, width, size,
+                     ...; +-1 or doubled) or to a count in the grid; the grid
+                     is scaled or tiled by a count
+  L multi-step       chains of up to three patterns: each step reaches part
+                     of the change (the changes to one colour, the additions,
+                     deletions or recolourings) or the output's size, and the
+                     next pattern is searched from its result; searched only
+                     when no single pattern fits
 
 Conditions: family A maps one property, or two at once, to an action (keep,
 delete, recolour, or adopt the colour of the one element an object
@@ -1294,6 +1303,181 @@ def ray_patterns(pairs, bg) -> List[Pattern]:
     return found
 
 
+# ------------------------------------------------------------- family M
+
+NUMERIC_PROPERTIES = ('height', 'width', 'size', 'holes', 'n_colors', 'color_count', 'shape_count')
+
+
+def _shift_objects(a: Array, objs: List[Obj], moving: List[bool], vectors, bg: int) -> Optional[Array]:
+    """Move the chosen objects by their own vectors (moved objects are drawn over still ones)"""
+    out = a.copy()
+    h, w = a.shape
+    for o, m in zip(objs, moving):
+        if m:
+            out[tuple(zip(*o.cells))] = bg
+    for o, m, (dr, dc) in zip(objs, moving, vectors):
+        if not m:
+            continue
+        for r, c in o.cells:
+            if not (0 <= r + dr < h and 0 <= c + dc < w):
+                return None
+            out[r + dr, c + dc] = a[r, c]
+    return out
+
+
+def param_patterns(pairs, bg) -> List[Pattern]:
+    """Patterns whose amount (distance, factor) is a property of the element or a count in the grid"""
+    found = []
+    quantities = _quantities(pairs, bg)
+    qvals = [{n: q(a) for n, q in quantities} for a, _ in pairs]
+    # 1. Objects move a distance taken from their own property, or from a count in the grid
+    if all(a.shape == b.shape for a, b in pairs) and not all(np.array_equal(a, b) for a, b in pairs):
+        distances = [(f'{prop}{off:+d}' if off else prop, 'prop', prop, 1, off)
+                     for prop in NUMERIC_PROPERTIES for off in (0, 1, -1)]
+        distances += [(f'2*{prop}', 'prop', prop, 2, 0) for prop in NUMERIC_PROPERTIES]
+        distances += [(name, 'count', name, 1, 0) for name, _ in quantities]
+        for mode in ('color4', 'color8', 'multi8'):
+            seg = [segment(a, bg, mode) for a, _ in pairs]
+            moved, still = set(), set()
+            for (a, b), objs in zip(pairs, seg):
+                for o in objs:
+                    (still if all(b[p] == a[p] for p in o.cells) else moved).add(o.props['color'])
+            movers = [('all objects', None)]
+            if moved and still and not moved & still:
+                movers.append((f'objects of {sorted(moved)}', frozenset(moved)))
+            for mname, colors in movers:
+                for dname, kind, key, mult, off in distances:
+                    for direction, (dr, dc) in DIRS.items():
+                        def predict(t, objs=None, qv=None, mode=mode, colors=colors, kind=kind, key=key,
+                                    mult=mult, off=off, dr=dr, dc=dc):
+                            objs = segment(t, bg, mode) if objs is None else objs
+                            if kind == 'count':
+                                qv = qv if qv is not None else {key: dict(quantities)[key](t)}
+                            moving = [colors is None or o.props['color'] in colors for o in objs]
+                            dist = [(o.props[key] if kind == 'prop' else qv[key]) * mult + off for o in objs]
+                            return _shift_objects(t, objs, moving, [(dr * k, dc * k) for k in dist], bg)
+                        if all((lambda o: o is not None and np.array_equal(o, b))(predict(a, objs, qv))
+                               for (a, b), objs, qv in zip(pairs, seg, qvals)):
+                            found.append(Pattern('M', f'{mname}[{mode}] move {direction} by {dname}', 4,
+                                                 lambda t, f=predict: f(t)))
+    # 2. Scale or tile by a count that differs between the examples
+    factors = []
+    for a, b in pairs:
+        if b.shape[0] % a.shape[0] or b.shape[1] % a.shape[1]:
+            return found
+        factors.append((b.shape[0] // a.shape[0], b.shape[1] // a.shape[1]))
+    if len(set(factors)) > 1 and all(k == m for k, m in factors):
+        for name, q in quantities:
+            if all(qv[name] == k for qv, (k, _) in zip(qvals, factors)):
+                for oname, op in (('upscale', lambda a, k: np.kron(a, np.ones((k, k), dtype=a.dtype))),
+                                  ('tile', lambda a, k: np.tile(a, (k, k)))):
+                    fn = lambda t, q=q, op=op: (lambda k: op(t, k) if 0 < k <= 30 else None)(q(t))
+                    if all((lambda o: o is not None and np.array_equal(o, b))(_safe(fn, a)) for a, b in pairs):
+                        found.append(Pattern('M', f'{oname} by {name}', 3, fn))
+    return found
+
+
+# ------------------------------------------------------------- family L
+
+MULTI_STEP_SECONDS = 20      # time budget for multi-step patterns, used only when no single pattern fits
+MAX_STEPS = 3
+
+
+def _fits(pred, pairs) -> bool:
+    return all((lambda o: o is not None and o.shape == b.shape and np.array_equal(o, b))(_safe(pred, a))
+               for a, b in pairs)
+
+
+def _subgoals(pairs, bg) -> List[Tuple[str, List[Tuple[Array, Array]]]]:
+    """Intermediate targets: each output with only part of its change applied"""
+    if any(a.shape != b.shape for a, b in pairs):
+        return []
+    colors = sorted({int(v) for a, b in pairs for v in np.unique(b[a != b])})
+    parts = [(f'changes to {c}', lambda a, b, c=c: (a != b) & (b == c)) for c in colors]
+    parts += [('additions', lambda a, b: (a != b) & (a == bg)),
+              ('deletions', lambda a, b: (a != b) & (b == bg)),
+              ('recolourings', lambda a, b: (a != b) & (a != bg) & (b != bg))]
+    out, seen = [], set()
+    for name, part in parts:
+        targets = [np.where(part(a, b), b, a) for a, b in pairs]
+        if all(np.array_equal(t, a) for t, (a, _) in zip(targets, pairs)) or \
+                all(np.array_equal(t, b) for t, (_, b) in zip(targets, pairs)):
+            continue
+        key = b''.join(t.tobytes() for t in targets)
+        if key not in seen:
+            seen.add(key)
+            out.append((name, [(a, t) for (a, _), t in zip(pairs, targets)]))
+    return out
+
+
+def _shape_steps(pairs) -> List[Tuple[str, Callable, float]]:
+    """First steps that give the input the output's size"""
+    ratios = {(b.shape[0] / a.shape[0], b.shape[1] / a.shape[1]) for a, b in pairs}
+    if len(ratios) != 1:
+        return []
+    kr, kc = ratios.pop()
+    steps = []
+    if kr >= 1 and kc >= 1 and kr == int(kr) and kc == int(kc) and (kr, kc) != (1, 1):
+        k, m = int(kr), int(kc)
+        steps.append((f'upscale {k}x{m}', lambda a, k=k, m=m: np.kron(a, np.ones((k, m), dtype=a.dtype)), 1))
+        steps.append((f'tile {k}x{m}', lambda a, k=k, m=m: np.tile(a, (k, m)), 1))
+    elif kr <= 1 and kc <= 1 and (kr, kc) != (1, 1) and (1 / kr) == int(1 / kr) and (1 / kc) == int(1 / kc):
+        k, m = int(1 / kr), int(1 / kc)
+        steps.append((f'downscale {k}x{m}',
+                      lambda a, k=k, m=m: a[::k, ::m] if a.shape[0] % k == 0 and a.shape[1] % m == 0 else None, 1))
+    return steps
+
+
+def _step_families():
+    """Patterns that can be one step of a chain (every single family)"""
+    return list(FAMILIES.values())
+
+
+def multi_step_patterns(pairs, bg, deadline: float, depth: int = MAX_STEPS) -> List[Pattern]:
+    """
+    Chains of patterns: a first step that reaches part of the change (or
+    the output's size), then a final pattern, or another chain, from there
+    """
+    import time
+    found = []
+    if depth < 2:
+        return found
+    starts = list(_shape_steps(pairs))
+    for gname, sub in _subgoals(pairs, bg):
+        for family in _step_families():
+            if time.time() > deadline:
+                break
+            starts += [(f'[{gname}] {p.family}:{p.name}', p.predict, p.complexity)
+                       for p in family(sub, bg) if _fits(p.predict, sub)]
+    # The next step is searched once per distinct intermediate result; every start that
+    # reaches it is kept (starts that agree on the examples may differ on the test)
+    distinct: Dict[bytes, Tuple[List[Array], List]] = {}
+    for name, fn, cost in starts:
+        mids = [_safe(fn, a) for a, _ in pairs]
+        if any(m is None for m in mids):
+            continue
+        key = b''.join(m.tobytes() + bytes(str(m.shape), 'ascii') for m in mids)
+        distinct.setdefault(key, (mids, []))[1].append((name, fn, cost))
+    for mids, group in sorted(distinct.values(), key=lambda x: min(c for _, _, c in x[1])):
+        if time.time() > deadline:
+            break
+        rest = [(m, b) for m, (_, b) in zip(mids, pairs)]
+        finals = []
+        for family in _step_families():
+            if time.time() > deadline:
+                break
+            finals += [p for p in family(rest, bg) if _fits(p.predict, rest)]
+        if not finals:
+            finals = multi_step_patterns(rest, bg, deadline, depth - 1)
+        for name, fn, cost in group:
+            for p2 in finals:
+                def predict(t, f1=fn, f2=p2.predict):
+                    m = _safe(f1, t)
+                    return None if m is None else f2(m)
+                found.append(Pattern('L', f'{name} then {p2.family}:{p2.name}', cost + p2.complexity + 1, predict))
+    return found
+
+
 # ------------------------------------------------------------- family G
 
 def _structural_steps(bg) -> List[Tuple[str, Callable, float]]:
@@ -1356,7 +1540,8 @@ def combination_patterns(pairs, bg, deadline: float) -> List[Pattern]:
 
 FAMILIES = {'A': object_action_patterns, 'B': select_crop_patterns, 'C': transform_patterns,
             'D': move_patterns, 'E': resize_patterns, 'F': relation_patterns,
-            'H': count_patterns, 'I': build_patterns, 'J': role_patterns, 'K': ray_patterns}
+            'H': count_patterns, 'I': build_patterns, 'J': role_patterns, 'K': ray_patterns,
+            'M': param_patterns}
 COMBINATION_SECONDS = 60     # time budget for combinations, used only when no single pattern fits
 
 
@@ -1365,8 +1550,9 @@ def find_patterns(task: Dict, families: Sequence[str] = tuple(FAMILIES),
     """
     Patterns consistent with every training pair, with their test predictions.
 
-    Combinations (family G) are searched only when no single pattern fits,
-    within COMBINATION_SECONDS.
+    Multi-step patterns (family L, within MULTI_STEP_SECONDS) and then
+    combinations (family G, within COMBINATION_SECONDS) are searched only
+    when no single pattern fits.
     """
     import time
     pairs = [(np.array(p['input']), np.array(p['output'])) for p in task['train']]
@@ -1390,6 +1576,8 @@ def find_patterns(task: Dict, families: Sequence[str] = tuple(FAMILIES),
 
     for fam in families:
         collect(FAMILIES[fam](pairs, bg))
+    if combinations and not consistent:
+        collect(multi_step_patterns(pairs, bg, time.time() + MULTI_STEP_SECONDS))
     if combinations and not consistent:
         collect(combination_patterns(pairs, bg, time.time() + COMBINATION_SECONDS))
     return consistent, proposed
