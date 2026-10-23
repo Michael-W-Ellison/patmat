@@ -229,15 +229,19 @@ class GeneralPatternLearner:
         k    = min(imported games, CROSS_GAME_GAMES)
 
     With no imported evidence this is the plain win lift (see win_lift.py).
+    A game created with import_cross_game=False uses only its own evidence
+    (its evidence is still recorded and available to the other games).
     """
 
     TABLE = 'general_pattern_evidence'
     LEGACY_TABLE = 'general_move_patterns'   # summed over games; imported as game ''
     CROSS_GAME_GAMES = 10.0
 
-    def __init__(self, db_path: str = DB_NAME, game_name: str = ''):
+    def __init__(self, db_path: str = DB_NAME, game_name: str = '',
+                 import_cross_game: bool = True):
         self.db_path = db_path
         self.game_name = game_name
+        self.import_cross_game = import_cross_game
         # Several trainers may share this database; wait for locks instead of failing
         self.conn = sqlite3.connect(db_path, timeout=60)
         self.cursor = self.conn.cursor()
@@ -284,7 +288,12 @@ class GeneralPatternLearner:
         imported: Dict[str, List[float]] = {}
         for features, game, games, lift_sum in self.cursor.execute(
                 f"SELECT features, game, decayed_games, lift_sum FROM {self.TABLE}"):
-            target = own if game == self.game_name else imported
+            if game == self.game_name:
+                target = own
+            elif self.import_cross_game:
+                target = imported
+            else:
+                continue
             totals = target.setdefault(features, [0.0, 0.0])
             totals[0] += games
             totals[1] += lift_sum

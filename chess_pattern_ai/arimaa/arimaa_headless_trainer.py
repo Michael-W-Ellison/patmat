@@ -45,7 +45,11 @@ class ArimaaHeadlessTrainer:
         self.prioritizer = LearnableMovePrioritizer(db_path)
         self.scorer = ArimaaScorer()
         # Game-independent patterns, shared with the other games' trainers
-        self.general = GeneralPatternLearner(universal_db_path(db_path), 'arimaa')
+        # Arimaa uses only its own general-pattern evidence: its moves are single
+        # steps, mostly keeping the turn, and evidence imported from the other
+        # games lowered its win rate by 29 points (12 seeds x 200 games)
+        self.general = GeneralPatternLearner(universal_db_path(db_path), 'arimaa',
+                                             import_cross_game=False)
         self.adapter = ArimaaAdapter()
         self.last_general_features = None
 
