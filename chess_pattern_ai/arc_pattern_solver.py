@@ -55,6 +55,14 @@ Pattern families:
                      equal to one of their properties (height, width, size,
                      ...; +-1 or doubled) or to a count in the grid; the grid
                      is scaled or tiled by a count
+  N symmetry         a symmetry (mirror, rotation, diagonal or all eight)
+                     completed about a centre found in the grid: the grid's
+                     or foreground's centre, the cells of one colour, a chosen
+                     object, or the best-fitting centre; cells under a mask
+                     colour repaired from their images (whole grid or patch)
+  O relative         the same pattern of cells placed around every object (in
+                     cells, or in units of its size); objects lining up with
+                     the nearest other object on its row, column or centre
   L multi-step       chains of up to three patterns: each step reaches part
                      of the change (the changes to one colour, the additions,
                      deletions or recolourings) or the output's size, and the
@@ -67,6 +75,7 @@ touches); family B selects by one property, or filters by one property's
 value and then selects by another.
 """
 
+import functools
 import itertools
 from collections import Counter
 from dataclasses import dataclass
@@ -1303,6 +1312,232 @@ def ray_patterns(pairs, bg) -> List[Pattern]:
     return found
 
 
+# ------------------------------------------------------------- family N
+
+# Symmetry maps about a centre given in doubled coordinates (so it may fall between cells):
+# each takes doubled positions (R, C) and the centre (cy, cx) and gives the image's doubled position
+_SYM_MAPS = {
+    'lr': lambda R, C, cy, cx: (R, 2 * cx - C),
+    'ud': lambda R, C, cy, cx: (2 * cy - R, C),
+    'rot180': lambda R, C, cy, cx: (2 * cy - R, 2 * cx - C),
+    'rot90': lambda R, C, cy, cx: (cy + (C - cx), cx - (R - cy)),
+    'rot270': lambda R, C, cy, cx: (cy - (C - cx), cx + (R - cy)),
+    'transpose': lambda R, C, cy, cx: (cy + (C - cx), cx + (R - cy)),
+    'anti_transpose': lambda R, C, cy, cx: (cy - (C - cx), cx - (R - cy)),
+}
+SYMMETRY_GROUPS = {
+    'lr': ('lr',), 'ud': ('ud',), 'rot180': ('rot180',), 'both mirrors': ('lr', 'ud', 'rot180'),
+    'diagonal': ('transpose',), 'rot90': ('rot90', 'rot180', 'rot270'), 'all 8': tuple(_SYM_MAPS),
+}
+
+
+@functools.lru_cache(maxsize=8192)
+def _image_index(shape, op: str, centre: Tuple[int, int]):
+    """For every cell, the cell its image falls on (and whether it lies in the grid)"""
+    h, w = shape
+    R, C = np.mgrid[0:h, 0:w] * 2
+    R2, C2 = _SYM_MAPS[op](R, C, *centre)
+    valid = (R2 % 2 == 0) & (C2 % 2 == 0) & (R2 >= 0) & (C2 >= 0) & (R2 < 2 * h) & (C2 < 2 * w)
+    return valid, np.where(valid, R2 // 2, 0), np.where(valid, C2 // 2, 0)
+
+
+def symmetric_fill(a: Array, known: Array, ops: Sequence[str], centre) -> Tuple[Array, Array]:
+    """Unknown cells take the value of a known image cell; returns the grid and the cells still unknown"""
+    out, filled = a.copy(), known.copy()
+    for op in ops:
+        valid, rr, cc = _image_index(a.shape, op, tuple(centre))
+        take = ~filled & valid & known[rr, cc]
+        out[take] = a[rr[take], cc[take]]
+        filled |= take
+    return out, ~filled
+
+
+def _agreement(a: Array, known: Array, ops: Sequence[str], centre) -> Tuple[int, int]:
+    """(matching, conflicting) known cell pairs under the symmetry"""
+    match = conflict = 0
+    for op in ops:
+        valid, rr, cc = _image_index(a.shape, op, tuple(centre))
+        both = valid & known & known[rr, cc]
+        same = a[both] == a[rr[both], cc[both]]
+        match += int(same.sum())
+        conflict += int((~same).sum())
+    return match, conflict
+
+
+def find_centre(a: Array, known: Array, ops: Sequence[str], near, radius: int = 6):
+    """The centre near `near` where most known cells agree with their images and none conflict"""
+    best, best_match = None, 0
+    # a left-right mirror does not depend on the centre's row, a top-bottom mirror not on its column
+    rows = [near[0]] if set(ops) == {'lr'} else range(near[0] - radius, near[0] + radius + 1)
+    cols = [near[1]] if set(ops) == {'ud'} else range(near[1] - radius, near[1] + radius + 1)
+    for cy in rows:
+        for cx in cols:
+            match, conflict = _agreement(a, known, ops, (cy, cx))
+            if conflict == 0 and match > best_match:
+                best, best_match = (cy, cx), match
+    return best
+
+
+def _bbox_centre(mask: Array):
+    rr, cc = np.nonzero(mask)
+    return None if rr.size == 0 else (int(rr.min() + rr.max()), int(cc.min() + cc.max()))
+
+
+def _centre_finders(pairs, bg):
+    """Ways to find a symmetry centre in a grid (doubled coordinates)"""
+    finders = [('grid centre', lambda a, ops: (a.shape[0] - 1, a.shape[1] - 1)),
+               ('foreground centre', lambda a, ops: _bbox_centre(a != bg))]
+    for c in sorted(set.intersection(*[set(np.unique(a).tolist()) for a, _ in pairs]) - {bg}):
+        finders.append((f'centre of colour {c}', lambda a, ops, c=c: _bbox_centre(a == c)))
+    for prop, how in (('size', 'max'), ('size', 'min'), ('unique_color', ('eq', True))):
+        def obj_centre(a, ops, prop=prop, how=how):
+            sel = _select(segment(a, bg, 'multi8'), prop, how)
+            return None if sel is None else (sel.bbox[0] + sel.bbox[2], sel.bbox[1] + sel.bbox[3])
+        finders.append((f'centre of the {prop} {_how(how)} object', obj_centre))
+    finders.append(('best-fitting centre',
+                    lambda a, ops: (lambda near: None if near is None else find_centre(a, a != bg, ops, near))(
+                        _bbox_centre(a != bg))))
+    return finders
+
+
+def symmetry_patterns(pairs, bg) -> List[Pattern]:
+    found = []
+    same = all(a.shape == b.shape for a, b in pairs)
+    # 1. Complete a symmetry about a centre found in the grid
+    if same and all(np.all(a[a != b] == bg) for a, b in pairs) and not all(np.array_equal(a, b) for a, b in pairs):
+        for fname, finder in _centre_finders(pairs, bg):
+            for gname, ops in SYMMETRY_GROUPS.items():
+                def predict(t, finder=finder, ops=ops):
+                    centre = finder(t, ops)
+                    return None if centre is None else symmetric_fill(t, t != bg, ops, centre)[0]
+                if _fits(predict, pairs):
+                    found.append(Pattern('N', f'complete {gname} symmetry about the {fname}',
+                                         3 + (fname != 'grid centre'), predict))
+    # 2. Repair the cells under a mask colour from their mirror images
+    masks = sorted(set.intersection(*[set(np.unique(a).tolist()) for a, _ in pairs]))
+    for m in masks:
+        if same and not all(np.all(b[a == m] != m) and np.array_equal(a[a != m], b[a != m]) for a, b in pairs):
+            continue
+        if not same and not all(np.any(a == m) and (lambda rr, cc: (rr.max() - rr.min() + 1, cc.max() - cc.min() + 1))(
+                *np.nonzero(a == m)) == b.shape for a, b in pairs):
+            continue
+        for gname, ops in SYMMETRY_GROUPS.items():
+            def repaired(t, m=m, ops=ops):
+                known = t != m
+                if known.all():
+                    return None
+                centre = find_centre(t, known, ops, (t.shape[0] - 1, t.shape[1] - 1))
+                if centre is None:
+                    return None
+                out, unknown = symmetric_fill(t, known, ops, centre)
+                return None if unknown.any() else out
+
+            def patch(t, m=m, repaired=repaired):
+                out = repaired(t)
+                if out is None:
+                    return None
+                rr, cc = np.nonzero(t == m)
+                return out[rr.min():rr.max() + 1, cc.min():cc.max() + 1]
+            fn = repaired if same else patch
+            if _fits(fn, pairs):
+                found.append(Pattern('N', f'repair cells of {m} by {gname} symmetry'
+                                     f'{"" if same else ", output the repaired patch"}', 3, fn))
+    return found
+
+
+# ------------------------------------------------------------- family O
+
+def _assign_to_anchors(a: Array, b: Array, anchors: List[Obj]) -> Optional[List[List[Tuple[int, int, int]]]]:
+    """Every added cell, given to its nearest anchor"""
+    out = [[] for _ in anchors]
+    if not anchors:
+        return None
+    for r, c in zip(*np.nonzero(a != b)):
+        d = [min(max(abs(r - y), abs(c - x)) for y, x in o.cells) for o in anchors]
+        out[int(np.argmin(d))].append((int(r), int(c), int(b[r, c])))
+    return out
+
+
+def _template_paint(t: Array, objs: List[Obj], key, templates, scaled: bool, bg: int) -> Array:
+    out = t.copy()
+    h, w = t.shape
+    for o in objs:
+        r0, c0, r1, c1 = o.bbox
+        uh, uw = (r1 - r0 + 1, c1 - c0 + 1) if scaled else (1, 1)
+        for dr, dc, v in templates.get(key(o.props), ()):
+            for y in range(r0 + dr * uh, r0 + dr * uh + uh):
+                for x in range(c0 + dc * uw, c0 + dc * uw + uw):
+                    if 0 <= y < h and 0 <= x < w and out[y, x] == bg:
+                        out[y, x] = v
+    return out
+
+
+def relative_patterns(pairs, bg) -> List[Pattern]:
+    found = []
+    if any(a.shape != b.shape for a, b in pairs) or all(np.array_equal(a, b) for a, b in pairs):
+        return found
+    additive = all(np.all(a[a != b] == bg) for a, b in pairs)
+    for mode in ('color4', 'color8', 'multi8'):
+        seg = [segment(a, bg, mode) for a, _ in pairs]
+        if any(not objs for objs in seg):
+            continue
+        # 1. The same pattern of added cells around every anchor (in cells, or in units of the anchor's size)
+        if additive:
+            for kname, key in (('every object', lambda pr: 0), ('colour', lambda pr: pr['color']),
+                               ('shape', lambda pr: pr['shape_canon'])):
+                for scaled in (False, True):
+                    templates: Dict[object, set] = {}
+                    ok = True
+                    for (a, b), objs in zip(pairs, seg):
+                        given = _assign_to_anchors(a, b, objs)
+                        for o, cells in zip(objs, given):
+                            r0, c0, r1, c1 = o.bbox
+                            uh, uw = (r1 - r0 + 1, c1 - c0 + 1) if scaled else (1, 1)
+                            rel = {((r - r0) // uh, (c - c0) // uw, v) for r, c, v in cells}
+                            templates.setdefault(key(o.props), set()).update(rel)
+                    if not any(templates.values()):
+                        continue
+                    size = sum(len(v) for v in templates.values())
+
+                    def predict(t, key=key, templates=templates, scaled=scaled, mode=mode):
+                        return _template_paint(t, segment(t, bg, mode), key, templates, scaled, bg)
+                    if _fits(predict, pairs):
+                        found.append(Pattern('O', f'cells placed around each object[{mode}] by {kname}'
+                                             f'{" in units of its size" if scaled else ""}: {size} offsets',
+                                             3 + min(size, 20) / 4 + (kname != 'every object'), predict))
+        # 2. Objects of the moving colours line up with the nearest other object
+        moved, still = set(), set()
+        for (a, b), objs in zip(pairs, seg):
+            for o in objs:
+                (still if all(b[p] == a[p] for p in o.cells) else moved).add(o.props['color'])
+        if not moved or not still or moved & still:
+            continue
+        for axis in ('row', 'column', 'both'):
+            def predict(t, mode=mode, moved=frozenset(moved), axis=axis):
+                objs = segment(t, bg, mode)
+                refs = [o for o in objs if o.props['color'] not in moved]
+                moving = [o.props['color'] in moved for o in objs]
+                vectors = []
+                for o, m in zip(objs, moving):
+                    if not m:
+                        vectors.append((0, 0))
+                        continue
+                    if not refs:
+                        return None
+                    ref = min(refs, key=lambda x: _gap(o, x))
+                    dy = (ref.bbox[0] + ref.bbox[2]) - (o.bbox[0] + o.bbox[2])
+                    dx = (ref.bbox[1] + ref.bbox[3]) - (o.bbox[1] + o.bbox[3])
+                    dy, dx = (dy if axis != 'column' else 0), (dx if axis != 'row' else 0)
+                    if dy % 2 or dx % 2:
+                        return None
+                    vectors.append((dy // 2, dx // 2))
+                return _shift_objects(t, objs, moving, vectors, bg)
+            if _fits(predict, pairs):
+                found.append(Pattern('O', f'objects[{mode}] of {sorted(moved)} line up with the nearest '
+                                     f'other object ({axis})', 4, predict))
+    return found
+
+
 # ------------------------------------------------------------- family M
 
 NUMERIC_PROPERTIES = ('height', 'width', 'size', 'holes', 'n_colors', 'color_count', 'shape_count')
@@ -1541,7 +1776,7 @@ def combination_patterns(pairs, bg, deadline: float) -> List[Pattern]:
 FAMILIES = {'A': object_action_patterns, 'B': select_crop_patterns, 'C': transform_patterns,
             'D': move_patterns, 'E': resize_patterns, 'F': relation_patterns,
             'H': count_patterns, 'I': build_patterns, 'J': role_patterns, 'K': ray_patterns,
-            'M': param_patterns}
+            'M': param_patterns, 'N': symmetry_patterns, 'O': relative_patterns}
 COMBINATION_SECONDS = 60     # time budget for combinations, used only when no single pattern fits
 
 

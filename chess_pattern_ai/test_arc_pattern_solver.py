@@ -396,5 +396,70 @@ class TestParametersAndSteps(unittest.TestCase):
         self.assertTrue(any(np.array_equal(c.predict(test_in), test_out) for c in chains))
 
 
+class TestSymmetryAndRelativePositions(unittest.TestCase):
+    def test_complete_symmetry_about_object_centre(self):   # family N
+        # a shape mirrored left-right about a vertical marker line of 5
+        def make(left, col, h, w):
+            g = np.zeros((h, w), dtype=int)
+            g[:, col] = 5
+            for r, c, v in left:
+                g[r, c] = v
+            o = g.copy()
+            for r, c, v in left:
+                o[r, 2 * col - c] = v
+            return g.tolist(), o.tolist()
+        p1 = make([(0, 1, 2), (1, 2, 3)], 3, 3, 7)
+        p2 = make([(1, 4, 4), (2, 3, 4), (0, 3, 1)], 5, 4, 9)
+        test = make([(0, 0, 6), (2, 1, 7)], 2, 3, 8)
+        t = task([p1, p2], *test)
+        e = best(t)
+        self.assertTrue(right(e, t))
+
+    def test_repair_under_mask(self):                # family N
+        def sym(seed):
+            rng = np.random.RandomState(seed)
+            q = rng.randint(1, 5, (4, 4))
+            top = np.hstack([q, np.fliplr(q)])
+            return np.vstack([top, np.flipud(top)])
+        def masked(g, r, c, h, w):
+            m = g.copy()
+            m[r:r + h, c:c + w] = 9
+            return m
+        g1, g2, g3 = sym(1), sym(2), sym(3)
+        t = task([(masked(g1, 1, 1, 2, 3).tolist(), g1.tolist()), (masked(g2, 4, 5, 3, 2).tolist(), g2.tolist())],
+                 masked(g3, 5, 0, 2, 2).tolist(), g3.tolist())
+        self.assertTrue(right(best(t), t))
+        # the same, answering with the repaired patch only
+        t = task([(masked(g1, 1, 1, 2, 3).tolist(), g1[1:3, 1:4].tolist()),
+                  (masked(g2, 4, 5, 3, 2).tolist(), g2[4:7, 5:7].tolist())],
+                 masked(g3, 5, 0, 2, 2).tolist(), g3[5:7, 0:2].tolist())
+        self.assertTrue(right(best(t), t))
+
+    def test_template_scaled_by_object_size(self):   # family O
+        # each square gets a copy of itself in 4 at its right, one square-width away
+        def make(squares, h, w):
+            g = np.zeros((h, w), dtype=int)
+            for r, c, k in squares:
+                g[r:r + k, c:c + k] = 1
+            o = g.copy()
+            for r, c, k in squares:
+                o[r:r + k, c + 2 * k:c + 3 * k] = 4
+            return g.tolist(), o.tolist()
+        t = task([make([(0, 0, 1), (3, 0, 2)], 6, 7), make([(1, 1, 3)], 5, 10)], *make([(0, 0, 2), (4, 1, 1)], 6, 8))
+        e = best(t)
+        self.assertTrue(right(e, t))
+
+    def test_line_up_with_nearest(self):             # family O
+        # the 3-cell moves along its column to the row of the 5-bar's centre
+        g1 = [[0, 3, 0, 0], [0, 0, 0, 0], [0, 0, 0, 5], [0, 0, 0, 5], [0, 0, 0, 5]]
+        o1 = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 5], [0, 3, 0, 5], [0, 0, 0, 5]]
+        g2 = [[5, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 3, 0]]
+        o2 = [[5, 0, 3, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]]
+        test = [[0, 0, 0, 3], [5, 0, 0, 0], [5, 0, 0, 0], [5, 0, 0, 0], [5, 0, 0, 0], [5, 0, 0, 0]]
+        out = [[0, 0, 0, 0], [5, 0, 0, 0], [5, 0, 0, 0], [5, 0, 0, 3], [5, 0, 0, 0], [5, 0, 0, 0]]
+        t = task([(g1, o1), (g2, o2)], test, out)
+        self.assertTrue(right(best(t), t))
+
+
 if __name__ == '__main__':
     unittest.main()
