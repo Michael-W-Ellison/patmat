@@ -61,7 +61,8 @@ Pattern families:
                      object, or the best-fitting centre; cells under a mask
                      colour repaired from their images (whole grid or patch)
   O relative         the same pattern of cells placed around every object (in
-                     cells, or in units of its size); objects lining up with
+                     cells, or in units of its size; shown in full by at least
+                     two objects in the examples); objects lining up with
                      the nearest other object on its row, column or centre
   L multi-step       chains of up to three patterns: each step reaches part
                      of the change (the changes to one colour, the additions,
@@ -1487,15 +1488,19 @@ def relative_patterns(pairs, bg) -> List[Pattern]:
                                ('shape', lambda pr: pr['shape_canon'])):
                 for scaled in (False, True):
                     templates: Dict[object, set] = {}
-                    ok = True
+                    seen: Dict[object, List[frozenset]] = {}
                     for (a, b), objs in zip(pairs, seg):
                         given = _assign_to_anchors(a, b, objs)
                         for o, cells in zip(objs, given):
                             r0, c0, r1, c1 = o.bbox
                             uh, uw = (r1 - r0 + 1, c1 - c0 + 1) if scaled else (1, 1)
-                            rel = {((r - r0) // uh, (c - c0) // uw, v) for r, c, v in cells}
+                            rel = frozenset(((r - r0) // uh, (c - c0) // uw, v) for r, c, v in cells)
                             templates.setdefault(key(o.props), set()).update(rel)
-                    if not any(templates.values()):
+                            seen.setdefault(key(o.props), []).append(rel)
+                    # A template generalises only if at least two anchors show all of it
+                    # (one anchor per key would just record that anchor's answer)
+                    if not any(templates.values()) or any(
+                            tpl and sum(rel == tpl for rel in seen[k]) < 2 for k, tpl in templates.items()):
                         continue
                     size = sum(len(v) for v in templates.values())
 
