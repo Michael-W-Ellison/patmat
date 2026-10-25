@@ -68,8 +68,9 @@ Pattern families:
                      of the change (the changes to one colour, the additions,
                      deletions or recolourings; or whatever a partial pattern
                      reaches without a wrong cell) or the output's size, and
-                     the next pattern is searched from what is left; searched
-                     only when no single pattern fits
+                     the next pattern is searched from what is left; or a
+                     beam search keeping the chains that leave the fewest
+                     wrong cells; searched only when no single pattern fits
   X exceptions       a pattern that is right except near some objects (a
                      transform, rays, a symmetry, or family A / J / O formed
                      by majority, with the exceptions left as they are), made
@@ -1722,26 +1723,50 @@ def _near_miss(stats) -> bool:
     return needed > 0 and 0 < wrong < needed and 2 * right >= needed
 
 
-def partial_pool(pairs, bg, deadline: float = float('inf')) -> List[Tuple[Pattern, Tuple[int, int, int]]]:
+def _mismatches(fn, pairs) -> Optional[int]:
+    """Cells that differ from the outputs after the pattern (None if it fails on an example)"""
+    n = 0
+    for a, b in pairs:
+        out = _safe(fn, a)
+        if out is None or out.shape != b.shape:
+            return None
+        n += int((out != b).sum())
+    return n
+
+
+def partial_pool(pairs, bg, deadline: float = float('inf'),
+                 improving: bool = False) -> List[Tuple[Pattern, Tuple[int, int, int]]]:
     """
-    Patterns produced without an exact fit that are useful partial matches:
-    sound steps (right where they change, wrong nowhere) and near misses
+    Patterns produced without requiring an exact fit, with their (needed,
+    right, wrong) counts. By default the useful partial matches: exact fits
+    (forms the stricter families reject), sound steps (right where they
+    change, wrong nowhere) and near misses. With `improving`, every pattern
+    that leaves fewer cells differing from the outputs than the input does.
     """
     if any(a.shape != b.shape for a, b in pairs):
         return []
-    a0, b0 = pairs[0]
     stats = {}
+    before = sum(int((a != b).sum()) for a, b in pairs)
 
     import time
 
     def accept(fn):
         if time.time() > deadline:
             return False
+        if improving:
+            first = _mismatches(fn, pairs[:1])
+            if first is None or first > int((pairs[0][0] != pairs[0][1]).sum()):
+                return False        # judged on the first example before the others
+            m = _mismatches(fn, pairs)
+            if m is None or m >= before:
+                return False
+            stats[id(fn)] = _progress(fn, pairs)
+            return True
         first = _progress(fn, pairs[:1])
         if first is None or first[1] == 0 or not (first[2] == 0 or _near_miss(first)):
             return False            # judged on the first example before the others
         st = _progress(fn, pairs)
-        if st is None or st[1] == 0 or st[1] == st[0] and st[2] == 0:
+        if st is None or st[1] == 0:
             return False
         stats[id(fn)] = st
         return st[2] == 0 or _near_miss(st)
@@ -1974,7 +1999,8 @@ def multi_step_patterns(pairs, bg, deadline: float, depth: int = MAX_STEPS, pool
     starts = list(_shape_steps(pairs))
     # steps that reach part of the change without getting any cell wrong
     pool = partial_pool(pairs, bg, min(deadline, time.time() + POOL_SECONDS)) if pool is None else pool
-    sound = sorted(((p, st) for p, st in pool if st[2] == 0), key=lambda x: (-x[1][1], x[0].complexity))
+    sound = sorted(((p, st) for p, st in pool if st[2] == 0 and st[1] < st[0]),
+                   key=lambda x: (-x[1][1], x[0].complexity))
     starts += [(f'[partial] {p.family}:{p.name}', p.predict, p.complexity + 1)
                for p, _ in sound[:MAX_PARTIAL_STARTS]]
     for gname, sub in _subgoals(pairs, bg):
@@ -2013,6 +2039,65 @@ def multi_step_patterns(pairs, bg, deadline: float, depth: int = MAX_STEPS, pool
                     return None if m is None else f2(m)
                 found.append(Pattern('L', f'{name} then {p2.family}:{p2.name}', cost + p2.complexity + 1, predict))
     return sorted(found, key=lambda p: p.complexity)[:MAX_CHAINS]
+
+
+# ------------------------------------------------------------- beam chains
+
+BEAM_WIDTH = 4               # chains kept at each depth, those leaving the fewest wrong cells
+BEAM_SECONDS = 10            # time budget, used only when nothing else fits
+BEAM_NODE_SECONDS = 2.5      # time for collecting the next steps of one chain
+
+
+def beam_chain_patterns(pairs, bg, deadline: float) -> List[Pattern]:
+    """
+    Chains of up to MAX_STEPS partial patterns built by a beam search: from
+    each kept chain every pattern that leaves fewer cells differing from the
+    outputs is tried, and the BEAM_WIDTH chains with the fewest wrong cells
+    go on; chains that reach every output exactly are returned
+    """
+    import time
+    found = []
+    nodes = []          # (cells differing, cost, names, functions, current inputs)
+    if all(a.shape == b.shape for a, b in pairs):
+        nodes.append((sum(int((a != b).sum()) for a, b in pairs), 0, [], [], [a for a, _ in pairs]))
+    for name, fn, cost in _shape_steps(pairs):
+        mids = [_safe(fn, a) for a, _ in pairs]
+        if all(m is not None for m in mids):
+            nodes.append((sum(int((m != b).sum()) for m, (_, b) in zip(mids, pairs)), cost, [name], [fn], mids))
+    for _ in range(MAX_STEPS):
+        nxt = []
+        for wrong, cost, names, fns, mids in nodes:
+            if time.time() > deadline:
+                break
+            if wrong == 0:
+                continue
+            node_pairs = [(m, b) for m, (_, b) in zip(mids, pairs)]
+            pool = partial_pool(node_pairs, bg, min(deadline, time.time() + BEAM_NODE_SECONDS), improving=True)
+            for p, _ in pool:
+                outs = [_safe(p.predict, m) for m in mids]
+                if any(o is None for o in outs):
+                    continue
+                w = sum(int((o != b).sum()) for o, (_, b) in zip(outs, pairs))
+                nxt.append((w, cost + p.complexity + 1, names + [f'{p.family}:{p.name}'], fns + [p.predict], outs))
+        if not nxt:
+            break
+        # one chain per distinct result, the cheapest
+        distinct = {}
+        for node in nxt:
+            key = b''.join(o.tobytes() for o in node[4])
+            if key not in distinct or node[1] < distinct[key][1]:
+                distinct[key] = node
+        nodes = sorted(distinct.values(), key=lambda x: (x[0], x[1]))[:BEAM_WIDTH]
+        for wrong, cost, names, fns, _ in nodes:
+            if wrong == 0:
+                def predict(t, fns=tuple(fns)):
+                    for fn in fns:
+                        t = _safe(fn, t)
+                        if t is None:
+                            return None
+                    return t
+                found.append(Pattern('L', 'beam: ' + ' then '.join(names), cost, predict))
+    return found
 
 
 # ------------------------------------------------------------- family G
@@ -2087,8 +2172,10 @@ def find_patterns(task: Dict, families: Sequence[str] = tuple(FAMILIES),
     """
     Patterns consistent with every training pair, with their test predictions.
 
-    Exceptions (family X) and multi-step patterns (family L), together
-    within MULTI_STEP_SECONDS, and then
+    Exact fits among the partial matches, exceptions (family X) and
+    multi-step patterns (family L), together within MULTI_STEP_SECONDS,
+    then beam chains (within BEAM_SECONDS; also when only multi-step
+    chains fit), and then
     combinations (family G, within COMBINATION_SECONDS) are searched only
     when no single pattern fits.
     """
@@ -2117,9 +2204,15 @@ def find_patterns(task: Dict, families: Sequence[str] = tuple(FAMILIES),
     if combinations and not consistent:
         deadline = time.time() + MULTI_STEP_SECONDS
         pool = partial_pool(pairs, bg, time.time() + POOL_SECONDS)
-        collect(exception_patterns(pairs, bg, min(deadline, time.time() + EXCEPTION_SECONDS), pool))
+        # forms of the families that fit exactly although the stricter forms do not
+        collect([p for p, (needed, right, wrong) in pool if wrong == 0 and right == needed])
+        if not consistent:
+            collect(exception_patterns(pairs, bg, min(deadline, time.time() + EXCEPTION_SECONDS), pool))
         if not consistent:
             collect(multi_step_patterns(pairs, bg, deadline, pool=pool))
+        # beam chains also compete with multi-step chains (both fit only by chaining)
+        if all(e['family'] == 'L' for e in consistent):
+            collect(beam_chain_patterns(pairs, bg, time.time() + BEAM_SECONDS))
     if combinations and not consistent:
         collect(combination_patterns(pairs, bg, time.time() + COMBINATION_SECONDS))
     return consistent, proposed
