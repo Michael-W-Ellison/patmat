@@ -107,6 +107,7 @@ class Pattern:
     name: str
     complexity: float
     predict: Callable[[Array], Optional[Array]]
+    rules: int = 0          # entries of a learned table (value -> action), 0 if none
 
 
 def _safe(fn, a):
@@ -1604,7 +1605,7 @@ def object_action_near_misses(pairs, bg, accept) -> List[Pattern]:
                 return _apply_actions(t, objs, [mapping.get(key(o.props), 'keep') for o in objs], bg)
             if accept(predict):
                 found.append(Pattern('A', f'objects[{mode}] by {prop} (majority): {len(mapping)} rules',
-                                     1 + len(mapping) + PROPERTY_COST.get(prop, 0), predict))
+                                     1 + len(mapping) + PROPERTY_COST.get(prop, 0), predict, len(mapping)))
     return found
 
 
@@ -1634,7 +1635,7 @@ def role_near_misses(pairs, bg, accept) -> List[Pattern]:
                     return out
                 if accept(predict):
                     found.append(Pattern('J', f'panels by {prop} (majority): {len(mapping)} rules',
-                                         2 + len(mapping) + PANEL_COST.get(prop, 0), predict))
+                                         2 + len(mapping) + PANEL_COST.get(prop, 0), predict, len(mapping)))
     # Markers: the targets are the colour most changed objects had; a target whose reference
     # is not found stays as it is
     for mode in ('color4', 'color8'):
@@ -2046,14 +2047,17 @@ def multi_step_patterns(pairs, bg, deadline: float, depth: int = MAX_STEPS, pool
 BEAM_WIDTH = 4               # chains kept at each depth, those leaving the fewest wrong cells
 BEAM_SECONDS = 10            # time budget, used only when nothing else fits
 BEAM_NODE_SECONDS = 2.5      # time for collecting the next steps of one chain
+MAX_BEAM_RULES = 8           # steps with larger learned tables memorise the examples and are not used
 
 
 def beam_chain_patterns(pairs, bg, deadline: float) -> List[Pattern]:
     """
     Chains of up to MAX_STEPS partial patterns built by a beam search: from
     each kept chain every pattern that leaves fewer cells differing from the
-    outputs is tried, and the BEAM_WIDTH chains with the fewest wrong cells
-    go on; chains that reach every output exactly are returned
+    outputs is tried (except steps whose learned table has more than
+    MAX_BEAM_RULES entries, which memorise the examples), and the
+    BEAM_WIDTH chains with the fewest wrong cells go on; chains that reach
+    every output exactly are returned
     """
     import time
     found = []
@@ -2074,6 +2078,8 @@ def beam_chain_patterns(pairs, bg, deadline: float) -> List[Pattern]:
             node_pairs = [(m, b) for m, (_, b) in zip(mids, pairs)]
             pool = partial_pool(node_pairs, bg, min(deadline, time.time() + BEAM_NODE_SECONDS), improving=True)
             for p, _ in pool:
+                if p.rules > MAX_BEAM_RULES:
+                    continue
                 outs = [_safe(p.predict, m) for m in mids]
                 if any(o is None for o in outs):
                     continue
