@@ -481,6 +481,18 @@ class TestPartialMatches(unittest.TestCase):
         self.assertTrue(found)
         self.assertTrue(any(np.array_equal(f.predict(A(test[0])), A(test[1])) for f in found))
 
+    def test_exception_on_majority_rule(self):       # family X on a family-A near miss
+        # colour-1 objects become 2, except the 3-cell ones, which stay
+        g1 = [[1, 0, 1, 1, 1], [0, 0, 0, 0, 0], [1, 1, 0, 0, 1]]
+        o1 = [[2, 0, 1, 1, 1], [0, 0, 0, 0, 0], [2, 2, 0, 0, 2]]
+        g2 = [[1, 0, 0, 1], [1, 0, 0, 0], [1, 0, 1, 1]]
+        o2 = [[1, 0, 0, 2], [1, 0, 0, 0], [1, 0, 2, 2]]
+        test = [[1, 1, 1, 0], [0, 0, 0, 0], [1, 0, 1, 1]]
+        out = [[1, 1, 1, 0], [0, 0, 0, 0], [2, 0, 2, 2]]
+        import time
+        found = exception_patterns([(A(g1), A(o1)), (A(g2), A(o2))], 0, time.time() + 60)
+        self.assertTrue(any(f.name.startswith('A:') and np.array_equal(f.predict(A(test)), A(out)) for f in found))
+
     def test_chain_from_partial_step(self):          # family L, partial step first
         # mirror the shape left-right about the grid centre (a partial step: it reaches only
         # the mirrored cells), then outline everything in 3

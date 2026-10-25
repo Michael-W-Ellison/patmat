@@ -70,7 +70,9 @@ Pattern families:
                      reaches without a wrong cell) or the output's size, and
                      the next pattern is searched from what is left; searched
                      only when no single pattern fits
-  X exceptions       a pattern that is right except near some objects, made
+  X exceptions       a pattern that is right except near some objects (a
+                     transform, rays, a symmetry, or family A / J / O formed
+                     by majority, with the exceptions left as they are), made
                      exact by a condition read from those exceptions: objects
                      with one property value take no part, or only they do;
                      searched only when no single pattern fits
@@ -1559,6 +1561,137 @@ def relative_patterns(pairs, bg) -> List[Pattern]:
 
 # ------------------------------------------------------------- partial matches
 
+def _majority_mapping(rows, key) -> Dict:
+    """value -> the action most objects with that value allow (objects no action explains are ignored)"""
+    votes: Dict[object, Counter] = {}
+    for props, acts in rows:
+        if acts is None:
+            continue
+        counts = votes.setdefault(key(props), Counter())
+        for act in acts:
+            counts[act] += 1
+    return {v: min(c, key=lambda x: (-c[x], _ACTION_ORDER.get(x, 2), str(x))) for v, c in votes.items()}
+
+
+def object_action_near_misses(pairs, bg, accept) -> List[Pattern]:
+    """Family A by majority: each property value takes the action most of its objects took"""
+    found = []
+    if any(a.shape != b.shape for a, b in pairs):
+        return found
+    for mode in SEGMENTATIONS:
+        seg = [segment(a, bg, mode) for a, _ in pairs]
+        rows = [(o.props, _object_actions(o, a, b, bg)) for (a, b), objs in zip(pairs, seg) for o in objs]
+        if all(acts is None or acts == {'keep'} for _, acts in rows):
+            continue
+        for prop in RULE_PROPERTIES:
+            key = lambda props, prop=prop: props[prop]
+            mapping = _majority_mapping(rows, key)
+            if all(act == 'keep' for act in mapping.values()):
+                continue
+
+            def predict(t, key=key, mapping=mapping, mode=mode):
+                objs = segment(t, bg, mode)
+                return _apply_actions(t, objs, [mapping.get(key(o.props), 'keep') for o in objs], bg)
+            if accept(predict):
+                found.append(Pattern('A', f'objects[{mode}] by {prop} (majority): {len(mapping)} rules',
+                                     1 + len(mapping) + PROPERTY_COST.get(prop, 0), predict))
+    return found
+
+
+def role_near_misses(pairs, bg, accept) -> List[Pattern]:
+    """Family J with exceptions allowed: panel actions by majority; markers that may not be found"""
+    found = []
+    if any(a.shape != b.shape for a, b in pairs):
+        return found
+    # Panels: each property value takes the action most of its panels took
+    grids = [panels(a, bg) for a, _ in pairs]
+    if all(g is not None for g, _ in grids):
+        rows = [(o.props, _panel_actions(_region(a, o), _region(b, o), o.props))
+                for (a, b), (_, ps) in zip(pairs, grids) for o in ps]
+        if not all(acts is None or 'keep' in acts for _, acts in rows):
+            for prop in PANEL_PROPERTIES:
+                mapping = _majority_mapping(rows, lambda pr, prop=prop: pr[prop])
+
+                def predict(t, prop=prop, mapping=mapping):
+                    g, ps = panels(t, bg)
+                    if g is None:
+                        return None
+                    out = t.copy()
+                    for o in ps:
+                        r0, c0, r1, c1 = o.bbox
+                        out[r0:r1 + 1, c0:c1 + 1] = _apply_panel(_region(t, o), mapping.get(o.props[prop], 'keep'),
+                                                                 o.props)
+                    return out
+                if accept(predict):
+                    found.append(Pattern('J', f'panels by {prop} (majority): {len(mapping)} rules',
+                                         2 + len(mapping) + PANEL_COST.get(prop, 0), predict))
+    # Markers: the targets are the colour most changed objects had; a target whose reference
+    # is not found stays as it is
+    for mode in ('color4', 'color8'):
+        changed = Counter()
+        for a, b in pairs:
+            for o in segment(a, bg, mode):
+                cells = tuple(zip(*o.cells))
+                after = set(b[cells].tolist())
+                if len(after) == 1 and after != {o.props['color']}:
+                    changed[o.props['color']] += 1
+        if not changed:
+            continue
+        target = changed.most_common(1)[0][0]
+        for rname, rule in _reference_rules().items():
+            def predict(t, rule=rule, mode=mode, target=target):
+                objs = segment(t, bg, mode)
+                refs = [x for x in objs if x.props['color'] != target]
+                out = t.copy()
+                for o in objs:
+                    if o.props['color'] == target:
+                        c = rule(o, refs)
+                        if c is not None:
+                            out[tuple(zip(*o.cells))] = c
+                return out
+            if accept(predict):
+                found.append(Pattern('J', f'objects[{mode}] of colour {target} take the colour of the {rname}'
+                                          f' (where found)', 3, predict))
+    return found
+
+
+def relative_near_misses(pairs, bg, accept) -> List[Pattern]:
+    """Family O using only the templates two anchors show in full (other anchors get nothing)"""
+    found = []
+    if any(a.shape != b.shape for a, b in pairs) or not all(np.all(a[a != b] == bg) for a, b in pairs):
+        return found
+    for mode in ('color4', 'color8', 'multi8'):
+        seg = [segment(a, bg, mode) for a, _ in pairs]
+        if any(not objs for objs in seg):
+            continue
+        for kname, key in (('every object', lambda pr: 0), ('colour', lambda pr: pr['color']),
+                           ('shape', lambda pr: pr['shape_canon'])):
+            for scaled in (False, True):
+                seen: Dict[object, Counter] = {}
+                for (a, b), objs in zip(pairs, seg):
+                    for o, cells in zip(objs, _assign_to_anchors(a, b, objs)):
+                        r0, c0, r1, c1 = o.bbox
+                        uh, uw = (r1 - r0 + 1, c1 - c0 + 1) if scaled else (1, 1)
+                        rel = frozenset(((r - r0) // uh, (c - c0) // uw, v) for r, c, v in cells)
+                        seen.setdefault(key(o.props), Counter())[rel] += 1
+                templates = {}
+                for k, counts in seen.items():
+                    rel, n = counts.most_common(1)[0]
+                    if rel and n >= 2:
+                        templates[k] = set(rel)
+                if not templates:
+                    continue
+
+                def predict(t, key=key, templates=templates, scaled=scaled, mode=mode):
+                    return _template_paint(t, segment(t, bg, mode), key, templates, scaled, bg)
+                if accept(predict):
+                    size = sum(len(v) for v in templates.values())
+                    found.append(Pattern('O', f'cells placed around each object[{mode}] by {kname}'
+                                         f'{" in units of its size" if scaled else ""} (supported templates): '
+                                         f'{size} offsets', 3 + min(size, 20) / 4 + (kname != 'every object'), predict))
+    return found
+
+
 def _progress(fn, pairs) -> Optional[Tuple[int, int, int]]:
     """(needed, right, wrong) cell counts of a pattern over the examples (None if it fails on one)"""
     needed = right = wrong = 0
@@ -1605,6 +1738,8 @@ def partial_pool(pairs, bg, deadline: float = float('inf')) -> List[Tuple[Patter
         return st[2] == 0 or _near_miss(st)
     pats = [p for p in transform_patterns(pairs, bg) if accept(p.predict)]
     pats += ray_patterns(pairs, bg, accept) + symmetry_patterns(pairs, bg, accept)
+    pats += object_action_near_misses(pairs, bg, accept) + role_near_misses(pairs, bg, accept) \
+        + relative_near_misses(pairs, bg, accept)
     return [(p, stats[id(p.predict)]) for p in pats if id(p.predict) in stats]
 
 
