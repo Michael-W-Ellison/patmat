@@ -1562,7 +1562,11 @@ def relative_patterns(pairs, bg) -> List[Pattern]:
 # ------------------------------------------------------------- partial matches
 
 def _majority_mapping(rows, key) -> Dict:
-    """value -> the action most objects with that value allow (objects no action explains are ignored)"""
+    """
+    value -> the action most objects with that value allow, if at least two
+    of them do (one object would only record its own answer); objects no
+    action explains are ignored
+    """
     votes: Dict[object, Counter] = {}
     for props, acts in rows:
         if acts is None:
@@ -1570,7 +1574,12 @@ def _majority_mapping(rows, key) -> Dict:
         counts = votes.setdefault(key(props), Counter())
         for act in acts:
             counts[act] += 1
-    return {v: min(c, key=lambda x: (-c[x], _ACTION_ORDER.get(x, 2), str(x))) for v, c in votes.items()}
+    mapping = {}
+    for v, c in votes.items():
+        act = min(c, key=lambda x: (-c[x], _ACTION_ORDER.get(x, 2), str(x)))
+        if c[act] >= 2:
+            mapping[v] = act
+    return mapping
 
 
 def object_action_near_misses(pairs, bg, accept) -> List[Pattern]:
