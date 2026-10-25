@@ -1848,7 +1848,9 @@ def multi_step_patterns(pairs, bg, deadline: float, depth: int = MAX_STEPS, pool
             continue
         key = b''.join(m.tobytes() + bytes(str(m.shape), 'ascii') for m in mids)
         distinct.setdefault(key, (mids, []))[1].append((name, fn, cost))
-    for mids, group in sorted(distinct.values(), key=lambda x: min(c for _, _, c in x[1])):
+    # starts from subgoals and size steps first; partial steps add to them, they do not displace them
+    for mids, group in sorted(distinct.values(), key=lambda x: (all(n.startswith('[partial]') for n, _, _ in x[1]),
+                                                               min(c for _, _, c in x[1]))):
         if time.time() > deadline:
             break
         rest = [(m, b) for m, (_, b) in zip(mids, pairs)]
