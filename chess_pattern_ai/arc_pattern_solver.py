@@ -1761,6 +1761,11 @@ def param_patterns(pairs, bg) -> List[Pattern]:
 
 MULTI_STEP_SECONDS = 20      # time budget for multi-step patterns, used only when no single pattern fits
 MAX_STEPS = 3
+# Limits on the chains formed (their number is the product of starts and finals at every step)
+MAX_PARTIAL_STARTS = 30      # partial steps tried first, those reaching the most cells
+MAX_STARTS_PER_RESULT = 3    # cheapest starts kept for each distinct intermediate result
+MAX_FINALS = 5               # cheapest next patterns kept for each intermediate result
+MAX_CHAINS = 300             # cheapest chains returned
 
 
 def _fits(pred, pairs) -> bool:
@@ -1825,8 +1830,9 @@ def multi_step_patterns(pairs, bg, deadline: float, depth: int = MAX_STEPS, pool
     starts = list(_shape_steps(pairs))
     # steps that reach part of the change without getting any cell wrong
     pool = partial_pool(pairs, bg, min(deadline, time.time() + POOL_SECONDS)) if pool is None else pool
+    sound = sorted(((p, st) for p, st in pool if st[2] == 0), key=lambda x: (-x[1][1], x[0].complexity))
     starts += [(f'[partial] {p.family}:{p.name}', p.predict, p.complexity + 1)
-               for p, (needed, right, wrong) in pool if wrong == 0]
+               for p, _ in sound[:MAX_PARTIAL_STARTS]]
     for gname, sub in _subgoals(pairs, bg):
         for family in _step_families():
             if time.time() > deadline:
@@ -1853,13 +1859,14 @@ def multi_step_patterns(pairs, bg, deadline: float, depth: int = MAX_STEPS, pool
             finals += [p for p in family(rest, bg) if _fits(p.predict, rest)]
         if not finals:
             finals = multi_step_patterns(rest, bg, deadline, depth - 1)
-        for name, fn, cost in group:
+        finals = sorted(finals, key=lambda p: p.complexity)[:MAX_FINALS]
+        for name, fn, cost in sorted(group, key=lambda x: x[2])[:MAX_STARTS_PER_RESULT]:
             for p2 in finals:
                 def predict(t, f1=fn, f2=p2.predict):
                     m = _safe(f1, t)
                     return None if m is None else f2(m)
                 found.append(Pattern('L', f'{name} then {p2.family}:{p2.name}', cost + p2.complexity + 1, predict))
-    return found
+    return sorted(found, key=lambda p: p.complexity)[:MAX_CHAINS]
 
 
 # ------------------------------------------------------------- family G
