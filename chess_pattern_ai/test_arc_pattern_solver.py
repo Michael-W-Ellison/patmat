@@ -6,7 +6,7 @@ import unittest
 import numpy as np
 
 from arc_elements import segment
-from arc_pattern_solver import find_patterns, multi_step_patterns, rank
+from arc_pattern_solver import exception_patterns, find_patterns, multi_step_patterns, rank
 
 A = np.array
 
@@ -459,6 +459,48 @@ class TestSymmetryAndRelativePositions(unittest.TestCase):
         out = [[0, 0, 0, 0], [5, 0, 0, 0], [5, 0, 0, 0], [5, 0, 0, 3], [5, 0, 0, 0], [5, 0, 0, 0]]
         t = task([(g1, o1), (g2, o2)], test, out)
         self.assertTrue(right(best(t), t))
+
+
+class TestPartialMatches(unittest.TestCase):
+    def test_exception_condition(self):              # family X
+        # rays go down from every object except the colour-5 ones (a near miss without the condition)
+        def make(cols, h, w):
+            g = np.zeros((h, w), dtype=int)
+            for c, v in cols:
+                g[0, c] = v
+            o = g.copy()
+            for c, v in cols:
+                if v != 5:
+                    o[1:, c] = v
+            return g.tolist(), o.tolist()
+        p1 = make([(0, 2), (2, 5), (4, 3)], 4, 5)
+        p2 = make([(1, 5), (3, 1), (5, 5)], 3, 6)
+        test = make([(0, 5), (2, 4), (3, 6)], 5, 4)
+        import time
+        found = exception_patterns([(A(a), A(b)) for a, b in (p1, p2)], 0, time.time() + 60)
+        self.assertTrue(found)
+        self.assertTrue(any(np.array_equal(f.predict(A(test[0])), A(test[1])) for f in found))
+
+    def test_chain_from_partial_step(self):          # family L, partial step first
+        # mirror the shape left-right about the grid centre (a partial step: it reaches only
+        # the mirrored cells), then outline everything in 3
+        def make(cells, h, w):
+            g = np.zeros((h, w), dtype=int)
+            for r, c in cells:
+                g[r, c] = 1
+            m = np.where(g == 0, np.fliplr(g), g)
+            o = m.copy()
+            for r in range(h):
+                for c in range(w):
+                    if m[r, c] == 0 and any(0 <= r + dr < h and 0 <= c + dc < w and m[r + dr, c + dc] == 1
+                                            for dr, dc in ((0, 1), (1, 0), (0, -1), (-1, 0))):
+                        o[r, c] = 3
+            return g, o
+        import time
+        pairs = [make([(1, 1), (2, 1)], 4, 6), make([(2, 0), (2, 1), (3, 2)], 6, 7)]
+        chains = multi_step_patterns(pairs, 0, time.time() + 60)
+        test_in, test_out = make([(1, 2), (3, 1)], 5, 8)
+        self.assertTrue(any(np.array_equal(c.predict(test_in), test_out) for c in chains))
 
 
 if __name__ == '__main__':

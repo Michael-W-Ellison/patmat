@@ -66,9 +66,14 @@ Pattern families:
                      the nearest other object on its row, column or centre
   L multi-step       chains of up to three patterns: each step reaches part
                      of the change (the changes to one colour, the additions,
-                     deletions or recolourings) or the output's size, and the
-                     next pattern is searched from its result; searched only
-                     when no single pattern fits
+                     deletions or recolourings; or whatever a partial pattern
+                     reaches without a wrong cell) or the output's size, and
+                     the next pattern is searched from what is left; searched
+                     only when no single pattern fits
+  X exceptions       a pattern that is right except near some objects, made
+                     exact by a condition read from those exceptions: objects
+                     with one property value take no part, or only they do;
+                     searched only when no single pattern fits
 
 Conditions: family A maps one property, or two at once, to an action (keep,
 delete, recolour, or adopt the colour of the one element an object
@@ -1277,12 +1282,14 @@ def cast_rays(a: Array, bg: int, seed: Optional[int], dirs: Sequence[str], color
     return out
 
 
-def ray_patterns(pairs, bg) -> List[Pattern]:
+def ray_patterns(pairs, bg, accept: Optional[Callable] = None) -> List[Pattern]:
+    """Ray patterns that fit exactly, or (with `accept`) every one that `accept` takes"""
     found = []
     if any(a.shape != b.shape for a, b in pairs):
         return found
-    # rays only paint background cells
-    if not all(np.all(a[a != b] == bg) for a, b in pairs) or all(np.array_equal(a, b) for a, b in pairs):
+    # rays only paint background cells (when only part of the change is wanted, some of it must be additions)
+    if accept is None and not all(np.all(a[a != b] == bg) for a, b in pairs) or \
+            not any(np.any((a != b) & (a == bg)) for a, b in pairs):
         return found
     seeds = [None] + sorted(set.intersection(*[set(np.unique(a).tolist()) - {bg} for a, _ in pairs]))
     added = sorted({int(v) for a, b in pairs for v in np.unique(b[a != b])})
@@ -1298,9 +1305,11 @@ def ray_patterns(pairs, bg) -> List[Pattern]:
                         for bounce in ((None, 'rows', 'cols', 'all') if diagonal else (None,)):
                             for cross in crosses:
                                 args = (seed, dirs, color, on_obstacle, bounce, select, cross)
-                                if not np.array_equal(cast_rays(a0, bg, *args), b0):
-                                    continue
-                                if not all(np.array_equal(cast_rays(a, bg, *args), b) for a, b in pairs[1:]):
+                                if accept is not None:
+                                    if not accept(lambda t, args=args: cast_rays(t, bg, *args)):
+                                        continue
+                                elif not np.array_equal(cast_rays(a0, bg, *args), b0) or \
+                                        not all(np.array_equal(cast_rays(a, bg, *args), b) for a, b in pairs[1:]):
                                     continue
                                 cost = 3 + (on_obstacle != 'stop') + (select != 'any') + (bounce is not None) \
                                     + (cross is not None)
@@ -1401,19 +1410,24 @@ def _centre_finders(pairs, bg):
     return finders
 
 
-def symmetry_patterns(pairs, bg) -> List[Pattern]:
+def symmetry_patterns(pairs, bg, accept: Optional[Callable] = None) -> List[Pattern]:
+    """Symmetry patterns that fit exactly, or (with `accept`) the completions that `accept` takes"""
     found = []
     same = all(a.shape == b.shape for a, b in pairs)
+    additive = same and (all(np.all(a[a != b] == bg) for a, b in pairs) if accept is None else
+                         any(np.any((a != b) & (a == bg)) for a, b in pairs))
     # 1. Complete a symmetry about a centre found in the grid
-    if same and all(np.all(a[a != b] == bg) for a, b in pairs) and not all(np.array_equal(a, b) for a, b in pairs):
+    if same and additive and not all(np.array_equal(a, b) for a, b in pairs):
         for fname, finder in _centre_finders(pairs, bg):
             for gname, ops in SYMMETRY_GROUPS.items():
                 def predict(t, finder=finder, ops=ops):
                     centre = finder(t, ops)
                     return None if centre is None else symmetric_fill(t, t != bg, ops, centre)[0]
-                if _fits(predict, pairs):
+                if (_fits(predict, pairs) if accept is None else accept(predict)):
                     found.append(Pattern('N', f'complete {gname} symmetry about the {fname}',
                                          3 + (fname != 'grid centre'), predict))
+    if accept is not None:
+        return found
     # 2. Repair the cells under a mask colour from their mirror images
     masks = sorted(set.intersection(*[set(np.unique(a).tolist()) for a, _ in pairs]))
     for m in masks:
@@ -1540,6 +1554,132 @@ def relative_patterns(pairs, bg) -> List[Pattern]:
             if _fits(predict, pairs):
                 found.append(Pattern('O', f'objects[{mode}] of {sorted(moved)} line up with the nearest '
                                      f'other object ({axis})', 4, predict))
+    return found
+
+
+# ------------------------------------------------------------- partial matches
+
+def _progress(fn, pairs) -> Optional[Tuple[int, int, int]]:
+    """(needed, right, wrong) cell counts of a pattern over the examples (None if it fails on one)"""
+    needed = right = wrong = 0
+    for a, b in pairs:
+        out = _safe(fn, a)
+        if out is None or out.shape != b.shape:
+            return None
+        change = a != b
+        needed += int(change.sum())
+        right += int((change & (out == b)).sum())
+        # wrong: differs from the output, unless it is a needed change not yet made
+        wrong += int(((out != b) & ~(change & (out == a))).sum())
+    return needed, right, wrong
+
+
+def _near_miss(stats) -> bool:
+    """Reaches at least half of the change, with fewer wrong cells than cells to change"""
+    needed, right, wrong = stats
+    return needed > 0 and 0 < wrong < needed and 2 * right >= needed
+
+
+def partial_pool(pairs, bg, deadline: float = float('inf')) -> List[Tuple[Pattern, Tuple[int, int, int]]]:
+    """
+    Patterns produced without an exact fit that are useful partial matches:
+    sound steps (right where they change, wrong nowhere) and near misses
+    """
+    if any(a.shape != b.shape for a, b in pairs):
+        return []
+    a0, b0 = pairs[0]
+    stats = {}
+
+    import time
+
+    def accept(fn):
+        if time.time() > deadline:
+            return False
+        first = _progress(fn, pairs[:1])
+        if first is None or first[1] == 0 or not (first[2] == 0 or _near_miss(first)):
+            return False            # judged on the first example before the others
+        st = _progress(fn, pairs)
+        if st is None or st[1] == 0 or st[1] == st[0] and st[2] == 0:
+            return False
+        stats[id(fn)] = st
+        return st[2] == 0 or _near_miss(st)
+    pats = [p for p in transform_patterns(pairs, bg) if accept(p.predict)]
+    pats += ray_patterns(pairs, bg, accept) + symmetry_patterns(pairs, bg, accept)
+    return [(p, stats[id(p.predict)]) for p in pats if id(p.predict) in stats]
+
+
+EXCEPTION_PROPERTIES = ('color', 'size', 'height', 'width', 'is_rect', 'holes', 'n_colors', 'shape_canon',
+                        'sym_lr', 'sym_ud', 'touches_border', 'is_largest', 'is_smallest', 'unique_color',
+                        'unique_shape')
+MAX_NEAR_MISSES = 12
+EXCEPTION_SECONDS = 7        # share of MULTI_STEP_SECONDS the exception search may use
+POOL_SECONDS = 5             # share of MULTI_STEP_SECONDS for collecting partial matches
+
+
+def _with_only(fn, t: Array, objs: List[Obj], acting: List[bool], bg: int) -> Optional[Array]:
+    """Run the pattern with only the acting objects present, then put the others back"""
+    removed = [o for o, act in zip(objs, acting) if not act]
+    t2 = t.copy()
+    for o in removed:
+        t2[tuple(zip(*o.cells))] = bg
+    out = _safe(fn, t2)
+    if out is None or out.shape != t.shape:
+        return None
+    for o in removed:
+        cells = tuple(zip(*o.cells))
+        out[cells] = t[cells]
+    return out
+
+
+def exception_patterns(pairs, bg, deadline: float, pool=None) -> List[Pattern]:
+    """
+    A near-miss pattern made exact by a condition found from its exceptions:
+    objects with one property value do not take part, or only they take part
+    """
+    import time
+    found = []
+    if any(a.shape != b.shape for a, b in pairs):
+        return found
+    pool = partial_pool(pairs, bg) if pool is None else pool
+    near = sorted(((p, st) for p, st in pool if _near_miss(st)), key=lambda x: (x[1][2], x[0].complexity))
+    for base, _ in near[:MAX_NEAR_MISSES]:
+        for mode in ('color4', 'multi8'):
+            if time.time() > deadline:
+                return found
+            seg = [segment(a, bg, mode) for a, _ in pairs]
+            a0, b0 = pairs[0]
+            out0 = _safe(base.predict, a0)
+            wrong = np.pad(out0 != b0, 1)
+            near_wrong = np.zeros_like(wrong)
+            for dr in (-1, 0, 1):
+                for dc in (-1, 0, 1):
+                    near_wrong |= np.roll(np.roll(wrong, dr, 0), dc, 1)
+            near_wrong = near_wrong[1:-1, 1:-1]
+            exceptions = {i for i, o in enumerate(seg[0]) if any(near_wrong[p] for p in o.cells)}
+            if not exceptions:
+                continue
+            for prop in EXCEPTION_PROPERTIES:
+                for v in sorted({o.props[prop] for o in seg[0]}, key=str):
+                    chosen = {i for i, o in enumerate(seg[0]) if o.props[prop] == v}
+                    for variant in ('without', 'only'):
+                        # the excluded objects must be among the exceptions; the acting ones must avoid them
+                        if variant == 'without' and not (chosen and chosen <= exceptions):
+                            continue
+                        if variant == 'only' and not (chosen and not chosen & exceptions):
+                            continue
+                        acting = lambda o, prop=prop, v=v, variant=variant: (o.props[prop] == v) == (variant == 'only')
+                        if not all((lambda o: o is not None and np.array_equal(o, b))(
+                                _with_only(base.predict, a, objs, [acting(o) for o in objs], bg))
+                                for (a, b), objs in zip(pairs, seg)):
+                            continue
+
+                        def predict(t, mode=mode, acting=acting, fn=base.predict):
+                            objs = segment(t, bg, mode)
+                            return _with_only(fn, t, objs, [acting(o) for o in objs], bg)
+                        label = f'{prop}={str(v)[:20]}'
+                        found.append(Pattern('X', f'{base.family}:{base.name} '
+                                             f'{"except" if variant == "without" else "only for"} objects[{mode}] with {label}',
+                                             base.complexity + 2 + PROPERTY_COST.get(prop, 0), predict))
     return found
 
 
@@ -1673,7 +1813,7 @@ def _step_families():
     return list(FAMILIES.values())
 
 
-def multi_step_patterns(pairs, bg, deadline: float, depth: int = MAX_STEPS) -> List[Pattern]:
+def multi_step_patterns(pairs, bg, deadline: float, depth: int = MAX_STEPS, pool=None) -> List[Pattern]:
     """
     Chains of patterns: a first step that reaches part of the change (or
     the output's size), then a final pattern, or another chain, from there
@@ -1683,6 +1823,10 @@ def multi_step_patterns(pairs, bg, deadline: float, depth: int = MAX_STEPS) -> L
     if depth < 2:
         return found
     starts = list(_shape_steps(pairs))
+    # steps that reach part of the change without getting any cell wrong
+    pool = partial_pool(pairs, bg, min(deadline, time.time() + POOL_SECONDS)) if pool is None else pool
+    starts += [(f'[partial] {p.family}:{p.name}', p.predict, p.complexity + 1)
+               for p, (needed, right, wrong) in pool if wrong == 0]
     for gname, sub in _subgoals(pairs, bg):
         for family in _step_families():
             if time.time() > deadline:
@@ -1790,7 +1934,8 @@ def find_patterns(task: Dict, families: Sequence[str] = tuple(FAMILIES),
     """
     Patterns consistent with every training pair, with their test predictions.
 
-    Multi-step patterns (family L, within MULTI_STEP_SECONDS) and then
+    Exceptions (family X) and multi-step patterns (family L), together
+    within MULTI_STEP_SECONDS, and then
     combinations (family G, within COMBINATION_SECONDS) are searched only
     when no single pattern fits.
     """
@@ -1817,7 +1962,11 @@ def find_patterns(task: Dict, families: Sequence[str] = tuple(FAMILIES),
     for fam in families:
         collect(FAMILIES[fam](pairs, bg))
     if combinations and not consistent:
-        collect(multi_step_patterns(pairs, bg, time.time() + MULTI_STEP_SECONDS))
+        deadline = time.time() + MULTI_STEP_SECONDS
+        pool = partial_pool(pairs, bg, time.time() + POOL_SECONDS)
+        collect(exception_patterns(pairs, bg, min(deadline, time.time() + EXCEPTION_SECONDS), pool))
+        if not consistent:
+            collect(multi_step_patterns(pairs, bg, deadline, pool=pool))
     if combinations and not consistent:
         collect(combination_patterns(pairs, bg, time.time() + COMBINATION_SECONDS))
     return consistent, proposed
