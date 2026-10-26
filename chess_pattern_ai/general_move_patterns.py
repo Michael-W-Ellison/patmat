@@ -36,6 +36,20 @@ A game takes part by providing an adapter with:
 Optionally, for games whose state is cheap to change in place but costly
 to copy (chess), the adapter may also provide push(state, move) and
 pop(state); apply() is then not used during feature extraction.
+
+Games of other kinds declare it with optional attributes (absent: a
+two-player game with everything visible):
+    players = 1               single player; opponent(color) is a pseudo-player
+                              for the environment, which never moves, and
+                              winner() returns it when the game is lost
+    hidden_information = True the state holds information the player may not
+                              see; observe(state, color) returns what the
+                              player sees, and move choice must use only that.
+                              apply() is then the environment carrying out a
+                              move, so analyze_candidates (which looks ahead
+                              with apply) refuses such games
+    new_game(seed)            a fresh state; games with a random setup draw it
+                              from the seed, so a seed repeats a game
 """
 
 import os
@@ -94,6 +108,8 @@ def analyze_candidates(adapter, state, color, candidates: Sequence,
         - 'net':  evaluate() change after the opponent's best examined reply
                   (equal to gain when the move ends the game or keeps the turn)
     """
+    if getattr(adapter, 'hidden_information', False):
+        raise ValueError('looking ahead with apply() would reveal hidden information')
     opp = adapter.opponent(color)
     value_now = evaluate(adapter, state, color)
     info = []
@@ -187,6 +203,8 @@ def decisive_value(net: float) -> float:
 
 def winning_moves(adapter, state, color, moves: Sequence) -> List:
     """Moves that achieve the game's winning condition immediately"""
+    if getattr(adapter, 'hidden_information', False):
+        raise ValueError('looking ahead with apply() would reveal hidden information')
     in_place = hasattr(adapter, 'push') and hasattr(adapter, 'pop')
     wins = []
     for move in moves:
