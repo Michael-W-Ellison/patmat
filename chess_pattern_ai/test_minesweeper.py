@@ -10,7 +10,8 @@ import unittest
 import general_move_patterns as gmp
 from minesweeper.minesweeper_adapter import NATURE, PLAYER, MinesweeperAdapter
 from minesweeper.minesweeper_game import HIDDEN, MinesweeperGame
-from minesweeper.minesweeper_headless_trainer import cell_features, train
+from minesweeper.constraint_learner import ConstraintLearner
+from minesweeper.minesweeper_headless_trainer import cell_features, play_game, train
 
 
 class TestRules(unittest.TestCase):
@@ -108,6 +109,47 @@ class TestTrainer(unittest.TestCase):
             self.assertGreater(n, 0)
             self.assertEqual(games, 20)
         self.assertEqual(len(train(10, 'random', seed=1, block=10, verbose=False)), 1)
+
+
+class TestConstraintLearner(unittest.TestCase):
+    def test_discovers_the_counting_constraint(self):
+        ad = MinesweeperAdapter(6, 6, 4)
+        learner = ConstraintLearner(random.Random(0), accept_after=50)
+        for i in range(10):
+            play_game(ad, i, learner.choose, learner.end_game)
+        self.assertEqual(learner.accepted(), [('mine', '8 neighbours')])
+
+    def test_deduction(self):
+        learner = ConstraintLearner(random.Random(0), accept_after=0)
+        learner.hypotheses = {('mine', '8 neighbours'): {'confirmed': 1, 'violated': 0}}
+        H = HIDDEN
+        # a 1 touching a single hidden cell makes it a mine; the 1 next to it is then satisfied,
+        # so its other hidden neighbour is safe
+        obs = [[0, 1, H],
+               [0, 1, H],
+               [0, 1, 1]]
+        safe, mines = learner.deduce(obs)
+        self.assertEqual(mines, {(1, 2)})
+        self.assertEqual(safe, {(0, 2)})
+        # nested equations: {a, b} and {b, c} each hold 1 mine, {a, b, c} holds 1, so a and c are safe
+        obs = [[H, H, H],
+               [1, 1, 1],
+               [0, 0, 0]]
+        safe, mines = learner.deduce(obs)
+        self.assertEqual((safe, mines), ({(0, 0), (0, 2)}, {(0, 1)}))
+        # 1-2-1: {a, b, c} hold 2 and {a, b}, {b, c} hold 1 each, so a and c are mines and b is safe
+        obs = [[H, H, H],
+               [1, 2, 1],
+               [0, 0, 0]]
+        safe, mines = learner.deduce(obs)
+        self.assertEqual((safe, mines), ({(0, 1)}, {(0, 0), (0, 2)}))
+
+    def test_beats_random_on_the_standard_board(self):
+        ad = MinesweeperAdapter()
+        learner = ConstraintLearner(random.Random(0))
+        wins = sum(play_game(ad, 1000 + i, learner.choose, learner.end_game) for i in range(100))
+        self.assertGreater(wins, 50)
+        self.assertGreater(learner.moves_by['deduced'], learner.moves_by['guessed'])
 
 
 if __name__ == '__main__':

@@ -42,6 +42,10 @@ class MinesweeperAdapter:
         """The player's view: HIDDEN (-1) or the number shown, per cell"""
         return game.observation()
 
+    def final_view(self, game, color):
+        """After the game only: the view with the mines shown (MINE, -2), as the game shows at the end"""
+        return game.final_view()
+
     def grid_values(self, color):
         """Values to_grid uses for revealed cells (the numbers)"""
         return set(range(9))

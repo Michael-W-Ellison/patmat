@@ -2,12 +2,15 @@
 """
 Minesweeper baseline trainer
 
-Two players, both choosing only from what the player can see:
-- random:  reveals a random hidden cell
-- learner: describes every hidden cell by its visible surroundings and
-           reveals the cell whose description has the highest win lift
-           (win_lift.py: decayed "games using it are won more often than
-           usual"), exploring a random cell with probability EXPLORE
+Players, all choosing only from what the player can see:
+- random:      reveals a random hidden cell
+- learner:     describes every hidden cell by its visible surroundings and
+               reveals the cell whose description has the highest win lift
+               (win_lift.py: decayed "games using it are won more often than
+               usual"), exploring a random cell with probability EXPLORE
+- constraints: discovers local count constraints from the views shown after
+               each game and deduces safe cells with them
+               (minesweeper/constraint_learner.py)
 
 A cell's description (feature string):
     rev  revealed neighbours: 0, 1-2, 3-5 or 6+
@@ -16,11 +19,13 @@ A cell's description (feature string):
     pos  corner, edge or inner
 
 Usage:
-    python3 -m minesweeper.minesweeper_headless_trainer [games] [--player random|learner]
+    python3 -m minesweeper.minesweeper_headless_trainer [games] [--player random|learner|constraints]
         [--db path] [--seed n] [--rows 9 --cols 9 --mines 10] [--block 250]
+(--db is the learner's database, or the constraint learner's JSON state)
 """
 
 import argparse
+import json
 import os
 import random
 import sqlite3
@@ -31,6 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import win_lift  # noqa: E402
 
+from minesweeper.constraint_learner import ConstraintLearner  # noqa: E402
 from minesweeper.minesweeper_adapter import PLAYER, MinesweeperAdapter  # noqa: E402
 from minesweeper.minesweeper_game import HIDDEN  # noqa: E402
 
@@ -102,12 +108,17 @@ class MinesweeperLearner:
         self.conn.close()
 
 
-def play_game(adapter: MinesweeperAdapter, seed: int, choose) -> bool:
-    """One game; choose(observation, moves) picks a move from what the player can see"""
+def play_game(adapter: MinesweeperAdapter, seed: int, choose, end=None) -> bool:
+    """
+    One game; choose(observation, moves) picks a move from what the player
+    can see; end(final_view), if given, receives the view shown after the game
+    """
     game = adapter.new_game(seed)
     while not adapter.is_over(game):
         move = choose(adapter.observe(game, PLAYER), adapter.legal_moves(game, PLAYER))
         game = adapter.apply(game, move)
+    if end is not None:
+        end(adapter.final_view(game, PLAYER))
     return adapter.winner(game) == PLAYER
 
 
@@ -117,10 +128,13 @@ def train(games: int, player: str = 'learner', db_path: Optional[str] = None, se
     adapter = MinesweeperAdapter(rows, cols, mines)
     rng = random.Random(seed)
     learner = MinesweeperLearner(db_path or 'minesweeper_training.db', rng) if player == 'learner' else None
-    choose = learner.choose if learner else (lambda obs, moves: rng.choice(moves))
+    solver = ConstraintLearner(rng) if player == 'constraints' else None
+    if solver and db_path and os.path.exists(db_path):
+        solver.load(db_path)
+    choose = learner.choose if learner else solver.choose if solver else (lambda obs, moves: rng.choice(moves))
     rates, wins = [], 0
     for i in range(games):
-        won = play_game(adapter, seed * 1_000_003 + i, choose)
+        won = play_game(adapter, seed * 1_000_003 + i, choose, solver.end_game if solver else None)
         wins += won
         if learner:
             learner.record_game(won)
@@ -132,14 +146,19 @@ def train(games: int, player: str = 'learner', db_path: Optional[str] = None, se
             wins = 0
     if learner:
         learner.close()
+    if solver:
+        if db_path:
+            solver.save(db_path)
+        if verbose:
+            print(json.dumps(solver.summary(), indent=1))
     return rates
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('games', type=int, nargs='?', default=1000)
-    ap.add_argument('--player', choices=('random', 'learner'), default='learner')
-    ap.add_argument('--db', default='minesweeper_training.db')
+    ap.add_argument('--player', choices=('random', 'learner', 'constraints'), default='learner')
+    ap.add_argument('--db', default=None)
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--rows', type=int, default=9)
     ap.add_argument('--cols', type=int, default=9)

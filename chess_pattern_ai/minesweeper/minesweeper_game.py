@@ -18,6 +18,7 @@ from typing import List, Optional, Set, Tuple
 
 Pos = Tuple[int, int]
 HIDDEN = -1        # value of a hidden cell in an observation
+MINE = -2          # value of a mine in the view shown after the game
 
 
 class MinesweeperGame:
@@ -85,6 +86,15 @@ class MinesweeperGame:
 
     def is_over(self) -> bool:
         return self.lost() or self.won()
+
+    def final_view(self) -> List[List[int]]:
+        """After the game: the observation with every mine shown as MINE (as the game shows at the end)"""
+        if not self.is_over():
+            raise ValueError('the mines are shown only when the game is over')
+        obs = self.observation()
+        for r, c in self.mines:
+            obs[r][c] = MINE
+        return obs
 
     def observation(self) -> List[List[int]]:
         """What the player sees: HIDDEN for hidden cells, the neighbour count for revealed ones"""
