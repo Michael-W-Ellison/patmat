@@ -105,7 +105,7 @@ class TestWidenedLearner(unittest.TestCase):
         H, E = HIDDEN, EMPTY
         # a 3-run in a 4-cell row fixes its two middle cells
         obs = [[3, H, H, H, H],
-               [E, H, H, H, H]]
+               [OUTSIDE, H, H, H, H]]
         safe, mines = learner.deduce(obs)
         self.assertEqual(mines, {(0, 2), (0, 3)})
         learner = ConstraintLearner(random.Random(0), accept_after=0)
@@ -113,6 +113,26 @@ class TestWidenedLearner(unittest.TestCase):
         learner._board = {(0, c) for c in range(3)}
         safe, mines = learner.deduce([[E, E, H]])       # the one hidden cell left in the row holds its mine
         self.assertEqual(mines, {(0, 2)})
+
+
+class TestSearch(unittest.TestCase):
+    def test_trial_finds_what_pairs_do_not(self):
+        # On small Mosaics, trying cells each way proves more cells than the single / pairwise rules,
+        # and never a wrong one
+        learner = ConstraintLearner(random.Random(0), accept_after=0)
+        learner.hypotheses = {('count', '3x3 block', 'mine'): {'confirmed': 1, 'violated': 0}}
+        learner.clues_can_be_mines = True
+        found_by_search = 0
+        for seed in range(40):
+            p = mosaic(seed, rows=5, cols=5)
+            obs = p.observation()
+            plain_safe, plain_mines = learner.deduce(obs)
+            safe, mines = learner.deduce(obs, search=True)
+            self.assertTrue(plain_safe <= safe and plain_mines <= mines)
+            self.assertFalse(safe & p.filled)               # never wrong
+            self.assertTrue(mines <= p.filled)
+            found_by_search += len(safe | mines) > len(plain_safe | plain_mines)
+        self.assertGreater(found_by_search, 0)
 
 
 if __name__ == '__main__':

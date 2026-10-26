@@ -34,7 +34,10 @@ shown as MINE) and from what it sees while playing.
    the same way. Run constraints are solved line by line: every placement
    of the runs that agrees with the cells already known is enumerated, and
    cells that are the same in all of them are fixed. Repeated until
-   nothing changes.
+   nothing changes. When that finds no safe cell, search: each undecided
+   cell the constraints mention is assumed to be a mine, then safe; an
+   assumption that leads to a contradiction proves the opposite, which is
+   added and propagated before the next trial.
 
 3. Act. A playable cell proven safe is revealed. Otherwise the learner
    guesses the cell with the lowest mine rate observed for cells with the
@@ -113,9 +116,10 @@ def _placements(runs: List[int], known: List[Optional[bool]]) -> List[List[bool]
 
 
 class ConstraintLearner:
-    def __init__(self, rng: Optional[random.Random] = None, accept_after: int = ACCEPT_AFTER):
+    def __init__(self, rng: Optional[random.Random] = None, accept_after: int = ACCEPT_AFTER, search: bool = True):
         self.rng = rng or random.Random()
         self.accept_after = accept_after
+        self.search = search
         self.hypotheses: Dict[Hypothesis, Dict] = {}
         for scope in list(NEIGHBOURHOODS) + [LINES]:
             for prop in PROPERTIES:
@@ -240,19 +244,25 @@ class ConstraintLearner:
                         for region in self._regions(what, self._board)]
         return eqs, lines, unknown, known_mines
 
-    def deduce(self, obs) -> Tuple[Set[Pos], Set[Pos]]:
-        """(cells proven safe, cells proven mines) under the accepted constraints"""
-        mines: Set[Pos] = set()
-        safe: Set[Pos] = set()
-        eqs, lines, unknown, known_mines = self._constraints(obs)
+    @staticmethod
+    def _propagate(eqs, lines, unknown, known_mines, safe: Set[Pos], mines: Set[Pos]):
+        """
+        Everything the constraints force, starting from the given safe and
+        mine cells: (safe, mines, consistent); consistent is False when the
+        constraints contradict each other or the starting cells
+        """
+        safe, mines = set(safe), set(mines)
         changed = True
         while changed:
             changed = False
-            reduced = []
+            reduced = set()
             for cells, m in eqs:
                 rest = cells - mines - safe
-                reduced.append((frozenset(rest), m - len(cells & mines)))
-            reduced = [e for e in set(reduced) if e[0]]
+                r = m - len(cells & mines)
+                if r < 0 or r > len(rest):
+                    return safe, mines, False
+                if rest:
+                    reduced.add((frozenset(rest), r))
             found_safe, found_mines = set(), set()
             for rest, r in reduced:
                 if r == 0:
@@ -262,11 +272,9 @@ class ConstraintLearner:
             for cells, runs in lines:
                 known = [True if p in mines or p in known_mines else False if (p in safe or p not in unknown)
                          else None for p in cells]
-                if all(k is not None for k in known):
-                    continue
                 options = _placements(runs, known)
                 if not options:
-                    continue        # contradiction: the constraints do not hold here
+                    return safe, mines, False
                 for i, p in enumerate(cells):
                     if known[i] is None and all(o[i] == options[0][i] for o in options):
                         (found_mines if options[0][i] else found_safe).add(p)
@@ -275,6 +283,8 @@ class ConstraintLearner:
                     for u2, r2 in reduced:
                         if u1 < u2:
                             diff, rd = u2 - u1, r2 - r1
+                            if rd < 0 or rd > len(diff):
+                                return safe, mines, False
                             if rd == 0:
                                 found_safe |= diff
                             elif rd == len(diff):
@@ -282,11 +292,43 @@ class ConstraintLearner:
             found_safe -= safe
             found_mines -= mines
             if found_safe & found_mines:
-                break               # contradiction: the constraints do not hold here
+                return safe, mines, False
             if found_safe or found_mines:
                 safe |= found_safe
                 mines |= found_mines
                 changed = True
+        return safe, mines, True
+
+    def deduce(self, obs, search: bool = False) -> Tuple[Set[Pos], Set[Pos]]:
+        """
+        (cells proven safe, cells proven mines) under the accepted constraints.
+        With search, every undecided cell the constraints mention is also
+        tried both ways: if assuming it is a mine (or safe) leads to a
+        contradiction, it is the other; repeated until nothing changes.
+        """
+        eqs, lines, unknown, known_mines = self._constraints(obs)
+        safe, mines, consistent = self._propagate(eqs, lines, unknown, known_mines, set(), set())
+        if not search or not consistent:
+            return safe, mines
+        mentioned = set().union(*(cells for cells, _ in eqs), *(set(c) for c, _ in lines)) & unknown
+        progress = True
+        while progress:
+            progress = False
+            for p in sorted(mentioned - safe - mines):
+                if p in safe or p in mines:
+                    continue
+                for assume_mine in (True, False):
+                    trial_safe = safe if assume_mine else safe | {p}
+                    trial_mines = mines | {p} if assume_mine else mines
+                    if not self._propagate(eqs, lines, unknown, known_mines, trial_safe, trial_mines)[2]:
+                        # the assumption is impossible, so the opposite holds
+                        safe, mines, consistent = self._propagate(
+                            eqs, lines, unknown, known_mines,
+                            safe | {p} if assume_mine else safe, mines if assume_mine else mines | {p})
+                        if not consistent:
+                            return safe, mines
+                        progress = True
+                        break
         return safe, mines
 
     # -------------------------------------------------------------- play
@@ -300,6 +342,8 @@ class ConstraintLearner:
         described = [(m, cell_features(obs, m)) for m in moves]
         self._seen.extend(described)
         safe, mines = self.deduce(obs)
+        if self.search and not any(m in safe for m in moves):
+            safe, mines = self.deduce(obs, search=True)     # only when it would otherwise guess
         safe_moves = [m for m in moves if m in safe]
         if safe_moves:
             self.moves_by['deduced'] += 1
