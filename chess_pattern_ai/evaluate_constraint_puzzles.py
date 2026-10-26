@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Does the Minesweeper constraint learner, unchanged, discover the rules of
-other constraint puzzles? (see constraint_puzzles.py)
+Does the constraint learner discover the rules of other constraint puzzles,
+and solve them? (see constraint_puzzles.py; every puzzle has exactly one
+solution)
 
 For each puzzle type a fresh learner plays a sequence of puzzles, learning
 only from the views shown after each attempt, and a random player plays
@@ -12,6 +13,7 @@ uncovered, and how many moves were deduced rather than guessed.
 Usage: python3 evaluate_constraint_puzzles.py [puzzles per type] [seed]
 """
 
+import copy
 import random
 import sys
 
@@ -34,12 +36,13 @@ def run(kind: str, n: int, seed: int):
     solved = progress = r_solved = r_progress = 0
     late_solved = 0
     for i in range(n):
-        won, prog = attempt(make(seed * 100_003 + i), learner.choose, learner.end_game)
+        puzzle = make(seed * 100_003 + i)
+        won, prog = attempt(copy.deepcopy(puzzle), learner.choose, learner.end_game)
         solved += won
         progress += prog
         if i >= n // 2:
             late_solved += won
-        won, prog = attempt(make(seed * 100_003 + i), lambda obs, moves: rng.choice(moves))
+        won, prog = attempt(puzzle, lambda obs, moves: rng.choice(moves))
         r_solved += won
         r_progress += prog
     s = learner.summary()

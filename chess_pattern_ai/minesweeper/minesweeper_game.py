@@ -18,7 +18,9 @@ from typing import List, Optional, Set, Tuple
 
 Pos = Tuple[int, int]
 HIDDEN = -1        # value of a hidden cell in an observation
-MINE = -2          # value of a mine in the view shown after the game
+MINE = -2          # value of a mine in the view shown after the game (or of a filled cell shown as given)
+SHOWN_EMPTY = -3   # a board cell shown empty, without a number (used by other constraint puzzles)
+OUTSIDE = -4       # a cell outside the board, such as an unused margin cell (other constraint puzzles)
 
 
 class MinesweeperGame:

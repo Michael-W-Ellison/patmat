@@ -22,9 +22,10 @@ shown as MINE) and from what it sees while playing.
    without a violation is accepted.
 
    Two facts about the puzzle are learned the same way rather than assumed:
-   the board is the cells ever seen hidden (margins never are), and
-   whether a cell showing a clue can itself be a mine (in Minesweeper it
-   cannot; in Mosaic it can, so clue cells are then unknowns too).
+   the board is the cells ever seen hidden, shown empty or shown as a mine
+   (margins never are), and whether a cell showing a clue can itself be a
+   mine (in Minesweeper it cannot; in Mosaic it can, so clue cells are then
+   unknowns too). Mines shown during play (given cells) count as known.
 
 2. Deduce. Count and region constraints become linear equations "these
    unknown cells hold exactly r mines": an equation with r = 0 makes its
@@ -44,7 +45,7 @@ import json
 import random
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
-from .minesweeper_game import HIDDEN, MINE
+from .minesweeper_game import HIDDEN, MINE, SHOWN_EMPTY
 
 Pos = Tuple[int, int]
 _RING8 = [(dr, dc) for dr in (-1, 0, 1) for dc in (-1, 0, 1) if dr or dc]
@@ -138,7 +139,7 @@ class ConstraintLearner:
     def _observe(self, obs):
         for r, row in enumerate(obs):
             for c, v in enumerate(row):
-                if v == HIDDEN:
+                if v in (HIDDEN, SHOWN_EMPTY, MINE):
                     self._board.add((r, c))
                 elif v >= 0:
                     self._clues[(r, c)] = v
@@ -221,6 +222,7 @@ class ConstraintLearner:
         self._observe(obs)
         clues = {(r, c): obs[r][c] for r in range(rows) for c in range(cols) if obs[r][c] >= 0}
         unknown = {(r, c) for r in range(rows) for c in range(cols) if obs[r][c] == HIDDEN}
+        known_mines = {(r, c) for r in range(rows) for c in range(cols) if obs[r][c] == MINE}
         if self.clues_can_be_mines:
             unknown |= set(clues)
         eqs, lines = [], []
@@ -228,19 +230,21 @@ class ConstraintLearner:
             if kind == 'count':
                 for pos, v in clues.items():
                     near = _scope(pos, what, rows, cols)
-                    eqs.append(({p for p in near if p in unknown}, v if prop == 'mine' else len(near) - v))
+                    m = (v if prop == 'mine' else len(near) - v) - sum(1 for p in near if p in known_mines)
+                    eqs.append(({p for p in near if p in unknown}, m))
             elif kind == 'runs':
                 lines += [(on, off) for on, off in self._lines(rows, cols, self._board, clues)]
             else:
                 k = self.hypotheses[(kind, what, prop)]['k']
-                eqs += [({p for p in region if p in unknown}, k) for region in self._regions(what, self._board)]
-        return eqs, lines, unknown
+                eqs += [({p for p in region if p in unknown}, k - sum(1 for p in region if p in known_mines))
+                        for region in self._regions(what, self._board)]
+        return eqs, lines, unknown, known_mines
 
     def deduce(self, obs) -> Tuple[Set[Pos], Set[Pos]]:
         """(cells proven safe, cells proven mines) under the accepted constraints"""
         mines: Set[Pos] = set()
         safe: Set[Pos] = set()
-        eqs, lines, unknown = self._constraints(obs)
+        eqs, lines, unknown, known_mines = self._constraints(obs)
         changed = True
         while changed:
             changed = False
@@ -256,7 +260,8 @@ class ConstraintLearner:
                 elif r == len(rest):
                     found_mines |= rest
             for cells, runs in lines:
-                known = [True if p in mines else False if (p in safe or p not in unknown) else None for p in cells]
+                known = [True if p in mines or p in known_mines else False if (p in safe or p not in unknown)
+                         else None for p in cells]
                 if all(k is not None for k in known):
                     continue
                 options = _placements(runs, known)

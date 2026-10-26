@@ -4,10 +4,10 @@
 import random
 import unittest
 
-from constraint_puzzles import EMPTY, PUZZLES, mosaic, nonogram, orthogonal, placement, totals
+from constraint_puzzles import EMPTY, PUZZLES, count_solutions, mosaic, nonogram, orthogonal, placement, totals
 from evaluate_constraint_puzzles import attempt
 from minesweeper.constraint_learner import ConstraintLearner, _placements
-from minesweeper.minesweeper_game import HIDDEN, MINE
+from minesweeper.minesweeper_game import HIDDEN, MINE, OUTSIDE
 
 
 class TestPuzzles(unittest.TestCase):
@@ -15,7 +15,7 @@ class TestPuzzles(unittest.TestCase):
         p = orthogonal(1)
         for (r, c), v in p.clues.items():
             self.assertEqual(v, sum((r + dr, c + dc) in p.filled for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1))))
-        p = mosaic(1)
+        p = mosaic(1, rows=5, cols=5)
         for (r, c), v in p.clues.items():
             self.assertEqual(v, sum((r + dr, c + dc) in p.filled for dr in (-1, 0, 1) for dc in (-1, 0, 1)))
         p = totals(1)
@@ -38,8 +38,21 @@ class TestPuzzles(unittest.TestCase):
             shown = [p.clues[(i + m, k)] for k in range(m) if (i + m, k) in p.clues]
             self.assertEqual(shown, runs or [0])
 
+    def test_unique_solution(self):
+        small = {'orthogonal': lambda i: orthogonal(i, rows=5, cols=5), 'mosaic': lambda i: mosaic(i, rows=5, cols=5),
+                 'totals': totals, 'nonogram': nonogram, 'placement': placement}
+        for kind, make in small.items():
+            for i in range(3):
+                p = make(i)
+                sols = count_solutions(*p.constraints, limit=3)
+                self.assertEqual(len(sols), 1, kind)
+                self.assertEqual({q for q, v in sols[0].items() if v}, p.filled, kind)
+
     def test_placement_one_per_row_column_box(self):
         p = placement(3)
+        self.assertEqual(len(p.shown_filled), 3)
+        self.assertTrue(p.shown_filled <= p.filled)
+        self.assertTrue(all(p.observation()[r][c] == MINE for r, c in p.shown_filled))
         self.assertEqual(len(p.filled), 9)
         self.assertEqual({r for r, _ in p.filled}, set(range(9)))
         self.assertEqual({c for _, c in p.filled}, set(range(9)))
@@ -48,11 +61,11 @@ class TestPuzzles(unittest.TestCase):
     def test_play_protocol(self):
         p = totals(4)
         view = p.observation()
-        self.assertEqual(view[0][0], EMPTY)
-        self.assertTrue(all(view[r][c] == HIDDEN for r, c in p.playable))
+        self.assertEqual(view[0][0], OUTSIDE)
+        self.assertTrue(all(view[r][c] == (EMPTY if (r, c) in p.shown_empty else HIDDEN) for r, c in p.board))
         with self.assertRaises(ValueError):
             p.final_view()
-        empty = sorted(p.playable - p.filled)
+        empty = sorted(p.playable - p.filled - p.revealed)
         for pos in empty:
             p.reveal(pos)
         self.assertTrue(p.won())
@@ -62,8 +75,9 @@ class TestPuzzles(unittest.TestCase):
 class TestWidenedLearner(unittest.TestCase):
     def learn(self, kind, n=30):
         learner = ConstraintLearner(random.Random(0))
+        make = (lambda i: mosaic(i, rows=5, cols=5)) if kind == 'mosaic' else PUZZLES[kind]
         for i in range(n):
-            attempt(PUZZLES[kind](i), learner.choose, learner.end_game)
+            attempt(make(i), learner.choose, learner.end_game)
         return learner
 
     def test_each_puzzle_rule_is_discovered(self):
@@ -76,7 +90,8 @@ class TestWidenedLearner(unittest.TestCase):
         for kind, rules in expected.items():
             learner = self.learn(kind)
             self.assertEqual(set(learner.accepted()), rules, kind)
-        self.assertTrue(self.learn('mosaic').clues_can_be_mines)
+            if kind == 'mosaic':
+                self.assertTrue(learner.clues_can_be_mines)
 
     def test_line_placements(self):
         self.assertEqual(_placements([3], [None] * 4), [[True, True, True, False], [False, True, True, True]])
