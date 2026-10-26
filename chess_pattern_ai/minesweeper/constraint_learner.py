@@ -94,8 +94,8 @@ class ConstraintLearner:
             for r in range(rows):
                 for c in range(cols):
                     v = obs[r][c]
-                    if v == HIDDEN:
-                        continue
+                    if v < 0:
+                        continue            # hidden, or shown without a number: not a clue
                     near = _cells((r, c), NEIGHBOURHOODS[k], rows, cols)
                     mines = v if prop == 'mine' else len(near) - v
                     hidden = {p for p in near if obs[p[0]][p[1]] == HIDDEN}
