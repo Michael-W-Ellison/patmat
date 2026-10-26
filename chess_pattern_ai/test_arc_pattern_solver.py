@@ -515,5 +515,72 @@ class TestPartialMatches(unittest.TestCase):
         self.assertTrue(any(np.array_equal(c.predict(test_in), test_out) for c in chains))
 
 
+class TestMirroringAboutObjects(unittest.TestCase):
+    def test_complete_each_object(self):             # family Q
+        # each object is completed to left-right symmetry about its own centre (marked by a 5 column)
+        def make(objs, h, w):
+            g = np.zeros((h, w), dtype=int)
+            for r, c, cells in objs:
+                g[r:r + 3, c + 2] = 5
+                for dr, dc in cells:
+                    g[r + dr, c + dc] = 2
+            o = g.copy()
+            for r, c, cells in objs:
+                for dr, dc in cells:
+                    o[r + dr, c + 4 - dc] = 2
+            return g.tolist(), o.tolist()
+        p1 = make([(0, 0, [(0, 0), (1, 1)]), (4, 5, [(2, 1)])], 7, 10)
+        p2 = make([(1, 1, [(1, 0), (2, 1), (0, 1)])], 5, 7)
+        test = make([(0, 3, [(0, 1), (1, 0)]), (4, 0, [(1, 1)])], 8, 9)
+        t = task([p1, p2], *test)
+        e = best(t)
+        self.assertTrue(right(e, t))
+
+    def test_reflect_across_nearest_object(self):    # family Q
+        # 5-pieces jump across the nearest wall of 2 (reflected about its near edge)
+        # (a still 7 rules out flipping the whole grid)
+        g1 = [[5, 0, 0, 0, 0], [0, 0, 0, 0, 0], [2, 2, 2, 2, 2], [0, 0, 0, 0, 0], [0, 0, 0, 0, 7]]
+        o1 = [[0, 0, 0, 0, 0], [0, 0, 0, 0, 0], [2, 2, 2, 2, 2], [0, 0, 0, 0, 0], [5, 0, 0, 0, 7]]
+        g2 = [[7, 0, 0, 0], [0, 0, 0, 0], [2, 2, 2, 2], [0, 0, 0, 0], [0, 0, 5, 5]]
+        o2 = [[7, 0, 5, 5], [0, 0, 0, 0], [2, 2, 2, 2], [0, 0, 0, 0], [0, 0, 0, 0]]
+        test = [[0, 2, 0, 0, 0], [0, 2, 0, 0, 0], [0, 2, 0, 0, 5], [0, 2, 0, 0, 0]]
+        out = [[0, 2, 0, 0, 0], [0, 2, 0, 0, 0], [0, 2, 0, 0, 0], [0, 2, 0, 0, 0]]
+        # the piece 3 columns right of the wall lands 3 columns left of it, outside the grid: no answer
+        t = task([(g1, o1), (g2, o2)], test, out)
+        found, _ = find_patterns(t)
+        self.assertFalse(any(f['family'] == 'Q' for f in found))
+        test = [[0, 0, 0, 2, 0, 0], [0, 0, 0, 2, 0, 5], [0, 0, 0, 2, 0, 0]]
+        out = [[0, 0, 0, 2, 0, 0], [0, 5, 0, 2, 0, 0], [0, 0, 0, 2, 0, 0]]
+        t = task([(g1, o1), (g2, o2)], test, out)
+        self.assertTrue(right(best(t), t))
+
+    def test_mirror_toward_pointed_side(self):       # family Q
+        # the 1-shape is mirrored beside itself on the side the 3-arrow points to
+        def make(shape_at, arrow, h, w):
+            g = np.zeros((h, w), dtype=int)
+            r, c = shape_at
+            g[r, c:c + 2] = 1
+            g[r + 1, c] = 1
+            ar, ac, side = arrow
+            cells = {'E': [(0, 0), (0, 1), (0, 2), (-1, 1), (1, 1), (0, 3)],
+                     'W': [(0, 0), (0, 1), (0, 2), (-1, 2), (1, 2), (0, -1)]}[side]
+            for dr, dc in cells:
+                g[ar + dr, ac + dc] = 3
+            o = g.copy()
+            if side == 'E':
+                o[r, c + 2:c + 4] = [1, 1]
+                o[r + 1, c + 3] = 1
+            else:
+                o[r, c - 2:c] = [1, 1]
+                o[r + 1, c - 1] = 1
+            return g.tolist(), o.tolist()
+        p1 = make((1, 2), (5, 1, 'E'), 8, 8)
+        p2 = make((0, 4), (4, 2, 'W'), 7, 8)
+        test = make((2, 3), (6, 2, 'E'), 9, 9)
+        t = task([p1, p2], *test)
+        e = best(t)
+        self.assertTrue(right(e, t))
+
+
 if __name__ == '__main__':
     unittest.main()

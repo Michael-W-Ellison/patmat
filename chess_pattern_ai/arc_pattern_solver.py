@@ -60,6 +60,13 @@ Pattern families:
                      or foreground's centre, the cells of one colour, a chosen
                      object, or the best-fitting centre; cells under a mask
                      colour repaired from their images (whole grid or patch)
+  Q mirror objects   mirroring about objects: each object completed to its own
+                     symmetry (about its centre or its cells of one colour);
+                     objects reflected across the nearest other object (its
+                     centre line, near or far edge), moved or copied; a
+                     mirrored copy beside each object toward a fixed side or
+                     the side the nearest object points to (or that side
+                     turned by a quarter, half or three-quarter turn)
   O relative         the same pattern of cells placed around every object (in
                      cells, or in units of its size; shown in full by at least
                      two objects in the examples); objects lining up with
@@ -1464,6 +1471,168 @@ def symmetry_patterns(pairs, bg, accept: Optional[Callable] = None) -> List[Patt
     return found
 
 
+# ------------------------------------------------------------- family Q
+
+def _object_centre(o: Obj) -> Tuple[int, int]:
+    """Centre of the object's bounding box in doubled coordinates"""
+    return o.bbox[0] + o.bbox[2], o.bbox[1] + o.bbox[3]
+
+
+def _paint_images(out: Array, t: Array, cells, ops: Sequence[str], centre, bg: int, only_bg: bool = True):
+    """Paint the images of `cells` under the symmetry ops about `centre` onto `out`"""
+    h, w = t.shape
+    for r, c in cells:
+        for op in ops:
+            R2, C2 = _SYM_MAPS[op](2 * r, 2 * c, *centre)
+            if R2 % 2 or C2 % 2:
+                continue
+            y, x = R2 // 2, C2 // 2
+            if 0 <= y < h and 0 <= x < w and (not only_bg or out[y, x] == bg):
+                out[y, x] = t[r, c]
+
+
+def object_symmetry(t: Array, bg: int, mode: str, ops: Sequence[str], centre_color: Optional[int]) -> Array:
+    """Every object completed to the symmetry about its own centre (or the centre of its cells of one colour)"""
+    out = t.copy()
+    for o in segment(t, bg, mode):
+        if centre_color is None:
+            centre = _object_centre(o)
+        else:
+            marks = [p for p in o.cells if t[p] == centre_color]
+            if not marks:
+                continue
+            rr, cc = zip(*marks)
+            centre = (min(rr) + max(rr), min(cc) + max(cc))
+        _paint_images(out, t, o.cells, ops, centre, bg)
+    return out
+
+
+def _pointing(o: Obj) -> Optional[str]:
+    """The side an object points to: where its cells lie off its centre (None if balanced)"""
+    rr, cc = zip(*o.cells)
+    dy = 2 * sum(rr) / len(rr) - (o.bbox[0] + o.bbox[2])
+    dx = 2 * sum(cc) / len(cc) - (o.bbox[1] + o.bbox[3])
+    if abs(dy) == abs(dx):
+        return None
+    return ('S' if dy > 0 else 'N') if abs(dy) > abs(dx) else ('E' if dx > 0 else 'W')
+
+
+def _reflect(cells, t: Array, axis: str, line: int):
+    """Cells mirrored across a row line (axis 'rows') or column line ('cols'): c' = line - c"""
+    return [((line - r, c) if axis == 'rows' else (r, line - c), t[r, c]) for r, c in cells]
+
+
+def _side_line(o: Obj, side: str, shared: bool) -> Tuple[str, int]:
+    """The line beside one edge of the object (through its edge cells if shared, else just beyond)"""
+    r0, c0, r1, c1 = o.bbox
+    k = 0 if shared else 1
+    return {'N': ('rows', 2 * r0 - k), 'S': ('rows', 2 * r1 + k),
+            'W': ('cols', 2 * c0 - k), 'E': ('cols', 2 * c1 + k)}[side]
+
+
+def _draw(out: Array, painted, bg: int) -> bool:
+    h, w = out.shape
+    for (r, c), v in painted:
+        if not (0 <= r < h and 0 <= c < w):
+            return False
+        if out[r, c] == bg:
+            out[r, c] = v
+    return True
+
+
+def mirror_patterns(pairs, bg) -> List[Pattern]:
+    found = []
+    if any(a.shape != b.shape for a, b in pairs) or all(np.array_equal(a, b) for a, b in pairs):
+        return found
+    additive = all(np.all(a[a != b] == bg) for a, b in pairs)
+    common = sorted(set.intersection(*[set(np.unique(a).tolist()) for a, _ in pairs]) - {bg})
+    # 1. Every object completed to its own symmetry
+    if additive:
+        for mode in ('multi8', 'color8'):
+            for centre_color in [None] + common:
+                for gname, ops in SYMMETRY_GROUPS.items():
+                    fn = lambda t, mode=mode, ops=ops, cc=centre_color: object_symmetry(t, bg, mode, ops, cc)
+                    if _fits(fn, pairs):
+                        found.append(Pattern('Q', f'complete each object[{mode}] to {gname} symmetry about '
+                                             f'{"its centre" if centre_color is None else f"its cells of {centre_color}"}',
+                                             3 + (centre_color is not None), fn))
+    for mode in ('color4', 'color8', 'multi8'):
+        seg = [segment(a, bg, mode) for a, _ in pairs]
+        moved, still = set(), set()
+        for (a, b), objs in zip(pairs, seg):
+            for o in objs:
+                (still if all(b[p] == a[p] for p in o.cells) else moved).add(o.props['color'])
+        # 2. Objects of the moving colours reflected across the nearest other object
+        if moved and still and not moved & still:
+            for where in ('centre', 'near edge', 'far edge'):
+                for keep in (False, True):
+                    def predict(t, mode=mode, moving=frozenset(moved), where=where, keep=keep):
+                        objs = segment(t, bg, mode)
+                        refs = [o for o in objs if o.props['color'] not in moving]
+                        out = t.copy()
+                        movers = [o for o in objs if o.props['color'] in moving]
+                        if not refs or not movers:
+                            return None
+                        if not keep:
+                            for o in movers:
+                                out[tuple(zip(*o.cells))] = bg
+                        for o in movers:
+                            ref = min(refs, key=lambda x: _gap(o, x))
+                            (my, mx), (ry, rx) = _object_centre(o), _object_centre(ref)
+                            axis = 'rows' if abs(my - ry) >= abs(mx - rx) else 'cols'
+                            lo, hi = (ref.bbox[0], ref.bbox[2]) if axis == 'rows' else (ref.bbox[1], ref.bbox[3])
+                            towards_low = (my if axis == 'rows' else mx) < (ry if axis == 'rows' else rx)
+                            line = {'centre': lo + hi,
+                                    'near edge': 2 * (lo if towards_low else hi),
+                                    'far edge': 2 * (hi if towards_low else lo)}[where]
+                            if not _draw(out, _reflect(o.cells, t, axis, line), bg):
+                                return None
+                        return out
+                    if _fits(predict, pairs):
+                        found.append(Pattern('Q', f'objects[{mode}] of {sorted(moved)} {"copied" if keep else "moved"} '
+                                             f'by reflection across the nearest other object\'s {where}',
+                                             4 + keep, predict))
+        # 3. A mirrored copy beside each object of the added colours, toward a side
+        added = {int(v) for a, b in pairs for v in np.unique(b[(a != b) & (b != bg)])}
+        if not added:
+            continue
+        for side in ('N', 'S', 'E', 'W', 'pointed', 'pointed+90', 'pointed+180', 'pointed+270'):
+            for shared in (False, True):
+                for drop_marker in ((False, True) if side.startswith('pointed') else (False,)):
+                    def predict(t, mode=mode, colors=frozenset(added), side=side, shared=shared, drop=drop_marker):
+                        objs = segment(t, bg, mode)
+                        out = t.copy()
+                        sources = [o for o in objs if o.props['color'] in colors]
+                        others = [o for o in objs if o.props['color'] not in colors]
+                        if not sources:
+                            return None
+                        for o in sources:
+                            s = side
+                            if side.startswith('pointed'):
+                                if not others:
+                                    return None
+                                marker = min(others, key=lambda x: _gap(o, x))
+                                s = _pointing(marker)
+                                if s is None:
+                                    return None
+                                turns = int(side[8:] or 0) // 90       # clockwise quarter turns
+                                order = ('N', 'E', 'S', 'W')
+                                s = order[(order.index(s) + turns) % 4]
+                                if drop:
+                                    out[tuple(zip(*marker.cells))] = bg
+                            axis, line = _side_line(o, s, shared)
+                            if not _draw(out, _reflect(o.cells, t, axis, line), bg):
+                                return None
+                        return out
+                    if _fits(predict, pairs):
+                        found.append(Pattern('Q', f'objects[{mode}] of {sorted(added)} mirrored beside themselves '
+                                             f'{side if not side.startswith("pointed") else "toward the side the nearest object points to" + (f", turned {side[8:]} degrees clockwise" if side[8:] else "")}'
+                                             f'{" (edge shared)" if shared else ""}{", marker removed" if drop_marker else ""}',
+                                             4 + side.startswith('pointed') + (side not in ('N', 'S', 'E', 'W', 'pointed'))
+                                             + drop_marker, predict))
+    return found
+
+
 # ------------------------------------------------------------- family O
 
 def _assign_to_anchors(a: Array, b: Array, anchors: List[Obj]) -> Optional[List[List[Tuple[int, int, int]]]]:
@@ -2169,7 +2338,7 @@ def combination_patterns(pairs, bg, deadline: float) -> List[Pattern]:
 FAMILIES = {'A': object_action_patterns, 'B': select_crop_patterns, 'C': transform_patterns,
             'D': move_patterns, 'E': resize_patterns, 'F': relation_patterns,
             'H': count_patterns, 'I': build_patterns, 'J': role_patterns, 'K': ray_patterns,
-            'M': param_patterns, 'N': symmetry_patterns, 'O': relative_patterns}
+            'M': param_patterns, 'N': symmetry_patterns, 'O': relative_patterns, 'Q': mirror_patterns}
 COMBINATION_SECONDS = 60     # time budget for combinations, used only when no single pattern fits
 
 
