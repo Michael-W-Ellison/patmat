@@ -11,7 +11,7 @@ shown, as the mines are after a game of Minesweeper.
 Views use the learner's values: a number >= 0 for a clue, HIDDEN for a
 cell not yet uncovered, EMPTY for a cell shown without a number (an
 uncovered empty cell, an unused margin cell), and in the final view MINE
-for a filled cell.
+for every filled cell, clue cells included.
 
 Puzzles (each generated from a seed):
 - orthogonal:  clue = filled cells among the clue cell's 4 orthogonal
@@ -78,7 +78,7 @@ class BinaryPuzzle:
         if not self.is_over():
             raise ValueError('the filled cells are shown only when the attempt is over')
         view = self.observation()
-        for r, c in self.filled & self.playable:
+        for r, c in self.filled:            # filled clue cells too (a player keeps the clues it saw)
             view[r][c] = MINE
         return view
 

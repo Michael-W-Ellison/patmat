@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Unit tests for constraint_puzzles (run: python3 -m unittest test_constraint_puzzles)"""
 
+import random
 import unittest
 
-from constraint_puzzles import EMPTY, mosaic, nonogram, orthogonal, placement, totals
+from constraint_puzzles import EMPTY, PUZZLES, mosaic, nonogram, orthogonal, placement, totals
+from evaluate_constraint_puzzles import attempt
+from minesweeper.constraint_learner import ConstraintLearner, _placements
 from minesweeper.minesweeper_game import HIDDEN, MINE
 
 
@@ -54,6 +57,47 @@ class TestPuzzles(unittest.TestCase):
             p.reveal(pos)
         self.assertTrue(p.won())
         self.assertTrue(all(p.final_view()[r][c] == MINE for r, c in p.filled))
+
+
+class TestWidenedLearner(unittest.TestCase):
+    def learn(self, kind, n=30):
+        learner = ConstraintLearner(random.Random(0))
+        for i in range(n):
+            attempt(PUZZLES[kind](i), learner.choose, learner.end_game)
+        return learner
+
+    def test_each_puzzle_rule_is_discovered(self):
+        expected = {
+            'mosaic': {('count', '3x3 block', 'mine')},
+            'totals': {('count', 'its row and column', 'mine')},
+            'nonogram': {('runs', 'line', 'mine')},
+            'placement': {('region', 'row', 'mine'), ('region', 'column', 'mine'), ('region', '3x3 box', 'mine')},
+        }
+        for kind, rules in expected.items():
+            learner = self.learn(kind)
+            self.assertEqual(set(learner.accepted()), rules, kind)
+        self.assertTrue(self.learn('mosaic').clues_can_be_mines)
+
+    def test_line_placements(self):
+        self.assertEqual(_placements([3], [None] * 4), [[True, True, True, False], [False, True, True, True]])
+        self.assertEqual(_placements([1, 1], [None, None, None]), [[True, False, True]])
+        self.assertEqual(_placements([0], [None, None]), [[False, False]])
+        self.assertEqual(_placements([2], [None, True, None, False]), [[True, True, False, False], [False, True, True, False]])
+
+    def test_run_and_region_deduction(self):
+        learner = ConstraintLearner(random.Random(0), accept_after=0)
+        learner.hypotheses = {('runs', 'line', 'mine'): {'confirmed': 1, 'violated': 0}}
+        H, E = HIDDEN, EMPTY
+        # a 3-run in a 4-cell row fixes its two middle cells
+        obs = [[3, H, H, H, H],
+               [E, H, H, H, H]]
+        safe, mines = learner.deduce(obs)
+        self.assertEqual(mines, {(0, 2), (0, 3)})
+        learner = ConstraintLearner(random.Random(0), accept_after=0)
+        learner.hypotheses = {('region', 'row', 'mine'): {'confirmed': 1, 'violated': 0, 'k': 1}}
+        learner._board = {(0, c) for c in range(3)}
+        safe, mines = learner.deduce([[E, E, H]])       # the one hidden cell left in the row holds its mine
+        self.assertEqual(mines, {(0, 2)})
 
 
 if __name__ == '__main__':

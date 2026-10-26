@@ -117,11 +117,13 @@ class TestConstraintLearner(unittest.TestCase):
         learner = ConstraintLearner(random.Random(0), accept_after=50)
         for i in range(10):
             play_game(ad, i, learner.choose, learner.end_game)
-        self.assertEqual(learner.accepted(), [('mine', '8 neighbours')])
+        # a revealed cell is never a mine, so counting its 3x3 block (itself included) is the
+        # same rule; nothing in Minesweeper tells the two apart
+        self.assertEqual(set(learner.accepted()), {('count', '8 neighbours', 'mine'), ('count', '3x3 block', 'mine')})
 
     def test_deduction(self):
         learner = ConstraintLearner(random.Random(0), accept_after=0)
-        learner.hypotheses = {('mine', '8 neighbours'): {'confirmed': 1, 'violated': 0}}
+        learner.hypotheses = {('count', '8 neighbours', 'mine'): {'confirmed': 1, 'violated': 0}}
         H = HIDDEN
         # a 1 touching a single hidden cell makes it a mine; the 1 next to it is then satisfied,
         # so its other hidden neighbour is safe
