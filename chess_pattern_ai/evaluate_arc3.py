@@ -2,7 +2,10 @@
 """
 Play ARC-AGI-3 games with the effect learner (arc3_agent.py)
 
-    python3 evaluate_arc3.py <environments_dir> [episodes] [max_actions] [seed] [game_id ...]
+    python3 evaluate_arc3.py <environments_dir> [episodes] [max_actions] [seed] [agent] [game_id ...]
+
+agent: 'cell' (Arc3Agent, the cell-level effect learner) or 'object'
+(object_agent.ObjectAgent); default 'object'.
 
 Games are loaded by the ARC-AGI toolkit in offline mode from
 <environments_dir> (folders holding metadata.json and the game's .py file).
@@ -19,6 +22,9 @@ import random
 import sys
 
 from arc3_agent import SIMPLE_ACTIONS, Arc3Agent, GridReader
+from object_agent import ObjectAgent
+
+AGENTS = {'cell': Arc3Agent, 'object': ObjectAgent}
 
 
 def play(env, choose, max_actions: int, agent=None):
@@ -31,8 +37,6 @@ def play(env, choose, max_actions: int, agent=None):
     while used < max_actions and fd.state != GameState.WIN:
         if fd.state == GameState.GAME_OVER:
             losses += 1
-            if agent:
-                agent.lost()
             fd = env.step(GameAction.RESET)
             grid = read(fd.frame[-1])
             continue
@@ -48,7 +52,11 @@ def play(env, choose, max_actions: int, agent=None):
             since = 0
             if agent:
                 agent.level_won(grid, a)
-        elif nxt.state != GameState.GAME_OVER and agent:
+        elif nxt.state == GameState.GAME_OVER and agent:
+            if getattr(agent, 'learns_from_losses', False):
+                agent.after_step(grid, a, after)
+            agent.lost(grid, a)
+        elif agent:
             agent.after_step(grid, a, after)
         fd, grid = nxt, after
     return len(per_level), fd.win_levels, per_level, losses
@@ -62,9 +70,10 @@ def main():
     max_actions = int(sys.argv[3]) if len(sys.argv) > 3 else 2000
     seed = int(sys.argv[4]) if len(sys.argv) > 4 else 0
     arc = Arcade(operation_mode=OperationMode.OFFLINE, environments_dir=env_dir)
-    games = sys.argv[5:] or sorted(e.game_id for e in arc.get_environments())
+    make = AGENTS[sys.argv[5]] if len(sys.argv) > 5 else ObjectAgent
+    games = sys.argv[6:] or sorted(e.game_id for e in arc.get_environments())
     for gid in games:
-        agent = Arc3Agent(random.Random(seed))
+        agent = make(random.Random(seed))
         rng = random.Random(seed)
         print(f'== {gid}')
         for ep in range(episodes):
@@ -73,8 +82,7 @@ def main():
             print(f'   episode {ep + 1}: levels {done}/{total}, actions per level {per_level}, losses {losses}')
         done, total, per_level, losses = play(arc.make(gid), lambda g, acts: rng.choice(acts), max_actions)
         print(f'   random: levels {done}/{total}, actions per level {per_level}, losses {losses}')
-        print(f'   agent: values {agent.agent_values}, directions {agent.directions}, '
-              f'model {getattr(agent.model(), "name", None)}, winning moves {sorted(agent.win_keys)}')
+        print(f'   agent: {agent.describe()}')
 
 
 if __name__ == '__main__':

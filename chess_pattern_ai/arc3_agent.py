@@ -32,18 +32,23 @@ from effect_learner import EffectLearner
 
 SIMPLE_ACTIONS = (1, 2, 3, 4, 5)
 MAX_SCALE = 16
+MARK_TOLERANCE = 0.1
 WIN_KEY_CELLS = 2
 
 
-def _scale_fit(frame: np.ndarray, k: int, oy: int, ox: int) -> Optional[np.ndarray]:
-    """The k x k blocks of the frame from offset (oy, ox) if every block off the outer ring is uniform"""
+def _scale_fit(frame: np.ndarray, k: int, oy: int, ox: int, tolerance: float = 0.0) -> Optional[np.ndarray]:
+    """
+    The k x k blocks of the frame from offset (oy, ox) if the blocks off the
+    outer ring are uniform (all but a share `tolerance` of them)
+    """
     h, w = frame.shape
     rows, cols = (h - oy) // k, (w - ox) // k
     if rows < 5 or cols < 5:
         return None             # (at least 3 x 3 blocks off the ring, so a plain background does not pass)
     blocks = frame[oy:oy + rows * k, ox:ox + cols * k].reshape(rows, k, cols, k).swapaxes(1, 2).reshape(rows, cols, k * k)
     inner = blocks[1:-1, 1:-1]
-    if (inner != inner[..., :1]).any():
+    mixed = (inner != inner[..., :1]).any(axis=2)
+    if mixed.sum() > tolerance * mixed.size:
         return None
     return blocks
 
@@ -69,21 +74,25 @@ def find_scale(frame: np.ndarray) -> Tuple[int, int, int]:
 
 def cell_grid(frame: np.ndarray, scale: Optional[Tuple[int, int, int]] = None) -> np.ndarray:
     k, oy, ox = scale or find_scale(frame)
-    blocks = _scale_fit(frame, k, oy, ox)
+    blocks = _scale_fit(frame, k, oy, ox, tolerance=1.0)
     if blocks is None:
         return np.asarray(frame, dtype=int)
     return _modes(blocks)
 
 
 class GridReader:
-    """Cell grids for one game: the scale is found again when a frame no longer fits it (a new level)"""
+    """
+    Cell grids for one game: the scale is kept while a frame fits it (all but
+    MARK_TOLERANCE of the blocks off the ring uniform: marks drawn at the
+    pixel level over a few cells), else found again (a new level)
+    """
 
     def __init__(self):
         self.scale: Optional[Tuple[int, int, int]] = None
 
     def __call__(self, frame) -> np.ndarray:
         frame = np.asarray(frame)
-        if self.scale is None or _scale_fit(frame, *self.scale) is None:
+        if self.scale is None or _scale_fit(frame, *self.scale, tolerance=MARK_TOLERANCE) is None:
             self.scale = find_scale(frame)
         return cell_grid(frame, self.scale)
 
@@ -117,6 +126,10 @@ class Arc3Agent(EffectLearner):
             self.win_keys.add(key)
         self.plan = []
 
-    def lost(self):
+    def lost(self, grid=None, action=None):
         self.losses += 1
         self.plan = []
+
+    def describe(self) -> str:
+        return (f'values {self.agent_values}, directions {self.directions}, '
+                f'model {getattr(self.model(), "name", None)}, winning moves {sorted(self.win_keys)}')
