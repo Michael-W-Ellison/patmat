@@ -65,6 +65,21 @@ offsets and swap the same two values for every value present, a plan to
 remove a value is found by solving the presses modulo 2 (as for Lights
 Out) instead of by search.
 
+Other players: when an action produces several frames, the first shows
+the agent's own effect (learned as above) and each later frame the move
+of another player, in turn (as many players as frames). Each other
+player's moves are learned like clicks: the first changed cell is taken as
+the cell it acted on, with a click model per value of that cell. A level
+won with no other goal explaining it teaches a line goal, "k cells of
+value v in a straight line" (rows, columns, diagonals), when the agent's
+effect made the longest line of v grow to k >= 3; a game lost in another
+player's frame teaches a line loss the same way for the value that player
+placed. With other players' moves known, the agent plans by minimax: its
+own moves, then each other player's possible moves (all assumed to play
+against it), to MAX_DEPTH of its own moves, a win counting 1 and a loss -1,
+discounted by DISCOUNT per move so that quicker wins and later losses are
+preferred; moves of equal value are chosen among at random.
+
 Planning: breadth-first search over (grid, agent cells) states predicted
 by the rules, up to BFS_LIMIT states. Under the rules learned an agent
 only grows, so once the shape goal is known, a state whose agent no longer
@@ -90,6 +105,25 @@ NOOP_STATES = 3
 OUTCOMES = ('block', 'merge', 'push')
 CLICK = 6
 MAX_CLICKS = 64
+MAX_DEPTH = 5
+DISCOUNT = 0.9
+LINE_DIRS = ((0, 1), (1, 0), (1, 1), (1, -1))
+
+
+def longest_line(grid, v) -> int:
+    """The most cells of value v in a straight line (row, column or diagonal)"""
+    best = 0
+    cells = {(int(r), int(c)) for r, c in np.argwhere(grid == v)}
+    for p in cells:
+        for d in LINE_DIRS:
+            if (p[0] - d[0], p[1] - d[1]) in cells:
+                continue                        # not the start of a line
+            n, q = 0, p
+            while q in cells:
+                n += 1
+                q = (q[0] + d[0], q[1] + d[1])
+            best = max(best, n)
+    return best
 
 
 class ClickModel:
@@ -191,6 +225,7 @@ def shifted(cells, d) -> FrozenSet[Pos]:
 
 class ObjectAgent:
     learns_from_losses = True
+    uses_frames = True
 
     def __init__(self, rng: Optional[random.Random] = None):
         self.rng = rng or random.Random()
@@ -216,6 +251,9 @@ class ObjectAgent:
         self.absent_goals: set = set()              # values whose removal won a level
         self.absent_rejected: set = set()           # values removed without winning
         self.trying: Optional[int] = None           # the value a plan is removing to test it as the goal
+        self.others: List[Dict[int, ClickModel]] = []   # per other player (later frames): its move models
+        self.line_goals: set = set()                # (value, k): k of the value in a line wins
+        self.line_losses: set = set()               # (value, k): k of the value in a line loses
         self.plan: List = []
         self.wins = self.losses = 0
         self.moves_by = {'planned': 0, 'explored': 0}
@@ -609,14 +647,21 @@ class ObjectAgent:
 
     def _goal_trials(self, grid) -> set:
         """Values to try as "no cell holds v" goals: only while no goal is known and clicks change something"""
-        if self.win_contacts or self.shape_goal or self.absent_goals:
+        if self.win_contacts or self.shape_goal or self.absent_goals or self.line_goals:
             return set()
         if not any(m.kind() in ('map', 'offsets') for m in self.click_models.values()):
             return set()
         return set(np.unique(grid).tolist()) - {self.bg} - self._walls() - self.absent_rejected
 
+    @staticmethod
+    def _lines(grid, lines) -> bool:
+        return any(longest_line(grid, v) >= k for v, k in lines)
+
     def wins_with(self, grid, agent, action, nxt) -> bool:
         if self._removes(grid, nxt, self.absent_goals) is not None:
+            return True
+        if self.line_goals and nxt is not None and self._lines(nxt[0], self.line_goals) \
+                and not self._lines(grid, self.line_goals):
             return True
         d = self.directions.get(action)
         if agent is None or d is None:
@@ -645,9 +690,21 @@ class ObjectAgent:
                     return True
         return False
 
-    def level_won(self, grid, action):
+    def _grown_lines(self, before, after) -> set:
+        """(v, k) for values placed in `after` whose longest line grew to k >= 3"""
+        out = set()
+        for v in np.unique(after).tolist():
+            if v == self.bg or (after == v).sum() <= (before == v).sum():
+                continue
+            k = longest_line(after, v)
+            if k >= 3 and k > longest_line(before, v):
+                out.add((v, k))
+        return out
+
+    def level_won(self, grid, action, frames=None):
         self.wins += 1
         self.hidden_walls = set()
+        known_goals = (len(self.win_contacts), self.shape_goal, len(self.absent_goals))
         if isinstance(action, tuple):
             if self.trying is not None:
                 self.absent_goals.add(self.trying)
@@ -655,6 +712,11 @@ class ObjectAgent:
             if nxt is not None:
                 self.absent_goals |= {v for v in np.unique(grid).tolist() if not (nxt[0] == v).any()}
         self.trying = None
+        own = frames[0] if frames and frames[0].shape == grid.shape and not np.array_equal(frames[0], grid) \
+            else None
+        if own is None:
+            nxt = self.predict(grid, self.agent, action)
+            own = nxt[0] if nxt is not None and nxt[0].shape == grid.shape else None
         agent, d = self.agent, self.directions.get(action)
         if agent is not None and d is not None:
             objs = self._contacts(grid, agent, d) or []
@@ -674,12 +736,16 @@ class ObjectAgent:
                         break
                 else:
                     self.win_contacts |= {pattern(grid, o) for o in objs}
+        if own is not None and known_goals == (len(self.win_contacts), self.shape_goal, len(self.absent_goals)):
+            self.line_goals |= self._grown_lines(grid, own)       # nothing else explains the win
         self._new_level()
 
-    def lost(self, grid=None, action=None):
+    def lost(self, grid=None, action=None, frames=None):
         self.losses += 1
         if grid is not None:
             self.losing.add((self._key(grid, self._before_agent), action))
+        if frames and len(frames) > 1 and frames[-1].shape == frames[-2].shape:
+            self.line_losses |= self._grown_lines(frames[-2], frames[-1])     # lost in another player's frame
         self._new_level()
 
     def _new_level(self):
@@ -697,7 +763,83 @@ class ObjectAgent:
         self._new_level()
 
     # ---------------------------------------------------------- planning
+    # ------------------------------------------------------ other players
+    def _others_known(self) -> bool:
+        return any(m.kind() in ('map', 'offsets') for d in self.others for m in d.values())
+
+    def _other_moves(self, i, grid) -> List[np.ndarray]:
+        out, seen = [], set()
+        for v, m in self.others[i].items():
+            if m.kind() not in ('map', 'offsets'):
+                continue
+            done = set()
+            for r, c in np.argwhere(grid == v):
+                p = (int(r), int(c))
+                if p in done:
+                    continue
+                obj = self._clicked(grid, p)
+                if m.kind() == 'map':
+                    done |= obj
+                g = m.predict(grid, p, obj)
+                if g is not None and not np.array_equal(g, grid) and g.tobytes() not in seen:
+                    seen.add(g.tobytes())
+                    out.append(g)
+        return out
+
+    def _minimax(self, grid, actions):
+        """(value, best actions) of the agent's move here, against the other players"""
+        memo = {}
+
+        def ours(g, agent, depth):
+            key = ('us', g.tobytes(), depth)
+            if key in memo:
+                return memo[key]
+            best, acts = None, []
+            for a in self._actions(g, actions):
+                nxt = self.predict(g, agent, a)
+                if nxt is None or nxt[0].shape != g.shape or np.array_equal(nxt[0], g):
+                    continue
+                if self.wins_with(g, agent, a, nxt):
+                    v = 1.0
+                elif self._lines(nxt[0], self.line_losses):
+                    v = -1.0
+                elif depth <= 1:
+                    v = 0.0
+                else:
+                    v = DISCOUNT * theirs(nxt[0], nxt[1], 0, depth)
+                if best is None or v > best:
+                    best, acts = v, [a]
+                elif v == best:
+                    acts.append(a)
+            memo[key] = (best if best is not None else 0.0, acts)
+            return memo[key]
+
+        def theirs(g, agent, i, depth):
+            if i == len(self.others):
+                return ours(g, agent, depth - 1)[0]
+            key = ('them', g.tobytes(), i, depth)
+            if key in memo:
+                return memo[key]
+            moves = self._other_moves(i, g)
+            if not moves:
+                v = theirs(g, agent, i + 1, depth)
+            else:
+                v = min(-1.0 if self._lines(m, self.line_losses) else theirs(m, agent, i + 1, depth) for m in moves)
+            memo[key] = v
+            return v
+        return ours(grid, self.agent, MAX_DEPTH)
+
     def make_plan(self, grid, actions) -> Optional[List]:
+        if self._others_known():
+            # explore what is not known first (a value not clicked yet), then play the minimax move
+            unknown = [a for a in self._actions(grid, actions) if self.predict(grid, self.agent, a) is None]
+            value, best = self._minimax(grid, actions)
+            if best and (value != 0 or not unknown or self.line_goals):
+                self.exploring = False
+                return [self.rng.choice(best)]
+            if unknown:
+                self.exploring = True
+                return [unknown[0]]
         start = (grid, self.agent)
         k0 = self._key(*start)
         parent = {k0: None}
@@ -769,7 +911,31 @@ class ObjectAgent:
             return self.rng.choice(unknown or options)
         return ('click', self.rng.randrange(grid.shape[0]), self.rng.randrange(grid.shape[1]))
 
-    def after_step(self, before, action, after):
+    def _learn_others(self, frames):
+        """Each frame after the first: the move of another player, learned like a click"""
+        for i, (prev, cur) in enumerate(zip(frames, frames[1:])):
+            while len(self.others) <= i:
+                self.others.append({})
+            if prev.shape != cur.shape:
+                continue
+            changed = sorted((int(r), int(c)) for r, c in np.argwhere(prev != cur))
+            if not changed:
+                continue
+            cell = changed[0]
+            self.others[i].setdefault(int(prev[cell]), ClickModel()).update(prev, cell, self._clicked(prev, cell), cur)
+
+    def after_step(self, before, action, after, frames=None):
+        if frames and len(frames) > 1:
+            self._learn_others(frames)
+            own = frames[0]
+            predicted = self.predict(before, self.agent, action)
+            self.observe(before, action, own)
+            if self.agent is not None and not all(after[p] == own[p] for p in self.agent):
+                self.agent = None
+            if predicted is None or predicted[0].shape != own.shape or not np.array_equal(predicted[0], own):
+                self.plan = []
+            self.plan = []                      # (other players moved: plan again from what they did)
+            return
         predicted = self.predict(before, self.agent, action)
         self.observe(before, action, after)
         if self.trying is not None and before.shape == after.shape and not (after == self.trying).any():
@@ -784,4 +950,6 @@ class ObjectAgent:
                 f'contact rules {len(self.rules)}, win contacts {len(self.win_contacts)}, '
                 f'shape goal {self.shape_goal}, start patterns {len(self.start_patterns)}, '
                 f'clicks {({v: m.kind() for v, m in sorted(self.click_models.items())})}, '
-                f'absent goals {sorted(self.absent_goals)}, rejected {sorted(self.absent_rejected)}')
+                f'absent goals {sorted(self.absent_goals)}, rejected {sorted(self.absent_rejected)}, '
+                f'other players {len(self.others)}, line goals {sorted(self.line_goals)}, '
+                f'line losses {sorted(self.line_losses)}')

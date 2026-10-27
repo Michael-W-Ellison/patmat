@@ -23,7 +23,13 @@ picks an action id uniformly among those listed, and for 6 a random cell.
 
     python3 evaluate_arc3.py --click-games [episodes] [max_actions] [seed] [agent] [game ...]
 
-plays the click games of arc3_click_games.py instead.
+plays the click games of arc3_click_games.py instead; a game that takes a
+seed gets a different one in each episode (and the random player another).
+
+Frames: an action can produce several frames (a game shows, for example,
+the player's move and then each other player's). An agent with
+`uses_frames = True` gets them all, as cell grids, in after_step,
+level_won and lost; other agents get the last one.
 """
 
 import logging
@@ -62,7 +68,9 @@ def play(env, choose, max_actions: int, agent=None, clicks=None):
             nxt = env.step(GameAction.from_id(a))
         used += 1
         since += 1
-        after = read(nxt.frame[-1])
+        frames = [read(f) for f in nxt.frame] or [grid]
+        after = frames[-1]
+        extra = {'frames': frames} if getattr(agent, 'uses_frames', False) else {}
         # (a game may end on its last level by WIN without counting the level as completed; a reset may
         # restart the game, so a level counts only the first time it is completed)
         if nxt.levels_completed > fd.levels_completed or nxt.state == GameState.WIN:
@@ -73,13 +81,13 @@ def play(env, choose, max_actions: int, agent=None, clicks=None):
                 per_level.append(since)
                 since = 0
             if agent:
-                agent.level_won(grid, a)
+                agent.level_won(grid, a, **extra)
         elif nxt.state == GameState.GAME_OVER and agent:
             if getattr(agent, 'learns_from_losses', False):
-                agent.after_step(grid, a, after)
-            agent.lost(grid, a)
+                agent.after_step(grid, a, after, **extra)
+            agent.lost(grid, a, **extra)
         elif agent:
-            agent.after_step(grid, a, after)
+            agent.after_step(grid, a, after, **extra)
         fd, grid = nxt, after
     return len(per_level), fd.win_levels, per_level, losses
 
@@ -100,7 +108,17 @@ def main():
     if sys.argv[1] == '--click-games':
         from arc3_click_games import GAMES, local_env
         names = sys.argv[6:] or sorted(GAMES)
-        games = [(name, lambda name=name: local_env(GAMES[name]())) for name in names]
+        import inspect
+
+        def maker(name):
+            takes_seed = 'seed' in inspect.signature(GAMES[name]).parameters
+            count = [0]
+
+            def new_env():
+                count[0] += 1
+                return local_env(GAMES[name](seed=seed * 1000 + count[0]) if takes_seed else GAMES[name]())
+            return new_env
+        games = [(name, maker(name)) for name in names]
     else:
         from arc_agi import Arcade, OperationMode
         arc = Arcade(operation_mode=OperationMode.OFFLINE, environments_dir=sys.argv[1])

@@ -196,6 +196,20 @@ class TestClicks(unittest.TestCase):
         self.assertEqual(agent.absent_goals, {11})
         self.assertEqual(results[1][3], 0)
 
+    def test_tic_tac_toe(self):
+        from arc3_click_games import GAMES, local_env
+        from evaluate_arc3 import play
+        agent = ObjectAgent(random.Random(0))
+        results = []
+        for ep in range(6):
+            agent.new_episode()
+            results.append(play(local_env(GAMES['tictactoe'](seed=ep)), agent.act, 300, agent))
+        self.assertEqual(len(agent.others), 1)                  # one other player, seen in the second frame
+        self.assertEqual(agent.line_goals, {(2, 3)})
+        self.assertEqual(agent.line_losses, {(1, 3)})
+        self.assertEqual([r[0] for r in results[1:]], [3] * 5)
+        self.assertEqual(sum(r[3] for r in results[1:]), 0)       # no game lost after the first episode
+
     def test_grid_reader_pixel(self):
         read = GridReader()
         frame = np.full((64, 64), 3)

@@ -10,6 +10,13 @@ have no click actions. The goal is not shown to the player.
 - ClearRed (3 levels, 8x8): background 0, walls 5, red objects (2) and
   blue objects (1). Clicking a red object removes all of it, clicking
   anything else does nothing; a level is won when no red is left.
+- TicTacToe (3 levels, a 3x3 board inside a border of 5): the player
+  clicks an empty cell (0) to place its mark (2); the opponent then places
+  its mark (1), shown as a second frame of the same action. The opponent
+  completes three in a row if it can, else blocks the player's three,
+  else picks a random empty cell. Three of the player's marks in a row win
+  the level (the next level is a new board); three of the opponent's lose
+  the game; a full board with no line is cleared and played again.
 
 GAMES maps names to game classes; local_env(game) gives the reset/step
 interface of the ARC-AGI toolkit's environment wrappers.
@@ -133,7 +140,77 @@ class ClearRed(ARCBaseGame):
         self.complete_action()
 
 
-GAMES = {'lights': LightsOut, 'clear': ClearRed}
+EMPTY, MINE, THEIRS, BORDER = 0, 2, 1, 5
+LINES = [[(r, c) for c in range(3)] for r in range(3)] + [[(r, c) for r in range(3)] for c in range(3)] + \
+        [[(i, i) for i in range(3)], [(i, 2 - i) for i in range(3)]]
+
+
+def _line(board, v) -> bool:
+    return any(all(board[p] == v for p in line) for line in LINES)
+
+
+def _ttt_level() -> Level:
+    px = np.full((5, 5), BORDER, dtype=np.int8)
+    px[1:4, 1:4] = EMPTY
+    return Level(sprites=[Sprite(pixels=px, name='board')], grid_size=(5, 5))
+
+
+class TicTacToe(ARCBaseGame):
+    def __init__(self, seed: int = 0):
+        self.rng = random.Random(seed)
+        self._reply = False
+        super().__init__(game_id='tictactoe', levels=[_ttt_level() for _ in range(3)],
+                         camera=Camera(width=5, height=5, background=EMPTY, letter_box=3))
+
+    def _board(self):
+        return self.current_level.get_sprites_by_name('board')[0]
+
+    def _opponent_move(self, b):
+        """b: the 3x3 board; the opponent's cell (win, else block, else random)"""
+        empty = [(r, c) for r in range(3) for c in range(3) if b[r, c] == EMPTY]
+        for v in (THEIRS, MINE):
+            for p in empty:
+                trial = b.copy()
+                trial[p] = v
+                if _line(trial, v):
+                    return p
+        return self.rng.choice(empty)
+
+    def step(self):
+        sprite = self._board()
+        px = sprite.pixels.copy()
+        b = px[1:4, 1:4]
+        if self._reply:                         # the second frame of a move: the opponent's turn
+            self._reply = False
+            if not (b == EMPTY).any():
+                b[:] = EMPTY                    # a draw: the board is cleared
+            else:
+                b[self._opponent_move(b)] = THEIRS
+                if _line(b, THEIRS):
+                    sprite.pixels = px
+                    self.lose()
+                    self.complete_action()
+                    return
+            sprite.pixels = px
+            self.complete_action()
+            return
+        if self.action.id == GameAction.ACTION6:
+            at = self.camera.display_to_grid(self.action.data.get('x', 0), self.action.data.get('y', 0))
+            if at is not None:
+                c, r = at
+                if 1 <= r <= 3 and 1 <= c <= 3 and px[r, c] == EMPTY:
+                    px[r, c] = MINE
+                    sprite.pixels = px
+                    if _line(px[1:4, 1:4], MINE):
+                        self.next_level()
+                        self.complete_action()
+                        return
+                    self._reply = True          # the action goes on: one more frame, for the opponent
+                    return
+        self.complete_action()
+
+
+GAMES = {'lights': LightsOut, 'clear': ClearRed, 'tictactoe': TicTacToe}
 
 
 class _LocalEnv:
