@@ -49,7 +49,9 @@ def play(env, choose, max_actions: int, agent=None):
         # (a game may end on its last level by WIN without counting the level as completed; a reset may
         # restart the game, so a level counts only the first time it is completed)
         if nxt.levels_completed > fd.levels_completed or nxt.state == GameState.WIN:
-            if nxt.levels_completed > best or (nxt.state == GameState.WIN and len(per_level) < nxt.win_levels):
+            # (and at most win_levels count: a game may count the last level again, as Complex Maze does
+            # when its exit is reached as the energy runs out)
+            if len(per_level) < nxt.win_levels and (nxt.levels_completed > best or nxt.state == GameState.WIN):
                 best = max(best, nxt.levels_completed)
                 per_level.append(since)
                 since = 0
