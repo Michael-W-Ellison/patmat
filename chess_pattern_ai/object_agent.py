@@ -28,7 +28,8 @@ values. What is learned:
             agent stays)
   A value whose contacts only ever block is a wall value. When two outcomes
   give the same grid (a merged agent that moved, or a pushed object), the
-  agent's next move tells which: whether the object moves with it.
+  agent's next moves tell which (the first one that only one of them
+  predicts); if the level ends first, the first outcome listed is taken.
 - the goal, from level completions: the winning move either touched an
   object (contact goal, by key), or produced an agent whose pattern equals
   another object's pattern (shape goal). If the outcome of the winning move
@@ -226,6 +227,10 @@ class ObjectAgent:
         u = self.unchanged_in.get(action)
         if u is not None and len(u) >= NOOP_STATES:
             return grid, agent
+        return self._by_rules(grid, agent, action)
+
+    def _by_rules(self, grid, agent, action):
+        """The transition the contact rules predict (None if they do not say)"""
         d = self.directions.get(action)
         if agent is None or d is None or self.bg is None:
             return None
@@ -307,12 +312,28 @@ class ObjectAgent:
             # the agent that moved now tells which
             grid0, objs0, front0, alternatives = self.pending
             self.pending = None
-            d = self.directions.get(action)
+            keys = [pattern(grid0, o) for o in objs0]
+            fits = {}
             for kind, alt in alternatives.items():
-                if d is not None and self._free(before, alt, d) and np.array_equal(self._move(before, alt, d), after):
-                    for o in objs0:
-                        self._learn_rule(grid0, o, kind, front0)
-                    return shifted(alt, d)
+                saved = {k: self.rules.get(k) for k in keys}
+                for k in keys:
+                    self.rules[k] = Counter({kind: 1})
+                nxt = self._by_rules(before, alt, action)
+                for k, v in saved.items():
+                    if v is None:
+                        del self.rules[k]
+                    else:
+                        self.rules[k] = v
+                if nxt is not None and np.array_equal(nxt[0], after):
+                    fits[kind] = nxt[1]
+            if len(fits) == 1:
+                kind, a = next(iter(fits.items()))
+                for o in objs0:
+                    self._learn_rule(grid0, o, kind, front0)
+                return a
+            if len(fits) > 1:
+                self.pending = (grid0, objs0, front0, fits)      # still not told apart
+                return next(iter(fits.values()))
             self.agent = None
         agent, d = self.agent, self.directions.get(action)
         if agent is not None and d is None and not np.array_equal(before, after):
@@ -436,6 +457,11 @@ class ObjectAgent:
         self._new_level()
 
     def _new_level(self):
+        if self.pending is not None:
+            # not told apart before the level ended: the first outcome that fitted, as one observation
+            grid0, objs0, front0, alternatives = self.pending
+            for o in objs0:
+                self._learn_rule(grid0, o, next(iter(alternatives)), front0)
         self.agent = None
         self.pending = None
         self.level_fresh = True

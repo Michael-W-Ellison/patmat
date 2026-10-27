@@ -32,7 +32,7 @@ def play(env, choose, max_actions: int, agent=None):
     from arcengine import GameAction, GameState
     fd = env.reset()
     read = GridReader()
-    per_level, used, since, losses = [], 0, 0, 0
+    per_level, used, since, losses, best = [], 0, 0, 0, 0
     grid = read(fd.frame[-1])
     while used < max_actions and fd.state != GameState.WIN:
         if fd.state == GameState.GAME_OVER:
@@ -46,10 +46,13 @@ def play(env, choose, max_actions: int, agent=None):
         used += 1
         since += 1
         after = read(nxt.frame[-1])
-        # (a game may end on its last level by WIN without counting the level as completed)
+        # (a game may end on its last level by WIN without counting the level as completed; a reset may
+        # restart the game, so a level counts only the first time it is completed)
         if nxt.levels_completed > fd.levels_completed or nxt.state == GameState.WIN:
-            per_level.append(since)
-            since = 0
+            if nxt.levels_completed > best or (nxt.state == GameState.WIN and len(per_level) < nxt.win_levels):
+                best = max(best, nxt.levels_completed)
+                per_level.append(since)
+                since = 0
             if agent:
                 agent.level_won(grid, a)
         elif nxt.state == GameState.GAME_OVER and agent:
