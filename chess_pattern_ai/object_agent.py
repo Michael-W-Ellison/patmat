@@ -92,11 +92,13 @@ non-background value, ANY) along a direction (row, column, diagonal); a
 line hypothesis (v, k, d) says "a new line of at least k cells forms" for
 direction d or any direction (d None). Each win counts the hypotheses
 formed in its frames (but the last, which may show the next level): k >= 3,
-the longest formed per value and direction; each other action counts the
+the longest formed per value and direction (not a win that a goal known
+before it already explains, such as a shape match); each other action
+counts the
 ones formed in its frames as misses. The hypotheses kept as goals are
-those formed in at least half of the wins that formed any, and not more
-often without a win (a full row passed through by a falling piece, before
-it comes to rest, scores nothing). Losses
+those formed in at least half of the wins that formed any, and without a
+win at most 1 / MISS_RATIO as often as in wins (a full row passed through
+by a falling piece, before it comes to rest, scores nothing). Losses
 (hypotheses formed in the frames that lost, after the agent's own) are
 kept the same way. Contact
 goals are likewise dropped when the contact happens without a win, and
@@ -152,6 +154,7 @@ MAX_DEPTH = 5
 DISCOUNT = 0.9
 LINE_DIRS = ((0, 1), (1, 0), (1, 1), (1, -1))
 ANY = -100                  # line hypotheses over any non-background value
+MISS_RATIO = 3              # a line hypothesis is kept while formed MISS_RATIO times as often in wins as elsewhere
 CE_POPULATION, CE_ELITE, CE_MIN_STD, CE_SMOOTH = 8, 3, 0.2, 0.7
 GEOMETRY = {
     'turn right': lambda a: np.rot90(a, -1), 'turn left': lambda a: np.rot90(a, 1), 'half turn': lambda a: np.rot90(a, 2),
@@ -824,12 +827,12 @@ class ObjectAgent:
     @staticmethod
     def _kept(hits, misses, events) -> Optional[set]:
         """
-        The hypotheses formed in at least half of the events (wins or losses that formed any), and no
-        more often elsewhere (None while no event has formed any)
+        The hypotheses formed in at least half of the events (wins or losses that formed any), and
+        elsewhere at most 1 / MISS_RATIO as often (None while no event has formed any)
         """
         if not events:
             return None
-        return {h for h, n in hits.items() if 2 * n >= events and misses[h] <= n}
+        return {h for h, n in hits.items() if 2 * n >= events and MISS_RATIO * misses[h] <= n}
 
     def _transitions(self, before, frames):
         seq = [before] + list(frames or [])
@@ -847,7 +850,7 @@ class ObjectAgent:
                     continue
                 for h in [h for h in space if self._count(cur, h) > self._count(prev, h)]:
                     misses[h] += 1
-                    if misses[h] > hits[h]:
+                    if MISS_RATIO * misses[h] > hits[h]:
                         space.discard(h)        # (and it stays out: _kept checks the same)
             if self.absent_goals and not lost:
                 self.absent_goals = {v for v in self.absent_goals if not ((prev == v).any() and not (cur == v).any())}
@@ -888,13 +891,18 @@ class ObjectAgent:
         self.wins += 1
         self.episode['score'] += 1
         self.hidden_walls = set()
+        # a win that a goal known before it explains gives line hypotheses no support
+        lines, self.line_goals = self.line_goals, None
+        explained = self.wins_with(grid, self.agent, action, self.predict(grid, self.agent, action))
+        self.line_goals = lines
         found = set()
         # (the last frame of the action may already show the next level)
         for prev, cur in self._transitions(grid, frames[:-1] if frames and len(frames) > 1 else frames):
             found |= self._line_hypotheses(prev, cur)
-        self.line_hits.update(found)
-        self.line_events += bool(found)
-        self.line_goals = self._kept(self.line_hits, self.line_misses, self.line_events)
+        if not explained:
+            self.line_hits.update(found)
+            self.line_events += bool(found)
+            self.line_goals = self._kept(self.line_hits, self.line_misses, self.line_events)
         if isinstance(action, tuple):
             if self.trying is not None:
                 self.absent_goals.add(self.trying)
