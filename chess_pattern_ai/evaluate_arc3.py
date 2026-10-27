@@ -23,8 +23,15 @@ picks an action id uniformly among those listed, and for 6 a random cell.
 
     python3 evaluate_arc3.py --click-games [episodes] [max_actions] [seed] [agent] [game ...]
 
-plays the click games of arc3_click_games.py instead; a game that takes a
-seed gets a different one in each episode (and the random player another).
+plays the small games of arc3_games.py instead (all but Tetris by
+default); a game that takes a seed gets a different one in each episode
+(and the random player another).
+
+    python3 evaluate_arc3.py --score-games [episodes] [max_actions] [seed] [agent] [game ...]
+
+plays games that count points as levels (Tetris by default): each episode
+is one game, ending at the first loss; the score (levels_completed) is
+reported.
 
 Frames: an action can produce several frames (a game shows, for example,
 the player's move and then each other player's). An agent with
@@ -42,8 +49,12 @@ from object_agent import ObjectAgent
 AGENTS = {'cell': Arc3Agent, 'object': ObjectAgent}
 
 
-def play(env, choose, max_actions: int, agent=None, clicks=None):
-    """(levels completed, win_levels, actions per completed level, losses)"""
+def play(env, choose, max_actions: int, agent=None, clicks=None, stop_on_loss=False):
+    """
+    (levels completed, win_levels, actions per completed level, losses, score): score is the
+    highest levels_completed reached (for games that count points as levels). With stop_on_loss
+    the episode ends at the first loss.
+    """
     from arcengine import GameAction, GameState
     fd = env.reset()
     read = GridReader()
@@ -54,6 +65,8 @@ def play(env, choose, max_actions: int, agent=None, clicks=None):
     while used < max_actions and fd.state != GameState.WIN:
         if fd.state == GameState.GAME_OVER:
             losses += 1
+            if stop_on_loss:
+                break
             fd = env.step(GameAction.RESET)
             grid = read(fd.frame[-1])
             continue
@@ -89,7 +102,7 @@ def play(env, choose, max_actions: int, agent=None, clicks=None):
         elif agent:
             agent.after_step(grid, a, after, **extra)
         fd, grid = nxt, after
-    return len(per_level), fd.win_levels, per_level, losses
+    return len(per_level), fd.win_levels, per_level, losses, best
 
 
 def random_choice(rng):
@@ -105,9 +118,10 @@ def main():
     max_actions = int(sys.argv[3]) if len(sys.argv) > 3 else 2000
     seed = int(sys.argv[4]) if len(sys.argv) > 4 else 0
     make = AGENTS[sys.argv[5]] if len(sys.argv) > 5 else ObjectAgent
-    if sys.argv[1] == '--click-games':
-        from arc3_click_games import GAMES, local_env
-        names = sys.argv[6:] or sorted(GAMES)
+    stop_on_loss = sys.argv[1] == '--score-games'
+    if sys.argv[1] in ('--click-games', '--score-games'):
+        from arc3_games import GAMES, local_env
+        names = sys.argv[6:] or (['tetris'] if stop_on_loss else sorted(set(GAMES) - {'tetris'}))
         import inspect
 
         def maker(name):
@@ -130,10 +144,14 @@ def main():
         print(f'== {gid}')
         for ep in range(episodes):
             agent.new_episode()
-            done, total, per_level, losses = play(new_env(), agent.act, max_actions, agent)
-            print(f'   episode {ep + 1}: levels {done}/{total}, actions per level {per_level}, losses {losses}')
-        done, total, per_level, losses = play(new_env(), random_choice(rng), max_actions, clicks=True)
-        print(f'   random: levels {done}/{total}, actions per level {per_level}, losses {losses}')
+            done, total, per_level, losses, score = play(new_env(), agent.act, max_actions, agent,
+                                                         stop_on_loss=stop_on_loss)
+            print(f'   episode {ep + 1}: levels {done}/{total}, actions per level {per_level}, losses {losses}'
+                  + (f', score {score}' if stop_on_loss else ''))
+        done, total, per_level, losses, score = play(new_env(), random_choice(rng), max_actions, clicks=True,
+                                                     stop_on_loss=stop_on_loss)
+        print(f'   random: levels {done}/{total}, actions per level {per_level}, losses {losses}'
+              + (f', score {score}' if stop_on_loss else ''))
         print(f'   agent: {agent.describe()}')
 
 

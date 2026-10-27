@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Small click games (ACTION6) for the ARC-AGI-3 agents, written for this
-project with the ARC engine (package arcengine): the public example games
-have no click actions. The goal is not shown to the player.
+Small games for the ARC-AGI-3 agents, written for this project with the
+ARC engine (package arcengine): the public example games have no click
+actions, no other players and no falling pieces. The goal is not shown to
+the player.
 
 - LightsOut (3 levels, 5x5): clicking a cell toggles it and its four
   neighbours between off (1) and on (11); a level is won when no cell is
@@ -17,6 +18,15 @@ have no click actions. The goal is not shown to the player.
   else picks a random empty cell. Three of the player's marks in a row win
   the level (the next level is a new board); three of the opponent's lose
   the game; a full board with no line is cleared and played again.
+
+- Tetris (an 8 x 14 well inside a border of 5, background 0): a falling
+  piece (one of the seven tetrominoes, each its own colour) moves left (3),
+  right (4), down (2) or turns clockwise (1) when the cells are free; then,
+  in a second frame, it falls one row. A piece that cannot fall further is
+  locked; in a third frame full rows are removed (the rows above move
+  down), the score (levels_completed) grows by the rows removed, and the
+  next piece (random) appears at the top. The game is lost when it has no
+  room to appear. win_levels is 200 (a game ends by a loss in practice).
 
 GAMES maps names to game classes; local_env(game) gives the reset/step
 interface of the ARC-AGI toolkit's environment wrappers.
@@ -210,7 +220,114 @@ class TicTacToe(ARCBaseGame):
         self.complete_action()
 
 
-GAMES = {'lights': LightsOut, 'clear': ClearRed, 'tictactoe': TicTacToe}
+TETROMINOES = [
+    ([(0, 0), (0, 1), (0, 2), (0, 3)], 9),      # I
+    ([(0, 0), (0, 1), (1, 0), (1, 1)], 11),     # O
+    ([(0, 0), (0, 1), (0, 2), (1, 1)], 6),      # T
+    ([(0, 0), (0, 1), (0, 2), (1, 0)], 12),     # L
+    ([(0, 0), (0, 1), (0, 2), (1, 2)], 8),      # J
+    ([(0, 1), (0, 2), (1, 0), (1, 1)], 3),      # S
+    ([(0, 0), (0, 1), (1, 1), (1, 2)], 2),      # Z
+]
+WELL_W, WELL_H = 8, 14
+
+
+class Tetris(ARCBaseGame):
+    def __init__(self, seed: int = 0):
+        self.rng = random.Random(seed)
+        self._phase = 0
+        self.piece = None                       # (cells, colour), cells as (row, col) on the grid
+        px = np.full((WELL_H + 2, WELL_W + 2), 5, dtype=np.int8)
+        px[1:-1, 1:-1] = 0
+        level = Level(sprites=[Sprite(pixels=px, name='board')], grid_size=(WELL_W + 2, WELL_H + 2))
+        super().__init__(game_id='tetris', levels=[level], win_score=200,
+                         camera=Camera(width=WELL_W + 2, height=WELL_H + 2, background=0, letter_box=3))
+
+    def _px(self):
+        return self.current_level.get_sprites_by_name('board')[0]
+
+    def _free(self, px, cells):
+        own = set(self.piece[0])
+        return all(1 <= r <= WELL_H and 1 <= c <= WELL_W and (px[r, c] == 0 or (r, c) in own) for r, c in cells)
+
+    def _put(self, px, cells, colour):
+        for p in self.piece[0]:
+            px[p] = 0
+        for p in cells:
+            px[p] = colour
+        self.piece = (cells, colour)
+
+    def _spawn(self, px) -> bool:
+        shape, colour = TETROMINOES[self.rng.randrange(len(TETROMINOES))]
+        cells = [(1 + r, 3 + c) for r, c in shape]
+        if any(px[p] != 0 for p in cells):
+            return False
+        self.piece = (cells, colour)
+        for p in cells:
+            px[p] = colour
+        return True
+
+    def on_set_level(self, level):
+        self.piece = None
+        self._phase = 0
+
+    def step(self):
+        sprite = self._px()
+        px = sprite.pixels.copy()
+        if self.piece is None:                  # the first action of a game: the first piece appears
+            self._spawn(px)
+            sprite.pixels = px
+            self.complete_action()
+            return
+        cells, colour = self.piece
+        if self._phase == 0:                    # the player's move
+            if self.action.id in (GameAction.ACTION1, GameAction.ACTION2, GameAction.ACTION3, GameAction.ACTION4):
+                if self.action.id == GameAction.ACTION1:
+                    r0, c0 = min(r for r, _ in cells), min(c for _, c in cells)
+                    h = max(r for r, _ in cells) - r0
+                    new = [(r0 + (c - c0), c0 + (h - (r - r0))) for r, c in cells]
+                else:
+                    dr, dc = {GameAction.ACTION2: (1, 0), GameAction.ACTION3: (0, -1),
+                              GameAction.ACTION4: (0, 1)}[self.action.id]
+                    new = [(r + dr, c + dc) for r, c in cells]
+                if self._free(px, new):
+                    self._put(px, new, colour)
+            self._phase = 1
+            sprite.pixels = px
+            return
+        if self._phase == 1:                    # gravity
+            down = [(r + 1, c) for r, c in cells]
+            if self._free(px, down):
+                self._put(px, down, colour)
+                cells = down
+            sprite.pixels = px
+            if self._free(px, [(r + 1, c) for r, c in cells]):
+                self._phase = 0
+                self.complete_action()
+            else:
+                self._phase = 2                 # locked: rows and the next piece in one more frame
+            return
+        full = [r for r in range(1, WELL_H + 1) if all(px[r, c] != 0 for c in range(1, WELL_W + 1))]
+        if full:
+            keep = [px[r, 1:-1].copy() for r in range(1, WELL_H + 1) if r not in full]
+            rows = [np.zeros(WELL_W, dtype=np.int8) for _ in full] + keep
+            for i, row in enumerate(rows):
+                px[1 + i, 1:-1] = row
+            self._score += len(full)
+        self.piece = ([], 0)
+        self._phase = 0
+        if not self._spawn(px):
+            sprite.pixels = px
+            self.lose()
+            self.complete_action()
+            return
+        sprite.pixels = px
+        if self._score >= self._win_score:
+            self.win()
+        self.complete_action()
+
+
+GAMES = {'lights': LightsOut, 'clear': ClearRed, 'tictactoe': TicTacToe, 'tetris': Tetris}
 
 
 class _LocalEnv:

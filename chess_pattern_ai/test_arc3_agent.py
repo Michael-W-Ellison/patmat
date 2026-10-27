@@ -171,7 +171,7 @@ class TestObjectAgent(unittest.TestCase):
 @unittest.skipIf(ARCBaseGame is None, 'arcengine is not installed')
 class TestClicks(unittest.TestCase):
     def episodes(self, name, n, budget):
-        from arc3_click_games import GAMES, local_env
+        from arc3_games import GAMES, local_env
         from evaluate_arc3 import play
         agent = ObjectAgent(random.Random(0))
         results = []
@@ -197,7 +197,7 @@ class TestClicks(unittest.TestCase):
         self.assertEqual(results[1][3], 0)
 
     def test_tic_tac_toe(self):
-        from arc3_click_games import GAMES, local_env
+        from arc3_games import GAMES, local_env
         from evaluate_arc3 import play
         agent = ObjectAgent(random.Random(0))
         results = []
@@ -205,10 +205,24 @@ class TestClicks(unittest.TestCase):
             agent.new_episode()
             results.append(play(local_env(GAMES['tictactoe'](seed=ep)), agent.act, 300, agent))
         self.assertEqual(len(agent.others), 1)                  # one other player, seen in the second frame
-        self.assertEqual(agent.line_goals, {(2, 3)})
-        self.assertEqual(agent.line_losses, {(1, 3)})
+        self.assertEqual(agent.line_goals, {(2, 3, None)})        # three of the agent's marks in a line
+        self.assertIn((1, 3, None), agent.line_losses)            # three of the opponent's
         self.assertEqual([r[0] for r in results[1:]], [3] * 5)
         self.assertEqual(sum(r[3] for r in results[1:]), 0)       # no game lost after the first episode
+
+    def test_tetris_frames_and_score(self):
+        from arc3_games import GAMES, local_env
+        from evaluate_arc3 import play
+        from object_agent import ANY
+        agent = ObjectAgent(random.Random(0))
+        scores = []
+        for ep in range(10):
+            agent.new_episode()
+            scores.append(play(local_env(GAMES['tetris'](seed=ep)), agent.act, 3000, agent, stop_on_loss=True)[4])
+        self.assertEqual(agent._drift_dir(1), (1, 0))                       # pieces fall by themselves
+        self.assertEqual(agent.transform_ops[1].most_common(1)[0][0], ('turn right', (0, 0)))
+        self.assertIn((ANY, 16, (0, 1)), agent.line_goals)                 # a full row scores
+        self.assertGreater(sum(scores), 0)
 
     def test_grid_reader_pixel(self):
         read = GridReader()

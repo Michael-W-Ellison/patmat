@@ -65,16 +65,59 @@ offsets and swap the same two values for every value present, a plan to
 remove a value is found by solving the presses modulo 2 (as for Lights
 Out) instead of by search.
 
-Other players: when an action produces several frames, the first shows
-the agent's own effect (learned as above) and each later frame the move
-of another player, in turn (as many players as frames). Each other
-player's moves are learned like clicks: the first changed cell is taken as
-the cell it acted on, with a click model per value of that cell. A level
-won with no other goal explaining it teaches a line goal, "k cells of
-value v in a straight line" (rows, columns, diagonals), when the agent's
-effect made the longest line of v grow to k >= 3; a game lost in another
-player's frame teaches a line loss the same way for the value that player
-placed. With other players' moves known, the agent plans by minimax: its
+Frames: when an action produces several frames, the first shows the
+agent's own effect (learned as above) and each later frame something
+else, learned per position in the sequence:
+    drift     the agent moved one step in a fixed direction by itself (as
+              under gravity); when it cannot, it has come to rest (locked)
+              and is part of the scene; an object that then appears out of
+              background, with nothing around it changed, becomes the agent
+              (preferring a pattern the agent has had), as does, while no
+              agent is known, an object that drifts
+    player    another player's move, learned like a click: the first
+              changed cell is taken as the cell it acted on, with a click
+              model per value of that cell (as many players as frames)
+An own action that changes the agent's shape without moving it (a turn)
+is learned as a transform of that pattern for that action (the new pattern
+and where its box goes); it is blocked when the new cells are not free. When an action's
+transforms are a geometric operation of the pattern (a quarter or half
+turn, a mirror image, the transpose) with the same box offset at least
+twice, the operation is used for patterns not seen yet; a pattern the
+operation would change, that did not change though the cells were free,
+is learned as left as it is (as is, with no operation known, a pattern
+unchanged in two states).
+
+Line goals: a line is a maximal run of cells of a value v (or of any
+non-background value, ANY) along a direction (row, column, diagonal); a
+line hypothesis (v, k, d) says "a new line of at least k cells forms" for
+direction d or any direction (d None). Each win counts the hypotheses
+formed in its frames (but the last, which may show the next level): k >= 3,
+the longest formed per value and direction; each other action counts the
+ones formed in its frames as misses. The hypotheses kept as goals are
+those formed in at least half of the wins that formed any, and not more
+often without a win (a full row passed through by a falling piece, before
+it comes to rest, scores nothing). Losses
+(hypotheses formed in the frames that lost, after the agent's own) are
+kept the same way. Contact
+goals are likewise dropped when the contact happens without a win, and
+"no cell holds v" goals when v is removed without a win.
+
+Score and drift: with a drift learned, the agent plans where its piece
+comes to rest: a search over its own actions, each followed by the drift,
+ends in the states where the piece locks; each is valued by
+    lines of the goal formed (1 each, the goal itself) + w . (the columns'
+    heights of the mass against the drift, summed; background cells covered
+    against the drift; roughness: the differences of height between
+    neighbouring columns)
+(mass: non-background cells that were not there in every frame of the
+episode). The weights w are learned from the score by the cross-entropy
+method: each episode plays with weights drawn from a normal distribution,
+and after every CE_POPULATION episodes the distribution's mean and spread
+move (by CE_SMOOTH) to those of the CE_ELITE episodes with the highest
+score (levels completed, then actions survived), the spread kept at least
+CE_MIN_STD.
+
+With other players' moves known, the agent plans by minimax: its
 own moves, then each other player's possible moves (all assumed to play
 against it), to MAX_DEPTH of its own moves, a win counting 1 and a loss -1,
 discounted by DISCOUNT per move so that quicker wins and later losses are
@@ -108,22 +151,28 @@ MAX_CLICKS = 64
 MAX_DEPTH = 5
 DISCOUNT = 0.9
 LINE_DIRS = ((0, 1), (1, 0), (1, 1), (1, -1))
+ANY = -100                  # line hypotheses over any non-background value
+CE_POPULATION, CE_ELITE, CE_MIN_STD, CE_SMOOTH = 8, 3, 0.2, 0.7
+GEOMETRY = {
+    'turn right': lambda a: np.rot90(a, -1), 'turn left': lambda a: np.rot90(a, 1), 'half turn': lambda a: np.rot90(a, 2),
+    'mirror left-right': np.fliplr, 'mirror up-down': np.flipud, 'transpose': np.transpose,
+}
+FEATURES = ('height', 'holes', 'roughness')
 
 
-def longest_line(grid, v) -> int:
-    """The most cells of value v in a straight line (row, column or diagonal)"""
-    best = 0
-    cells = {(int(r), int(c)) for r, c in np.argwhere(grid == v)}
-    for p in cells:
-        for d in LINE_DIRS:
-            if (p[0] - d[0], p[1] - d[1]) in cells:
-                continue                        # not the start of a line
-            n, q = 0, p
-            while q in cells:
-                n += 1
-                q = (q[0] + d[0], q[1] + d[1])
-            best = max(best, n)
-    return best
+def runs(mask, d) -> List[int]:
+    """Lengths of the maximal runs of True cells along direction d"""
+    out = []
+    rows, cols = mask.shape
+    for r in range(rows):
+        for c in range(cols):
+            if mask[r, c] and not (0 <= r - d[0] < rows and 0 <= c - d[1] < cols and mask[r - d[0], c - d[1]]):
+                n, q = 0, (r, c)
+                while 0 <= q[0] < rows and 0 <= q[1] < cols and mask[q]:
+                    n += 1
+                    q = (q[0] + d[0], q[1] + d[1])
+                out.append(n)
+    return out
 
 
 class ClickModel:
@@ -252,8 +301,22 @@ class ObjectAgent:
         self.absent_rejected: set = set()           # values removed without winning
         self.trying: Optional[int] = None           # the value a plan is removing to test it as the goal
         self.others: List[Dict[int, ClickModel]] = []   # per other player (later frames): its move models
-        self.line_goals: set = set()                # (value, k): k of the value in a line wins
-        self.line_losses: set = set()               # (value, k): k of the value in a line loses
+        self.line_goals: Optional[set] = None       # version space of (v, k, d) for winning (None: no win yet)
+        self.line_losses: Optional[set] = None      # the same for losing
+        self.line_hits, self.line_misses = Counter(), Counter()     # wins in which, and other times, formed
+        self.loss_hits, self.loss_misses = Counter(), Counter()
+        self.line_events = self.loss_events = 0     # wins (losses) in which any line hypothesis formed
+        self.transforms: Dict[tuple, tuple] = {}    # (action, pattern) -> (new pattern, box offset)
+        self.still: Dict[tuple, set] = {}           # (action, pattern) -> states where it changed nothing
+        self.transform_ops: Dict[object, Counter] = {}  # action -> (geometric operation, box offset) seen
+        self.drift: Dict[int, Counter] = {}         # frame position -> directions the agent moved by itself
+        self.agent_patterns: set = set()            # patterns the agent has been identified with
+        self.base = None                            # cells non-background in every frame of the episode
+        self.ce_mean = np.zeros(len(FEATURES))
+        self.ce_std = np.ones(len(FEATURES))
+        self.ce_done: List[tuple] = []              # (fitness, weights) of this generation's episodes
+        self.weights = self.ce_mean.copy()
+        self.episode = {'score': 0, 'actions': 0, 'used': False}
         self.plan: List = []
         self.wins = self.losses = 0
         self.moves_by = {'planned': 0, 'explored': 0}
@@ -456,9 +519,39 @@ class ObjectAgent:
         x = solve_xor(masks, (grid == v).ravel().astype(np.uint8))
         return None if x is None else [('click',) + p for p, bit in zip(cells, x) if bit]
 
+    def _geometric(self, action, pat):
+        """The transform an action's geometric operation gives the pattern (if the action has one)"""
+        c = self.transform_ops.get(action)
+        if not c:
+            return None
+        (op, offset), n = c.most_common(1)[0]
+        if n < 2:
+            return None
+        new = GEOMETRY[op](np.array(pat))
+        return tuple(map(tuple, new.tolist())), offset
+
+    def _transform(self, grid, agent, action):
+        pat = pattern(grid, agent)
+        t = self.transforms.get((action, pat)) or self._geometric(action, pat)
+        if t is None:
+            return None
+        new_pat, (dr, dc) = t
+        r0, c0 = min(p[0] for p in agent), min(p[1] for p in agent)
+        cells = {(r0 + dr + i, c0 + dc + j): v for i, row in enumerate(new_pat) for j, v in enumerate(row) if v != -1}
+        if any(not _inside(grid, p) or (int(grid[p]) != self.bg and p not in agent) for p in cells):
+            return grid, agent                  # no room: nothing happens
+        out = grid.copy()
+        for p in agent:
+            out[p] = self.bg
+        for p, v in cells.items():
+            out[p] = v
+        return out, frozenset(cells)
+
     def _by_rules(self, grid, agent, action):
         """The transition the contact rules predict (None if they do not say)"""
         d = self.directions.get(action)
+        if agent is not None and d is None and self.bg is not None:
+            return self._transform(grid, agent, action)
         if agent is None or d is None or self.bg is None:
             return None
         objs = self._contacts(grid, agent, d)
@@ -484,8 +577,23 @@ class ObjectAgent:
         bgs = [self.bg] if self.bg is not None else sorted({int(after[p]) for p in changed})
         for bg in bgs:
             for d in SIDES:
-                moved = frozenset((p[0] - d[0], p[1] - d[1]) for p in changed if int(after[p]) != bg)
-                if not moved or any(not _inside(before, p) or int(before[p]) == bg for p in moved):
+                # the moved cells: from the changed cells that held something, through neighbours of
+                # their values whose value is found one step on (an object may overlap where it was)
+                seeds = [p for p in changed if int(before[p]) != bg]
+                values = {int(before[p]) for p in seeds}
+                moved, queue = set(seeds), list(seeds)
+                while queue:
+                    p = queue.pop()
+                    for dr, dc in SIDES:
+                        q = (p[0] + dr, p[1] + dc)
+                        e = (q[0] + d[0], q[1] + d[1])
+                        if q not in moved and _inside(before, q) and _inside(before, e) and \
+                                int(before[q]) in values and int(after[e]) == int(before[q]):
+                            moved.add(q)
+                            queue.append(q)
+                moved = frozenset(moved)
+                if not moved or any(not _inside(before, (p[0] + d[0], p[1] + d[1])) or
+                                    int(after[p[0] + d[0], p[1] + d[1]]) != int(before[p]) for p in moved):
                     continue
                 old, self.bg = self.bg, bg
                 ok = np.array_equal(self._move(before, moved, d) if self._free(before, moved, d) else before, after)
@@ -614,7 +722,33 @@ class ObjectAgent:
                     self.hidden_walls |= shifted(agent, d) - agent      # blocked where nothing is drawn
                     return agent
         if np.array_equal(before, after):
+            if agent is not None and self.directions.get(action) is None:
+                key = (action, pattern(before, agent))
+                geo = self._geometric(action, key[1])
+                if key not in self.transforms and geo is not None:
+                    turned = self._transform(before, agent, action)
+                    if turned is not None and not np.array_equal(turned[0], before):
+                        self.transforms[key] = (key[1], (0, 0))     # room to turn, and nothing happened
+                elif key not in self.transforms:
+                    tries = self.still.setdefault(key, set())
+                    tries.add(before.tobytes())
+                    if len(tries) >= 2:     # it changed nothing in two places: it does not change this pattern
+                        self.transforms[key] = (key[1], (0, 0))
             return agent
+        if agent is not None and self.directions.get(action) is None:
+            # the agent's own cells changed shape without moving: a transform
+            changed = {(int(r), int(c)) for r, c in np.argwhere(before != after)}
+            new = frozenset(p for p in agent | changed if int(after[p]) != self.bg)
+            if new != agent and len(new) == len(agent) and changed <= agent | new and \
+                    sorted(int(before[p]) for p in agent) == sorted(int(after[p]) for p in new):
+                r0, c0 = min(p[0] for p in agent), min(p[1] for p in agent)
+                r1, c1 = min(p[0] for p in new), min(p[1] for p in new)
+                old_pat, new_pat = pattern(before, agent), pattern(after, new)
+                self.transforms[(action, old_pat)] = (new_pat, (r1 - r0, c1 - c0))
+                for op, f in GEOMETRY.items():
+                    if np.array_equal(f(np.array(old_pat)), np.array(new_pat)):
+                        self.transform_ops.setdefault(action, Counter())[(op, (r1 - r0, c1 - c0))] += 1
+                return new
         found = self._identify(before, after)
         if found is None:
             if agent is not None:
@@ -627,6 +761,7 @@ class ObjectAgent:
         self.bg, moved, d = found
         self.directions.setdefault(action, d)
         new = shifted(moved, d)
+        self.agent_patterns.add(pattern(after, new))
         if self.level_fresh:
             self.start_patterns.add(pattern(after, new))
             self.level_fresh = False
@@ -649,19 +784,78 @@ class ObjectAgent:
         """Values to try as "no cell holds v" goals: only while no goal is known and clicks change something"""
         if self.win_contacts or self.shape_goal or self.absent_goals or self.line_goals:
             return set()
+        if self.drift:
+            return set()
         if not any(m.kind() in ('map', 'offsets') for m in self.click_models.values()):
             return set()
         return set(np.unique(grid).tolist()) - {self.bg} - self._walls() - self.absent_rejected
 
+    def _mask(self, grid, v):
+        return grid != self.bg if v == ANY else grid == v
+
+    def _count(self, grid, line) -> int:
+        v, k, d = line
+        mask = self._mask(grid, v)
+        return sum(1 for dd in ([d] if d else LINE_DIRS) for n in runs(mask, dd) if n >= k)
+
+    def _formed(self, before, after, lines) -> int:
+        """How many new lines the transition formed, for the hypothesis that forms most"""
+        if not lines or before.shape != after.shape or self.bg is None:
+            return 0
+        return max((self._count(after, h) - self._count(before, h) for h in lines), default=0)
+
+    def _line_hypotheses(self, before, after) -> set:
+        """(v, k, d): the longest new lines (k >= 3) the transition formed, per value and direction"""
+        out = set()
+        if before.shape != after.shape or self.bg is None:
+            return out
+        for v in [ANY] + [u for u in np.unique(after).tolist() if u != self.bg]:
+            mb, ma = self._mask(before, v), self._mask(after, v)
+            if (ma & ~mb).sum() == 0:
+                continue                        # nothing of v was added
+            for d in LINE_DIRS:
+                ra, rb = runs(ma, d), runs(mb, d)
+                for k in sorted({n for n in ra if n >= 3}, reverse=True):
+                    if sum(n >= k for n in ra) > sum(n >= k for n in rb):
+                        out |= {(v, k, d), (v, k, None)}
+                        break
+        return out
+
     @staticmethod
-    def _lines(grid, lines) -> bool:
-        return any(longest_line(grid, v) >= k for v, k in lines)
+    def _kept(hits, misses, events) -> Optional[set]:
+        """
+        The hypotheses formed in at least half of the events (wins or losses that formed any), and no
+        more often elsewhere (None while no event has formed any)
+        """
+        if not events:
+            return None
+        return {h for h, n in hits.items() if 2 * n >= events and misses[h] <= n}
+
+    def _transitions(self, before, frames):
+        seq = [before] + list(frames or [])
+        return [(a, b) for a, b in zip(seq, seq[1:]) if a.shape == b.shape]
+
+    def _falsify(self, before, frames, lost=False):
+        """
+        A hypothesis formed in frames that did not win (or, for losses, lose) counts a miss; it is dropped
+        once its misses outnumber the wins (losses) in which it formed
+        """
+        for prev, cur in self._transitions(before, frames):
+            for space, hits, misses, skip in ((self.line_goals, self.line_hits, self.line_misses, False),
+                                              (self.line_losses, self.loss_hits, self.loss_misses, lost)):
+                if not space or skip:
+                    continue
+                for h in [h for h in space if self._count(cur, h) > self._count(prev, h)]:
+                    misses[h] += 1
+                    if misses[h] > hits[h]:
+                        space.discard(h)        # (and it stays out: _kept checks the same)
+            if self.absent_goals and not lost:
+                self.absent_goals = {v for v in self.absent_goals if not ((prev == v).any() and not (cur == v).any())}
 
     def wins_with(self, grid, agent, action, nxt) -> bool:
         if self._removes(grid, nxt, self.absent_goals) is not None:
             return True
-        if self.line_goals and nxt is not None and self._lines(nxt[0], self.line_goals) \
-                and not self._lines(grid, self.line_goals):
+        if self.line_goals and nxt is not None and self._formed(grid, nxt[0], self.line_goals) > 0:
             return True
         d = self.directions.get(action)
         if agent is None or d is None:
@@ -690,21 +884,17 @@ class ObjectAgent:
                     return True
         return False
 
-    def _grown_lines(self, before, after) -> set:
-        """(v, k) for values placed in `after` whose longest line grew to k >= 3"""
-        out = set()
-        for v in np.unique(after).tolist():
-            if v == self.bg or (after == v).sum() <= (before == v).sum():
-                continue
-            k = longest_line(after, v)
-            if k >= 3 and k > longest_line(before, v):
-                out.add((v, k))
-        return out
-
     def level_won(self, grid, action, frames=None):
         self.wins += 1
+        self.episode['score'] += 1
         self.hidden_walls = set()
-        known_goals = (len(self.win_contacts), self.shape_goal, len(self.absent_goals))
+        found = set()
+        # (the last frame of the action may already show the next level)
+        for prev, cur in self._transitions(grid, frames[:-1] if frames and len(frames) > 1 else frames):
+            found |= self._line_hypotheses(prev, cur)
+        self.line_hits.update(found)
+        self.line_events += bool(found)
+        self.line_goals = self._kept(self.line_hits, self.line_misses, self.line_events)
         if isinstance(action, tuple):
             if self.trying is not None:
                 self.absent_goals.add(self.trying)
@@ -736,16 +926,21 @@ class ObjectAgent:
                         break
                 else:
                     self.win_contacts |= {pattern(grid, o) for o in objs}
-        if own is not None and known_goals == (len(self.win_contacts), self.shape_goal, len(self.absent_goals)):
-            self.line_goals |= self._grown_lines(grid, own)       # nothing else explains the win
         self._new_level()
 
     def lost(self, grid=None, action=None, frames=None):
         self.losses += 1
         if grid is not None:
             self.losing.add((self._key(grid, self._before_agent), action))
-        if frames and len(frames) > 1 and frames[-1].shape == frames[-2].shape:
-            self.line_losses |= self._grown_lines(frames[-2], frames[-1])     # lost in another player's frame
+        found = set()
+        for prev, cur in self._transitions(grid, frames)[1:]:      # (frames after the agent's own)
+            found |= self._line_hypotheses(prev, cur)
+        self.loss_hits.update(found)
+        self.loss_events += bool(found)
+        self.line_losses = self._kept(self.loss_hits, self.loss_misses, self.loss_events)
+        if grid is not None:
+            self._falsify(grid, frames, lost=True)
+        self.base = None
         self._new_level()
 
     def _new_level(self):
@@ -760,6 +955,8 @@ class ObjectAgent:
         self.plan = []
 
     def new_episode(self):
+        self._ce_next()
+        self.base = None
         self._new_level()
 
     # ---------------------------------------------------------- planning
@@ -801,7 +998,7 @@ class ObjectAgent:
                     continue
                 if self.wins_with(g, agent, a, nxt):
                     v = 1.0
-                elif self._lines(nxt[0], self.line_losses):
+                elif self._formed(g, nxt[0], self.line_losses) > 0:
                     v = -1.0
                 elif depth <= 1:
                     v = 0.0
@@ -824,17 +1021,112 @@ class ObjectAgent:
             if not moves:
                 v = theirs(g, agent, i + 1, depth)
             else:
-                v = min(-1.0 if self._lines(m, self.line_losses) else theirs(m, agent, i + 1, depth) for m in moves)
+                v = min(-1.0 if self._formed(g, m, self.line_losses) > 0 else theirs(m, agent, i + 1, depth)
+                        for m in moves)
             memo[key] = v
             return v
         return ours(grid, self.agent, MAX_DEPTH)
 
+    # ------------------------------------------------------------ drift
+    def _settle(self, grid, agent, action):
+        """The agent's action followed by the drift: (grid, agent, locked) or None if not known"""
+        nxt = self.predict(grid, agent, action)
+        if nxt is None or nxt[1] is None or nxt[0].shape != grid.shape:
+            return None
+        g, a = nxt
+        d = self._drift_dir(1)
+        if self._free(g, a, d):
+            g, a = self._move(g, a, d), shifted(a, d)
+        return g, a, not self._free(g, a, d)
+
+    def _features(self, before, locked) -> np.ndarray:
+        d = self._drift_dir(1)
+        base = self.base if self.base is not None and self.base.shape == locked.shape else np.zeros(locked.shape, bool)
+        mass = (locked != self.bg) & ~base
+        free = (locked == self.bg) & ~base
+        proj = lambda p: p[0] * d[0] + p[1] * d[1]
+        across = (abs(d[1]), abs(d[0]))         # the direction of the columns' index
+        cols: Dict[int, List] = {}
+        for r, c in np.argwhere(~base):
+            cols.setdefault(int(r) * across[0] + int(c) * across[1], []).append((int(r), int(c)))
+        heights, holes = [], 0
+        for cells in cols.values():
+            cells.sort(key=proj)
+            top = max(proj(p) for p in cells)
+            filled = [proj(p) for p in cells if mass[p]]
+            heights.append(top - min(filled) + 1 if filled else 0)
+            if filled:
+                holes += sum(1 for p in cells if free[p] and proj(p) > min(filled))
+        rough = sum(abs(a - b) for a, b in zip(heights, heights[1:]))
+        return np.array([sum(heights), holes, rough], dtype=float)
+
+    def _value(self, before, locked) -> float:
+        """Lines of the goal formed (worth 1 each), plus the learned weights on the other features"""
+        lines = self._formed(before, locked, self.line_goals) if self.line_goals else 0
+        return lines + float(self.weights @ self._features(before, locked))
+
+    def _drift_plan(self, grid, actions) -> Optional[List]:
+        """The actions to the resting place of the best value (and an action not known yet first)"""
+        moves = [a for a in actions if a != CLICK]
+        unknown = [a for a in moves if self.predict(grid, self.agent, a) is None]
+        if unknown:
+            self.exploring = True
+            return [unknown[0]]
+        start = (grid, self.agent)
+        parent = {self._key(*start): None}
+        queue = deque([start])
+        best, best_path = None, None
+
+        def path_to(k):
+            out = []
+            while parent[k] is not None:
+                k, a = parent[k]
+                out.append(a)
+            return out[::-1]
+        while queue and len(parent) < BFS_LIMIT:
+            g, agent = queue.popleft()
+            k = self._key(g, agent)
+            for a in moves:
+                nxt = self._settle(g, agent, a)
+                if nxt is None:
+                    continue
+                g2, a2, locked = nxt
+                if locked:
+                    value = self._value(grid, g2)
+                    if best is None or value > best:
+                        best, best_path = value, path_to(k) + [a]
+                    continue
+                k2 = self._key(g2, a2)
+                if k2 not in parent:
+                    parent[k2] = (k, a)
+                    queue.append((g2, a2))
+        self.exploring = False
+        self.episode['used'] = True
+        return best_path
+
+    def _ce_next(self):
+        """End of an episode: record its fitness; after a generation, move the distribution to the elite"""
+        if self.episode['used']:
+            fitness = self.episode['score'] + 0.001 * self.episode['actions']
+            self.ce_done.append((fitness, self.weights.copy()))
+            if len(self.ce_done) >= CE_POPULATION:
+                elite = np.array([w for _, w in sorted(self.ce_done, key=lambda t: -t[0])[:CE_ELITE]])
+                self.ce_mean = CE_SMOOTH * elite.mean(axis=0) + (1 - CE_SMOOTH) * self.ce_mean
+                self.ce_std = np.maximum(CE_SMOOTH * elite.std(axis=0) + (1 - CE_SMOOTH) * self.ce_std, CE_MIN_STD)
+                self.ce_done = []
+        self.weights = np.array([self.rng.gauss(m, s) for m, s in zip(self.ce_mean, self.ce_std)])
+        self.episode = {'score': 0, 'actions': 0, 'used': False}
+
     def make_plan(self, grid, actions) -> Optional[List]:
+        if self._drift_dir(1) is not None and self.agent is not None:
+            plan = self._drift_plan(grid, actions)
+            if plan:
+                return plan
         if self._others_known():
             # explore what is not known first (a value not clicked yet), then play the minimax move
             unknown = [a for a in self._actions(grid, actions) if self.predict(grid, self.agent, a) is None]
             value, best = self._minimax(grid, actions)
-            if best and (value != 0 or not unknown or self.line_goals):
+            if best and (value != 0 or not unknown or self.line_goals is not None):
                 self.exploring = False
                 return [self.rng.choice(best)]
             if unknown:
@@ -896,6 +1188,7 @@ class ObjectAgent:
         return explore
 
     def act(self, grid, actions):
+        self.episode['actions'] += 1
         if self.agent is None:
             self.agent = self._locate(grid)
         if not self.plan:
@@ -911,30 +1204,109 @@ class ObjectAgent:
             return self.rng.choice(unknown or options)
         return ('click', self.rng.randrange(grid.shape[0]), self.rng.randrange(grid.shape[1]))
 
-    def _learn_others(self, frames):
-        """Each frame after the first: the move of another player, learned like a click"""
-        for i, (prev, cur) in enumerate(zip(frames, frames[1:])):
-            while len(self.others) <= i:
+    def _drift_dir(self, i=1) -> Optional[Pos]:
+        c = self.drift.get(i)
+        if not c:
+            return None
+        d, n = c.most_common(1)[0]
+        return d if n >= 2 and d in SIDES else None
+
+    def _appeared(self, prev, cur) -> Optional[FrozenSet[Pos]]:
+        """
+        An object of cells that were background before, with nothing around it changed (one of a pattern
+        the agent has had, if there are several)
+        """
+        if self.bg is None:
+            return None
+        new = (cur != self.bg) & (prev == self.bg)
+        found, seen = [], set()
+        for r, c in np.argwhere(new):
+            p = (int(r), int(c))
+            if p in seen:
+                continue
+            comp, queue = {p}, [p]
+            while queue:
+                q = queue.pop()
+                for dr, dc in SIDES:
+                    x = (q[0] + dr, q[1] + dc)
+                    if x not in comp and _inside(cur, x) and new[x]:
+                        comp.add(x)
+                        queue.append(x)
+            seen |= comp
+            around = {(q[0] + dr, q[1] + dc) for q in comp for dr, dc in SIDES} - comp
+            if all(not _inside(cur, q) or prev[q] == cur[q] for q in around):
+                found.append(frozenset(comp))
+        known = [o for o in found if pattern(cur, o) in self.agent_patterns]
+        if len(known) == 1:
+            return known[0]
+        return found[0] if len(found) == 1 else None
+
+    def _learn_frames(self, frames):
+        """The frames after the agent's own: drift of the agent, a new agent, or other players' moves"""
+        agent = self.agent
+        for i, (prev, cur) in enumerate(zip(frames, frames[1:]), start=1):
+            while len(self.others) < i:
                 self.others.append({})
             if prev.shape != cur.shape:
+                agent = None
+                continue
+            if agent is not None and self.bg is not None:
+                moved = next((s for s in SIDES if self._free(prev, agent, s)
+                              and np.array_equal(self._move(prev, agent, s), cur)), None)
+                if moved is not None:
+                    self.drift.setdefault(i, Counter())[moved] += 1
+                    agent = shifted(agent, moved)
+                    continue
+                d = self._drift_dir(i) or self._drift_dir(1)
+                if d is not None and not self._free(prev, agent, d):
+                    self.drift.setdefault(i, Counter())['rest'] += 1
+                    agent = None                # it came to rest: now part of the scene
+                    if np.array_equal(prev, cur):
+                        continue
+            if agent is None and self._drift_dir(1) is not None:
+                found = self._identify(prev, cur)
+                if found is not None and found[2] == self._drift_dir(1):
+                    agent = shifted(found[1], found[2])     # the object that drifted is the agent
+                    self.agent_patterns.add(pattern(cur, agent))
+                    continue
+                agent = self._appeared(prev, cur)
+                if agent is not None or self.drift.get(i):
+                    continue
+            if i in self.drift:
                 continue
             changed = sorted((int(r), int(c)) for r, c in np.argwhere(prev != cur))
             if not changed:
                 continue
             cell = changed[0]
-            self.others[i].setdefault(int(prev[cell]), ClickModel()).update(prev, cell, self._clicked(prev, cell), cur)
+            self.others[i - 1].setdefault(int(prev[cell]), ClickModel()).update(prev, cell,
+                                                                                self._clicked(prev, cell), cur)
+        self.agent = agent
+
+    def _track_base(self, grids):
+        for g in grids:
+            if self.bg is None:
+                return
+            if self.base is None or self.base.shape != g.shape:
+                self.base = g != self.bg
+            else:
+                self.base &= g != self.bg
+
+    def _contact_falsify(self, before, action):
+        """A contact goal touched without a win is not the goal"""
+        d = self.directions.get(action)
+        if self.win_contacts and self.agent is not None and d is not None:
+            objs = self._contacts(before, self.agent, d) or []
+            self.win_contacts -= {pattern(before, o) for o in objs}
 
     def after_step(self, before, action, after, frames=None):
+        self._track_base([before] + list(frames or [after]))
+        self._falsify(before, frames or [after])
+        self._contact_falsify(before, action)
         if frames and len(frames) > 1:
-            self._learn_others(frames)
             own = frames[0]
-            predicted = self.predict(before, self.agent, action)
             self.observe(before, action, own)
-            if self.agent is not None and not all(after[p] == own[p] for p in self.agent):
-                self.agent = None
-            if predicted is None or predicted[0].shape != own.shape or not np.array_equal(predicted[0], own):
-                self.plan = []
-            self.plan = []                      # (other players moved: plan again from what they did)
+            self._learn_frames(frames)
+            self.plan = []                      # (other frames followed: plan again from what they show)
             return
         predicted = self.predict(before, self.agent, action)
         self.observe(before, action, after)
@@ -951,5 +1323,7 @@ class ObjectAgent:
                 f'shape goal {self.shape_goal}, start patterns {len(self.start_patterns)}, '
                 f'clicks {({v: m.kind() for v, m in sorted(self.click_models.items())})}, '
                 f'absent goals {sorted(self.absent_goals)}, rejected {sorted(self.absent_rejected)}, '
-                f'other players {len(self.others)}, line goals {sorted(self.line_goals)}, '
-                f'line losses {sorted(self.line_losses)}')
+                f'other players {len(self.others)}, line goals {sorted(self.line_goals or [], key=str)}, '
+                f'line losses {sorted(self.line_losses or [], key=str)}, '
+                f'drift {({i: dict(c) for i, c in self.drift.items()})}, transforms {len(self.transforms)}, '
+                f'weights {np.round(self.ce_mean, 2).tolist()}')
