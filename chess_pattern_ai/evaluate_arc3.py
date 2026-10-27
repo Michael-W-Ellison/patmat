@@ -15,6 +15,15 @@ agent keeps what it learned across the episodes of one game. A random
 player (uniform over the simple actions) gets the same budget.
 Reported per episode: levels completed out of the game's levels, and the
 actions each completed level took.
+
+Clicks (ACTION6): an agent with `clicks = True` is offered action 6 when a
+game lists it, and answers ('click', row, col) for a cell of the grid it
+sees; the click is sent at that cell's centre pixel. The random player
+picks an action id uniformly among those listed, and for 6 a random cell.
+
+    python3 evaluate_arc3.py --click-games [episodes] [max_actions] [seed] [agent] [game ...]
+
+plays the click games of arc3_click_games.py instead.
 """
 
 import logging
@@ -27,13 +36,15 @@ from object_agent import ObjectAgent
 AGENTS = {'cell': Arc3Agent, 'object': ObjectAgent}
 
 
-def play(env, choose, max_actions: int, agent=None):
+def play(env, choose, max_actions: int, agent=None, clicks=None):
     """(levels completed, win_levels, actions per completed level, losses)"""
     from arcengine import GameAction, GameState
     fd = env.reset()
     read = GridReader()
     per_level, used, since, losses, best = [], 0, 0, 0, 0
     grid = read(fd.frame[-1])
+    if clicks is None:
+        clicks = getattr(agent, 'clicks', False)
     while used < max_actions and fd.state != GameState.WIN:
         if fd.state == GameState.GAME_OVER:
             losses += 1
@@ -41,8 +52,14 @@ def play(env, choose, max_actions: int, agent=None):
             grid = read(fd.frame[-1])
             continue
         actions = [a for a in SIMPLE_ACTIONS if a in fd.available_actions]
+        if clicks and 6 in fd.available_actions:
+            actions.append(6)
         a = choose(grid, actions)
-        nxt = env.step(GameAction.from_id(a))
+        if isinstance(a, tuple):
+            x, y = read.pixel(a[1:])
+            nxt = env.step(GameAction.ACTION6, {'x': x, 'y': y})
+        else:
+            nxt = env.step(GameAction.from_id(a))
         used += 1
         since += 1
         after = read(nxt.frame[-1])
@@ -67,25 +84,37 @@ def play(env, choose, max_actions: int, agent=None):
     return len(per_level), fd.win_levels, per_level, losses
 
 
+def random_choice(rng):
+    def choose(grid, actions):
+        a = rng.choice(actions)
+        return ('click', rng.randrange(grid.shape[0]), rng.randrange(grid.shape[1])) if a == 6 else a
+    return choose
+
+
 def main():
     logging.disable(logging.INFO)
-    from arc_agi import Arcade, OperationMode
-    env_dir = sys.argv[1]
     episodes = int(sys.argv[2]) if len(sys.argv) > 2 else 3
     max_actions = int(sys.argv[3]) if len(sys.argv) > 3 else 2000
     seed = int(sys.argv[4]) if len(sys.argv) > 4 else 0
-    arc = Arcade(operation_mode=OperationMode.OFFLINE, environments_dir=env_dir)
     make = AGENTS[sys.argv[5]] if len(sys.argv) > 5 else ObjectAgent
-    games = sys.argv[6:] or sorted(e.game_id for e in arc.get_environments())
-    for gid in games:
+    if sys.argv[1] == '--click-games':
+        from arc3_click_games import GAMES, local_env
+        names = sys.argv[6:] or sorted(GAMES)
+        games = [(name, lambda name=name: local_env(GAMES[name]())) for name in names]
+    else:
+        from arc_agi import Arcade, OperationMode
+        arc = Arcade(operation_mode=OperationMode.OFFLINE, environments_dir=sys.argv[1])
+        names = sys.argv[6:] or sorted(e.game_id for e in arc.get_environments())
+        games = [(gid, lambda gid=gid: arc.make(gid)) for gid in names]
+    for gid, new_env in games:
         agent = make(random.Random(seed))
         rng = random.Random(seed)
         print(f'== {gid}')
         for ep in range(episodes):
             agent.new_episode()
-            done, total, per_level, losses = play(arc.make(gid), agent.act, max_actions, agent)
+            done, total, per_level, losses = play(new_env(), agent.act, max_actions, agent)
             print(f'   episode {ep + 1}: levels {done}/{total}, actions per level {per_level}, losses {losses}')
-        done, total, per_level, losses = play(arc.make(gid), lambda g, acts: rng.choice(acts), max_actions)
+        done, total, per_level, losses = play(new_env(), random_choice(rng), max_actions, clicks=True)
         print(f'   random: levels {done}/{total}, actions per level {per_level}, losses {losses}')
         print(f'   agent: {agent.describe()}')
 

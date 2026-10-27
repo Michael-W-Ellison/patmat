@@ -96,6 +96,11 @@ class GridReader:
             self.scale = find_scale(frame)
         return cell_grid(frame, self.scale)
 
+    def pixel(self, cell) -> Tuple[int, int]:
+        """(x, y) display coordinates of the centre of a cell of the last grid (for ACTION6)"""
+        k, oy, ox = self.scale or (1, 0, 0)
+        return ox + cell[1] * k + k // 2, oy + cell[0] * k + k // 2
+
 
 class Arc3Agent(EffectLearner):
     def __init__(self, rng: Optional[random.Random] = None):

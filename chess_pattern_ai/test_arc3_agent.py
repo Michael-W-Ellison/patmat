@@ -98,8 +98,8 @@ class LocalEnv:
     def reset(self):
         return self.game.perform_action(ActionInput(id=GameAction.RESET), raw=True)
 
-    def step(self, action):
-        return self.game.perform_action(ActionInput(id=action), raw=True)
+    def step(self, action, data=None):
+        return self.game.perform_action(ActionInput(id=action, data=data or {}), raw=True)
 
 
 class TestGrid(unittest.TestCase):
@@ -166,6 +166,43 @@ class TestObjectAgent(unittest.TestCase):
         self.assertEqual(agent._walls(), {5})
         # once learned: the player walks to the piece's left side and absorbs it (no losses)
         self.assertEqual(results[2][3], 0)
+
+
+@unittest.skipIf(ARCBaseGame is None, 'arcengine is not installed')
+class TestClicks(unittest.TestCase):
+    def episodes(self, name, n, budget):
+        from arc3_click_games import GAMES, local_env
+        from evaluate_arc3 import play
+        agent = ObjectAgent(random.Random(0))
+        results = []
+        for _ in range(n):
+            agent.new_episode()
+            results.append(play(local_env(GAMES[name]()), agent.act, budget, agent))
+        return agent, results
+
+    def test_clear_red(self):
+        agent, results = self.episodes('clear', 2, 300)
+        self.assertEqual([r[0] for r in results], [3, 3])
+        self.assertEqual(agent.click_models[2].kind(), 'map')
+        self.assertEqual(agent.click_models[2].table, {2: 0})
+        self.assertEqual(agent.absent_goals, {2})
+        self.assertEqual(results[1][2], [2, 3, 4])          # one click per red object
+
+    def test_lights_out(self):
+        agent, results = self.episodes('lights', 2, 300)
+        self.assertEqual([r[0] for r in results], [3, 3])
+        self.assertEqual(agent.click_models[11].toggles(), (1, 11))
+        self.assertEqual(agent.click_models[11].offsets, {(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)})
+        self.assertEqual(agent.absent_goals, {11})
+        self.assertEqual(results[1][3], 0)
+
+    def test_grid_reader_pixel(self):
+        read = GridReader()
+        frame = np.full((64, 64), 3)
+        frame[2:62, 2:62] = np.kron(np.arange(25).reshape(5, 5) % 4, np.ones((12, 12), dtype=int))
+        read(frame)
+        self.assertEqual(read.pixel((0, 0)), (8, 8))
+        self.assertEqual(read.pixel((4, 2)), (32, 56))
 
 
 if __name__ == '__main__':

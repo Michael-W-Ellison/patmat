@@ -43,6 +43,28 @@ values. What is learned:
   rest of the level; transitions seen are remembered exactly, actions that never change anything are no-ops, and
   moves that lost the game are not planned again.
 
+Clicks (ACTION6, actions ('click', row, col)): what clicking a cell does
+is learned per value of the clicked cell, as the first of these that fits
+every click seen on that value:
+    none      nothing changes
+    map       the clicked object (the 4-connected cells of the clicked
+              value) changes by a table of values (a
+              table to the background removes it); nothing else changes
+    offsets   the cells at fixed offsets from the clicked cell change by a
+              table per offset (an offset whose entries all swap two values
+              is taken to swap them for a value not yet seen there)
+The clicks considered in a state are one per value not yet clicked, one
+per object of a value whose clicks map, and every cell of a value whose
+clicks act at offsets (at most MAX_CLICKS).
+Goals for clicks: a level won by a click teaches "no cell holds v" for the
+values the click removed. While no goal at all is known and clicks have
+some effect, each value other than the background is tried as such a goal
+in turn: a plan that removes it is made and carried out, and the value is
+dropped as a goal if the level does not end. When clicks act at the same
+offsets and swap the same two values for every value present, a plan to
+remove a value is found by solving the presses modulo 2 (as for Lights
+Out) instead of by search.
+
 Planning: breadth-first search over (grid, agent cells) states predicted
 by the rules, up to BFS_LIMIT states. Under the rules learned an agent
 only grows, so once the shape goal is known, a state whose agent no longer
@@ -59,11 +81,93 @@ from typing import Dict, FrozenSet, List, Optional, Tuple
 
 import numpy as np
 
+from action_puzzles import solve_xor
+
 Pos = Tuple[int, int]
 SIDES = ((-1, 0), (1, 0), (0, -1), (0, 1))
 BFS_LIMIT = 30_000
 NOOP_STATES = 3
 OUTCOMES = ('block', 'merge', 'push')
+CLICK = 6
+MAX_CLICKS = 64
+
+
+class ClickModel:
+    """What clicking a cell that holds one value does (see the module notes)"""
+
+    def __init__(self):
+        self.seen: List[tuple] = []                 # (grid, cell, object, grid after)
+        self.ok = {'none': True, 'map': True, 'offsets': True}
+        self.table: Dict[int, int] = {}
+        self.offsets: set = set()
+        self.off_tables: Dict[Pos, Dict[int, int]] = {}
+
+    def update(self, grid, cell, obj, after):
+        self.seen.append((grid, cell, obj, after))
+        changed = {(int(r), int(c)) for r, c in np.argwhere(grid != after)}
+        if changed:
+            self.ok['none'] = False
+        if self.ok['map']:
+            if not changed <= obj:
+                self.ok['map'] = False
+            for q in obj:
+                if self.table.setdefault(int(grid[q]), int(after[q])) != int(after[q]):
+                    self.ok['map'] = False
+        self.offsets |= {(q[0] - cell[0], q[1] - cell[1]) for q in changed}
+        self.off_tables = {o: {} for o in self.offsets}
+        self.ok['offsets'] = True
+        for g, p, _, a in self.seen:
+            for o in self.offsets:
+                q = (p[0] + o[0], p[1] + o[1])
+                if _inside(g, q) and self.off_tables[o].setdefault(int(g[q]), int(a[q])) != int(a[q]):
+                    self.ok['offsets'] = False
+
+    def kind(self) -> Optional[str]:
+        if not self.seen:
+            return None
+        return next((k for k in ('none', 'map', 'offsets') if self.ok[k]), None)
+
+    @staticmethod
+    def _swap(table) -> Optional[Tuple[int, int]]:
+        """The two values the table swaps, if every entry swaps them"""
+        pairs = {frozenset((v, w)) for v, w in table.items()}
+        if len(pairs) == 1 and all(v != w for v, w in table.items()):
+            a, b = sorted(pairs.pop())
+            return a, b
+        return None
+
+    def toggles(self) -> Optional[Tuple[int, int]]:
+        """The two values every offset swaps, if the clicks act at offsets that way"""
+        if self.kind() != 'offsets':
+            return None
+        swaps = {self._swap(t) for t in self.off_tables.values()}
+        return swaps.pop() if len(swaps) == 1 and None not in swaps else None
+
+    def predict(self, grid, cell, obj) -> Optional[np.ndarray]:
+        kind = self.kind()
+        if kind == 'none':
+            return grid
+        out = grid.copy()
+        if kind == 'map':
+            for q in obj:
+                if int(grid[q]) not in self.table:
+                    return None
+                out[q] = self.table[int(grid[q])]
+            return out
+        if kind == 'offsets':
+            for o, t in self.off_tables.items():
+                q = (cell[0] + o[0], cell[1] + o[1])
+                if not _inside(grid, q):
+                    continue
+                v = int(grid[q])
+                if v not in t:
+                    swap = self._swap(t)
+                    if swap is None or v not in swap:
+                        return None
+                    t = {swap[0]: swap[1], swap[1]: swap[0]}
+                out[q] = t[v]
+            return out
+        return None
 
 
 def _inside(grid, p) -> bool:
@@ -107,6 +211,11 @@ class ObjectAgent:
         self.pending = None                         # a contact whose outcome the next move will tell
         self.hidden_walls: set = set()              # cells of this level that block though drawn as background
         self.seen_patterns: set = set()             # patterns the agent has had
+        self.clicks = True
+        self.click_models: Dict[int, ClickModel] = {}
+        self.absent_goals: set = set()              # values whose removal won a level
+        self.absent_rejected: set = set()           # values removed without winning
+        self.trying: Optional[int] = None           # the value a plan is removing to test it as the goal
         self.plan: List = []
         self.wins = self.losses = 0
         self.moves_by = {'planned': 0, 'explored': 0}
@@ -225,10 +334,89 @@ class ObjectAgent:
             seen = self.outcomes_by_grid.get((grid.shape, grid.tobytes(), action))
         if seen is not None:
             return seen
+        if isinstance(action, tuple):
+            return self._click(grid, agent, action[1:])
         u = self.unchanged_in.get(action)
         if u is not None and len(u) >= NOOP_STATES:
             return grid, agent
         return self._by_rules(grid, agent, action)
+
+    # ------------------------------------------------------------- clicks
+    def _clicked(self, grid, cell) -> FrozenSet[Pos]:
+        """The object a click on the cell acts on: the 4-connected cells of its value (the cell alone on background)"""
+        v = int(grid[cell])
+        if self.bg is None or v == self.bg:
+            return frozenset([cell])
+        seen, queue = {cell}, [cell]
+        while queue:
+            p = queue.pop()
+            for dr, dc in SIDES:
+                q = (p[0] + dr, p[1] + dc)
+                if q not in seen and _inside(grid, q) and int(grid[q]) == v:
+                    seen.add(q)
+                    queue.append(q)
+        return frozenset(seen)
+
+    def _click(self, grid, agent, cell):
+        model = self.click_models.get(int(grid[cell]))
+        if model is None:
+            return None
+        after = model.predict(grid, cell, self._clicked(grid, cell))
+        if after is None:
+            return None
+        return after, self._agent_after(grid, agent, after)
+
+    @staticmethod
+    def _agent_after(grid, agent, after):
+        if agent is None or all(after[p] == grid[p] for p in agent):
+            return agent
+        return None
+
+    def _click_actions(self, grid) -> List[tuple]:
+        out = []
+        for v in sorted(set(np.unique(grid).tolist())):
+            cells = [(int(r), int(c)) for r, c in np.argwhere(grid == v)]
+            model = self.click_models.get(v)
+            kind = model.kind() if model else None
+            if kind is None:
+                out.append(cells[0])            # not clicked yet: one click to learn what it does
+            elif kind == 'map':
+                done = set()
+                for p in cells:
+                    if p not in done:
+                        obj = self._clicked(grid, p)
+                        done |= obj
+                        out.append(p)
+            elif kind == 'offsets':
+                out.extend(cells)
+        return [('click',) + p for p in out[:MAX_CLICKS]]
+
+    def _actions(self, grid, actions) -> List:
+        moves = [a for a in actions if a != CLICK]
+        return moves + (self._click_actions(grid) if CLICK in actions else [])
+
+    def _xor_plan(self, grid, v) -> Optional[List[tuple]]:
+        """Clicks that remove value v when every value present toggles the same offsets between two values"""
+        values = set(np.unique(grid).tolist())
+        models = [self.click_models.get(u) for u in values]
+        if any(m is None for m in models):
+            return None
+        swaps = {m.toggles() for m in models}
+        offsets = {frozenset(m.offsets) for m in models}
+        if len(swaps) != 1 or None in swaps or len(offsets) != 1 or not values <= set(next(iter(swaps))) \
+                or v not in values:
+            return None
+        offs = next(iter(offsets))
+        cells = [(r, c) for r in range(grid.shape[0]) for c in range(grid.shape[1])]
+        masks = np.zeros((len(cells), len(cells)), dtype=np.uint8)
+        index = {p: i for i, p in enumerate(cells)}
+        for i, p in enumerate(cells):
+            for o in offs:
+                q = (p[0] + o[0], p[1] + o[1])
+                if q in index:
+                    masks[i, index[q]] = 1
+        x = solve_xor(masks, (grid == v).ravel().astype(np.uint8))
+        return None if x is None else [('click',) + p for p, bit in zip(cells, x) if bit]
 
     def _by_rules(self, grid, agent, action):
         """The transition the contact rules predict (None if they do not say)"""
@@ -293,6 +481,18 @@ class ObjectAgent:
         state = self._key(before, self.agent)
         if before.shape != after.shape:             # the view changed size: nothing to learn from
             self.agent = None
+            return
+        if isinstance(action, tuple):
+            cell = action[1:]
+            if self.bg is None:
+                vals, counts = np.unique(before, return_counts=True)
+                self.bg = int(vals[np.argmax(counts)])
+            self.click_models.setdefault(int(before[cell]), ClickModel()).update(
+                before, cell, self._clicked(before, cell), after)
+            agent_after = self._agent_after(before, self.agent, after)
+            self.outcomes[(state, action)] = (after, agent_after)
+            self.outcomes_by_grid[(before.shape, before.tobytes(), action)] = (after, agent_after)
+            self.agent = agent_after
             return
         if np.array_equal(before, after):
             if self.unchanged_in.get(action, set()) is not None:
@@ -401,7 +601,23 @@ class ObjectAgent:
         return found[0] if len(found) == 1 else None
 
     # ---------------------------------------------------------- the goal
+    def _removes(self, grid, nxt, values) -> Optional[int]:
+        """The first of the values present in grid and absent after the transition"""
+        if nxt is None or not values:
+            return None
+        return next((v for v in sorted(values) if (grid == v).any() and not (nxt[0] == v).any()), None)
+
+    def _goal_trials(self, grid) -> set:
+        """Values to try as "no cell holds v" goals: only while no goal is known and clicks change something"""
+        if self.win_contacts or self.shape_goal or self.absent_goals:
+            return set()
+        if not any(m.kind() in ('map', 'offsets') for m in self.click_models.values()):
+            return set()
+        return set(np.unique(grid).tolist()) - {self.bg} - self._walls() - self.absent_rejected
+
     def wins_with(self, grid, agent, action, nxt) -> bool:
+        if self._removes(grid, nxt, self.absent_goals) is not None:
+            return True
         d = self.directions.get(action)
         if agent is None or d is None:
             return False
@@ -432,6 +648,13 @@ class ObjectAgent:
     def level_won(self, grid, action):
         self.wins += 1
         self.hidden_walls = set()
+        if isinstance(action, tuple):
+            if self.trying is not None:
+                self.absent_goals.add(self.trying)
+            nxt = self._click(grid, self.agent, action[1:])
+            if nxt is not None:
+                self.absent_goals |= {v for v in np.unique(grid).tolist() if not (nxt[0] == v).any()}
+        self.trying = None
         agent, d = self.agent, self.directions.get(action)
         if agent is not None and d is not None:
             objs = self._contacts(grid, agent, d) or []
@@ -481,6 +704,13 @@ class ObjectAgent:
         queue = deque([start])
         explore = None
         targets = self._targets(grid, self.agent) if self.shape_goal else None
+        trials = self._goal_trials(grid)
+        for v in sorted(self.absent_goals | trials, key=lambda v: int((grid == v).sum())):
+            xor = self._xor_plan(grid, v)
+            if xor:
+                self.exploring = False
+                self.trying = None if v in self.absent_goals else v
+                return xor
 
         def path_to(k):
             out = []
@@ -491,12 +721,18 @@ class ObjectAgent:
         while queue and len(parent) < BFS_LIMIT:
             g, agent = queue.popleft()
             k = self._key(g, agent)
-            for a in actions:
+            for a in self._actions(g, actions):
                 if (k, a) in self.losing:
                     continue
                 nxt = self.predict(g, agent, a)
                 if self.wins_with(g, agent, a, nxt):
                     self.exploring = False
+                    self.trying = None
+                    return path_to(k) + [a]
+                tried = self._removes(g, nxt, trials)
+                if tried is not None:
+                    self.exploring = False
+                    self.trying = tried
                     return path_to(k) + [a]
                 grew = nxt is not None and nxt[1] is not None and agent is not None and len(nxt[1]) != len(agent)
                 if grew and targets is not None and not self._fits(nxt[0], nxt[1], targets):
@@ -505,7 +741,8 @@ class ObjectAgent:
                 if nxt is None or novel:
                     if explore is None:
                         explore = path_to(k) + [a]
-                        if not self.win_contacts and not self.shape_goal:
+                        if not self.win_contacts and not self.shape_goal and not self.absent_goals \
+                                and not trials:
                             queue.clear()           # no goal known yet: nothing to search further for
                             break
                     continue
@@ -526,16 +763,25 @@ class ObjectAgent:
             self.moves_by['explored' if self.exploring else 'planned'] += 1
             return self.plan.pop(0)
         self.moves_by['explored'] += 1
-        unknown = [a for a in actions if self.predict(grid, self.agent, a) is None]
-        return self.rng.choice(unknown or actions)
+        options = self._actions(grid, actions)
+        unknown = [a for a in options if self.predict(grid, self.agent, a) is None]
+        if unknown or options:
+            return self.rng.choice(unknown or options)
+        return ('click', self.rng.randrange(grid.shape[0]), self.rng.randrange(grid.shape[1]))
 
     def after_step(self, before, action, after):
         predicted = self.predict(before, self.agent, action)
         self.observe(before, action, after)
+        if self.trying is not None and before.shape == after.shape and not (after == self.trying).any():
+            self.absent_rejected.add(self.trying)        # removed, and the level did not end
+            self.trying = None
+            self.plan = []
         if predicted is None or predicted[0].shape != after.shape or not np.array_equal(predicted[0], after):
             self.plan = []
 
     def describe(self) -> str:
         return (f'background {self.bg}, directions {self.directions}, walls {sorted(self._walls())}, '
                 f'contact rules {len(self.rules)}, win contacts {len(self.win_contacts)}, '
-                f'shape goal {self.shape_goal}, start patterns {len(self.start_patterns)}')
+                f'shape goal {self.shape_goal}, start patterns {len(self.start_patterns)}, '
+                f'clicks {({v: m.kind() for v, m in sorted(self.click_models.items())})}, '
+                f'absent goals {sorted(self.absent_goals)}, rejected {sorted(self.absent_rejected)}')
