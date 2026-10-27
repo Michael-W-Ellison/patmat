@@ -24,7 +24,7 @@ Clicks (ACTION6) are not used yet.
 """
 
 import random
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -33,6 +33,9 @@ from effect_learner import EffectLearner
 SIMPLE_ACTIONS = (1, 2, 3, 4, 5)
 MAX_SCALE = 16
 MARK_TOLERANCE = 0.1
+MIN_REFINED = 3
+RING_GAIN = 0.25
+HISTORY = 8
 WIN_KEY_CELLS = 2
 
 
@@ -62,14 +65,40 @@ def _modes(blocks: np.ndarray) -> np.ndarray:
     return out
 
 
-def find_scale(frame: np.ndarray) -> Tuple[int, int, int]:
-    """(k, oy, ox): the largest block size (and offset) at which the frame is made of uniform blocks"""
+def _ring_mixed(blocks) -> float:
+    """The share of the blocks on the outer ring that are not uniform"""
+    rows, cols = blocks.shape[:2]
+    ring = np.ones((rows, cols), bool)
+    ring[1:-1, 1:-1] = False
+    mixed = (blocks != blocks[..., :1]).any(axis=2)
+    return float(mixed[ring].mean())
+
+
+def find_scale(frame: np.ndarray, also=()) -> Tuple[int, int, int]:
+    """
+    (k, oy, ox): a block size (and offset) at which the frame (and each of the frames in `also`) is
+    made of uniform blocks off the outer ring. The largest such k is taken, unless a smaller one (of at
+    least MIN_REFINED) leaves at least RING_GAIN less of its ring mixed (a large k can hide content in
+    its ring, as on an empty board); for each k, the offset with the least mixed ring.
+    """
+    fits = {}
     for k in range(MAX_SCALE, 1, -1):
         for oy in range(k):
             for ox in range(k):
-                if _scale_fit(frame, k, oy, ox) is not None:
-                    return k, oy, ox
-    return 1, 0, 0
+                blocks = _scale_fit(frame, k, oy, ox)
+                if blocks is not None and all(_scale_fit(f, k, oy, ox) is not None for f in also):
+                    mixed = _ring_mixed(blocks)
+                    if k not in fits or mixed < fits[k][0]:
+                        fits[k] = (mixed, oy, ox)
+        if k in fits and fits[k][0] == 0:
+            break                               # (nothing smaller can do better)
+    if not fits:
+        return 1, 0, 0
+    best = max(fits)
+    for k in sorted(fits, reverse=True):
+        if k >= MIN_REFINED and fits[k][0] <= fits[best][0] - RING_GAIN:
+            best = k
+    return best, fits[best][1], fits[best][2]
 
 
 def cell_grid(frame: np.ndarray, scale: Optional[Tuple[int, int, int]] = None) -> np.ndarray:
@@ -82,19 +111,38 @@ def cell_grid(frame: np.ndarray, scale: Optional[Tuple[int, int, int]] = None) -
 
 class GridReader:
     """
-    Cell grids for one game: the scale is kept while a frame fits it (all but
-    MARK_TOLERANCE of the blocks off the ring uniform: marks drawn at the
-    pixel level over a few cells), else found again (a new level)
+    Cell grids for one game: the scale is kept while a frame fits it, else
+    found again (a new level). A frame that fits only with MARK_TOLERANCE
+    (all but that share of the blocks off the ring uniform) is either one
+    with marks drawn at the pixel level over a few cells, or one whose
+    first frames looked uniform at too large a scale (an empty board): if
+    a scale of at least MIN_REFINED fits this frame and the frames read at
+    the current scale exactly, it is taken, else the current one is kept.
+    The same is tried for any change in the first HISTORY frames at a scale
+    (a change in the ring of blocks, which is not checked, may be content).
     """
 
     def __init__(self):
         self.scale: Optional[Tuple[int, int, int]] = None
+        self.history: List[np.ndarray] = []         # frames read at the current scale (the last HISTORY)
 
     def __call__(self, frame) -> np.ndarray:
         frame = np.asarray(frame)
-        if self.scale is None or _scale_fit(frame, *self.scale, tolerance=MARK_TOLERANCE) is None:
-            self.scale = find_scale(frame)
+        if self.scale is None:
+            self._rescale(find_scale(frame))
+        elif _scale_fit(frame, *self.scale, tolerance=MARK_TOLERANCE) is None:
+            self._rescale(find_scale(frame))
+        elif _scale_fit(frame, *self.scale) is None or (
+                len(self.history) < HISTORY and not np.array_equal(frame, self.history[-1])):
+            finer = find_scale(frame, self.history)
+            if MIN_REFINED <= finer[0] < self.scale[0]:
+                self._rescale(finer)
+        self.history = (self.history + [frame])[-HISTORY:]
         return cell_grid(frame, self.scale)
+
+    def _rescale(self, scale):
+        self.scale = scale
+        self.history = []
 
     def pixel(self, cell) -> Tuple[int, int]:
         """(x, y) display coordinates of the centre of a cell of the last grid (for ACTION6)"""

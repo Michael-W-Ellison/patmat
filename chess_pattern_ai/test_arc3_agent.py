@@ -103,6 +103,14 @@ class LocalEnv:
 
 
 class TestGrid(unittest.TestCase):
+    def test_drop_target(self):
+        from object_agent import ClickModel
+        g = np.array([[5, 5, 5], [5, 0, 5], [5, 0, 5], [5, 2, 5], [5, 5, 5]])
+        self.assertEqual(ClickModel.drop_target(g, (1, 1), (1, 0), 0), (2, 1))     # onto the 2
+        self.assertEqual(ClickModel.drop_target(g, (3, 1), (1, 0), 0), (2, 1))     # a click on the 2 too
+        g[2, 1] = g[1, 1] = 2
+        self.assertIsNone(ClickModel.drop_target(g, (1, 1), (1, 0), 0))            # a full column
+
     def test_scale_letterbox_and_status_bar(self):
         rng = np.random.default_rng(0)
         cells = rng.integers(0, 10, size=(12, 12))
@@ -223,6 +231,26 @@ class TestClicks(unittest.TestCase):
         self.assertEqual(agent.transform_ops[1].most_common(1)[0][0], ('turn right', (0, 0)))
         self.assertIn((ANY, 16, (0, 1)), agent.line_goals)                 # a full row scores
         self.assertGreater(sum(scores), 0)
+
+    def test_connect_four(self):
+        from arc3_games import GAMES, local_env
+        from evaluate_arc3 import play
+        agent = ObjectAgent(random.Random(0))
+        results = []
+        for ep in range(6):
+            agent.new_episode()
+            env = local_env(GAMES['connect4'](seed=ep))
+            play(env, agent.act, 300, agent, stop_on_loss=True)
+            results.append(env.game.result)
+        self.assertEqual(agent.click_models[0].kind(), 'drop')            # a click drops into its column
+        self.assertEqual(agent.click_models[0].drop_dir(), (1, 0))
+        self.assertIn((2, 4, None), agent.line_goals)
+        self.assertGreaterEqual(results[2:].count('win'), 3)
+
+    def test_empty_board_scale(self):
+        from arc3_games import GAMES, local_env
+        env = local_env(GAMES['connect4'](seed=0))
+        self.assertEqual(find_scale(np.asarray(env.reset().frame[-1]))[0], 7)    # not a larger, empty-looking one
 
     def test_grid_reader_pixel(self):
         read = GridReader()

@@ -28,6 +28,19 @@ the player.
   next piece (random) appears at the top. The game is lost when it has no
   room to appear. win_levels is 200 (a game ends by a loss in practice).
 
+- KInARow: k marks in a row on a board inside a border of 5 (empty 0,
+  the player's mark 2, the opponent's 1), one game per episode (one
+  level): the player clicks a cell (Gomoku: an empty cell gets its mark;
+  Connect Four, with drop: a cell of a column, and the mark drops to the
+  lowest empty cell of that column); the opponent's move is a second frame.
+  The opponent is 'random' (as in the project's earlier board-game
+  trainers) or 'block' (completes its own k if it can, else blocks the
+  player's, else random). Who moves first alternates with the seed (the
+  opponent's first move is on the board at the start). k in a row of the
+  player's wins (WIN), of the opponent's loses (GAME_OVER), a full board is
+  a draw (also GAME_OVER); `result` says which. Games: 'connect4' (6 x 7,
+  k 4, drop), 'gomoku' (15 x 15, k 5), and '-block' versions.
+
 GAMES maps names to game classes; local_env(game) gives the reset/step
 interface of the ARC-AGI toolkit's environment wrappers.
 """
@@ -327,7 +340,115 @@ class Tetris(ARCBaseGame):
         self.complete_action()
 
 
-GAMES = {'lights': LightsOut, 'clear': ClearRed, 'tictactoe': TicTacToe, 'tetris': Tetris}
+class KInARow(ARCBaseGame):
+    def __init__(self, seed: int = 0, rows: int = 6, cols: int = 7, k: int = 4, drop: bool = True,
+                 opponent: str = 'random'):
+        self.rng = random.Random(seed)
+        self.rows, self.cols, self.k, self.drop, self.opponent = rows, cols, k, drop, opponent
+        self.agent_first = seed % 2 == 0
+        self.result = None
+        self._reply = False
+        px = np.full((rows + 2, cols + 2), BORDER, dtype=np.int8)
+        px[1:-1, 1:-1] = EMPTY
+        level = Level(sprites=[Sprite(pixels=px, name='board')], grid_size=(cols + 2, rows + 2))
+        super().__init__(game_id='kinarow', levels=[level],
+                         camera=Camera(width=cols + 2, height=rows + 2, background=EMPTY, letter_box=3))
+
+    def _board(self):
+        return self.current_level.get_sprites_by_name('board')[0]
+
+    def _legal(self, b):
+        if self.drop:
+            return [(max(r for r in range(self.rows) if b[r, c] == EMPTY), c)
+                    for c in range(self.cols) if b[0, c] == EMPTY]
+        return [(r, c) for r in range(self.rows) for c in range(self.cols) if b[r, c] == EMPTY]
+
+    def _line(self, b, v, p) -> bool:
+        """k of v in a line through p"""
+        for dr, dc in ((0, 1), (1, 0), (1, 1), (1, -1)):
+            n = 1
+            for s in (1, -1):
+                r, c = p[0] + s * dr, p[1] + s * dc
+                while 0 <= r < self.rows and 0 <= c < self.cols and b[r, c] == v:
+                    n += 1
+                    r, c = r + s * dr, c + s * dc
+            if n >= self.k:
+                return True
+        return False
+
+    def _opponent_move(self, b):
+        legal = self._legal(b)
+        if self.opponent == 'block':
+            for v in (THEIRS, MINE):
+                for p in legal:
+                    trial = b.copy()
+                    trial[p] = v
+                    if self._line(trial, v, p):
+                        return p
+        return self.rng.choice(legal)
+
+    def on_set_level(self, level):
+        self.result = None
+        self._reply = False
+        if not self.agent_first:
+            sprite = level.get_sprites_by_name('board')[0]
+            px = sprite.pixels.copy()
+            px[1:-1, 1:-1][self._opponent_move(px[1:-1, 1:-1])] = THEIRS
+            sprite.pixels = px
+
+    def step(self):
+        sprite = self._board()
+        px = sprite.pixels.copy()
+        b = px[1:-1, 1:-1]
+        if self._reply:                         # the opponent's move, in a second frame
+            self._reply = False
+            p = self._opponent_move(b)
+            b[p] = THEIRS
+            sprite.pixels = px
+            if self._line(b, THEIRS, p):
+                self.result = 'loss'
+                self.lose()
+            elif not self._legal(b):
+                self.result = 'draw'
+                self.lose()
+            self.complete_action()
+            return
+        if self.action.id == GameAction.ACTION6:
+            at = self.camera.display_to_grid(self.action.data.get('x', 0), self.action.data.get('y', 0))
+            if at is not None:
+                c, r = at[0] - 1, at[1] - 1
+                target = None
+                if 0 <= r < self.rows and 0 <= c < self.cols:
+                    if self.drop:
+                        target = next((q for q in self._legal(b) if q[1] == c), None)
+                    elif b[r, c] == EMPTY:
+                        target = (r, c)
+                if target is not None:
+                    b[target] = MINE
+                    sprite.pixels = px
+                    if self._line(b, MINE, target):
+                        self.result = 'win'
+                        self.win()
+                    elif not self._legal(b):
+                        self.result = 'draw'
+                        self.lose()
+                    else:
+                        self._reply = True      # the action goes on: one more frame, for the opponent
+                        return
+        self.complete_action()
+
+
+def _k_game(**kw):
+    def make(seed: int = 0):
+        return KInARow(seed=seed, **kw)
+    return make
+
+
+GAMES = {'lights': LightsOut, 'clear': ClearRed, 'tictactoe': TicTacToe, 'tetris': Tetris,
+         'connect4': _k_game(), 'connect4-block': _k_game(opponent='block'),
+         'gomoku': _k_game(rows=15, cols=15, k=5, drop=False),
+         'gomoku-block': _k_game(rows=15, cols=15, k=5, drop=False, opponent='block')}
+BOARD_GAMES = ('connect4', 'connect4-block', 'gomoku', 'gomoku-block')
 
 
 class _LocalEnv:

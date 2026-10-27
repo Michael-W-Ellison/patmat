@@ -33,6 +33,13 @@ plays games that count points as levels (Tetris by default): each episode
 is one game, ending at the first loss; the score (levels_completed) is
 reported.
 
+    python3 evaluate_arc3.py --board-games [games] [max_actions] [seed] [agent] [game ...]
+
+plays the k-in-a-row games of arc3_games.py (Connect Four and Gomoku, against
+a random opponent by default): each episode is one game, a different seed
+each (so who moves first alternates); wins, losses and draws are reported
+for each block of BLOCK games, for the agent and for a random player.
+
 Frames: an action can produce several frames (a game shows, for example,
 the player's move and then each other player's). An agent with
 `uses_frames = True` gets them all, as cell grids, in after_step,
@@ -47,6 +54,7 @@ from arc3_agent import SIMPLE_ACTIONS, Arc3Agent, GridReader
 from object_agent import ObjectAgent
 
 AGENTS = {'cell': Arc3Agent, 'object': ObjectAgent}
+BLOCK = 20
 
 
 def play(env, choose, max_actions: int, agent=None, clicks=None, stop_on_loss=False):
@@ -118,6 +126,9 @@ def main():
     max_actions = int(sys.argv[3]) if len(sys.argv) > 3 else 2000
     seed = int(sys.argv[4]) if len(sys.argv) > 4 else 0
     make = AGENTS[sys.argv[5]] if len(sys.argv) > 5 else ObjectAgent
+    if sys.argv[1] == '--board-games':
+        board_games(episodes, max_actions, seed, make, sys.argv[6:] or ['connect4', 'gomoku'])
+        return
     stop_on_loss = sys.argv[1] == '--score-games'
     if sys.argv[1] in ('--click-games', '--score-games'):
         from arc3_games import GAMES, local_env
@@ -152,6 +163,30 @@ def main():
                                                      stop_on_loss=stop_on_loss)
         print(f'   random: levels {done}/{total}, actions per level {per_level}, losses {losses}'
               + (f', score {score}' if stop_on_loss else ''))
+        print(f'   agent: {agent.describe()}')
+
+
+def board_games(games, max_actions, seed, make, names):
+    from arc3_games import GAMES, local_env
+    for name in names:
+        agent = make(random.Random(seed))
+        rng = random.Random(seed)
+        print(f'== {name}')
+        for who in ('agent', 'random'):
+            results = []
+            for i in range(games):
+                env = local_env(GAMES[name](seed=seed * 1000 + i))
+                if who == 'agent':
+                    agent.new_episode()
+                    play(env, agent.act, max_actions, agent, stop_on_loss=True)
+                else:
+                    play(env, random_choice(rng), max_actions, clicks=True, stop_on_loss=True)
+                results.append(env.game.result or 'unfinished')
+            blocks = [results[i:i + BLOCK] for i in range(0, len(results), BLOCK)]
+            print(f'   {who}: ' + '; '.join(f'games {i * BLOCK + 1}-{i * BLOCK + len(b)}: '
+                                            f'{b.count("win")}W {b.count("loss")}L {b.count("draw")}D'
+                                            + (f' {b.count("unfinished")} unfinished' if b.count('unfinished') else '')
+                                            for i, b in enumerate(blocks)), flush=True)
         print(f'   agent: {agent.describe()}')
 
 

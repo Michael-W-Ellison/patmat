@@ -53,6 +53,12 @@ every click seen on that value:
     offsets   the cells at fixed offsets from the clicked cell change by a
               table per offset (an offset whose entries all swap two values
               is taken to swap them for a value not yet seen there)
+    drop      one cell changes from a value e to a value w: the cell where
+              something dropped along a direction d in the clicked line
+              lands (past the cells that are not e at the line's start, the
+              last of the run of e that follows), as in Connect Four
+(for other players, whose clicked cell is not seen, a drop that fits at
+least 3 moves is preferred to the others, as it allows the fewest moves)
 The clicks considered in a state are one per value not yet clicked, one
 per object of a value whose clicks map, and every cell of a value whose
 clicks act at offsets (at most MAX_CLICKS).
@@ -119,11 +125,19 @@ move (by CE_SMOOTH) to those of the CE_ELITE episodes with the highest
 score (levels completed, then actions survived), the spread kept at least
 CE_MIN_STD.
 
-With other players' moves known, the agent plans by minimax: its
-own moves, then each other player's possible moves (all assumed to play
-against it), to MAX_DEPTH of its own moves, a win counting 1 and a loss -1,
-discounted by DISCOUNT per move so that quicker wins and later losses are
-preferred; moves of equal value are chosen among at random.
+With other players' moves known, the agent plans by search: its own
+moves, then each other player's possible moves (all assumed to play
+against it), by alpha-beta, deepened one of its moves at a time up to
+MAX_DEPTH while each depth stays within SEARCH_NODES positions; a win
+counts 1 and a loss -1, discounted by DISCOUNT per move so that quicker
+wins and later losses are preferred, and a position at the depth limit is
+valued by progress toward the learned lines (the windows of k cells along
+a goal line that hold only its value and cells that moves replace, each
+worth 4 ^ (cells of its value) / 4 ^ k, the other players' loss lines
+counting against; scaled into (-0.5, 0.5)). Each player's moves are
+limited to MAX_OPTIONS, those next to cells that moves have marked (on an
+empty board, those nearest the centre). Moves of equal value are chosen
+among at random.
 
 Planning: breadth-first search over (grid, agent cells) states predicted
 by the rules, up to BFS_LIMIT states. Under the rules learned an agent
@@ -152,6 +166,8 @@ CLICK = 6
 MAX_CLICKS = 64
 MAX_DEPTH = 5
 DISCOUNT = 0.9
+SEARCH_NODES = 3000         # positions searched per depth of the iterative deepening
+MAX_OPTIONS = 12            # moves considered per player in a position (those near marks, if more)
 LINE_DIRS = ((0, 1), (1, 0), (1, 1), (1, -1))
 ANY = -100                  # line hypotheses over any non-background value
 MISS_RATIO = 3              # a line hypothesis is kept while formed MISS_RATIO times as often in wins as elsewhere
@@ -187,10 +203,45 @@ class ClickModel:
         self.table: Dict[int, int] = {}
         self.offsets: set = set()
         self.off_tables: Dict[Pos, Dict[int, int]] = {}
+        self.drops = {d: True for d in SIDES}       # drop along d still fits every click seen
+        self.drop_values: Optional[Tuple[int, int]] = None    # (value the cell held, value placed)
+
+    @staticmethod
+    def drop_target(grid, cell, d, empty) -> Optional[Pos]:
+        """
+        Where something dropped along d in the line through the cell lands: from the line's start
+        (against d), past cells that are not empty, the last of the run of empty cells that follows
+        """
+        p = cell
+        while _inside(grid, (p[0] - d[0], p[1] - d[1])):
+            p = (p[0] - d[0], p[1] - d[1])
+        while _inside(grid, p) and int(grid[p]) != empty:
+            p = (p[0] + d[0], p[1] + d[1])
+        last = None
+        while _inside(grid, p) and int(grid[p]) == empty:
+            last, p = p, (p[0] + d[0], p[1] + d[1])
+        return last
+
+    def _update_drop(self, grid, cell, changed, after):
+        if len(changed) != 1:
+            if changed:
+                self.drops = {d: False for d in SIDES}
+            return
+        q = next(iter(changed))
+        values = (int(grid[q]), int(after[q]))
+        if self.drop_values is None:
+            self.drop_values = values
+        if values != self.drop_values:
+            self.drops = {d: False for d in SIDES}
+            return
+        for d in SIDES:
+            if self.drops[d] and self.drop_target(grid, cell, d, values[0]) != q:
+                self.drops[d] = False
 
     def update(self, grid, cell, obj, after):
         self.seen.append((grid, cell, obj, after))
         changed = {(int(r), int(c)) for r, c in np.argwhere(grid != after)}
+        self._update_drop(grid, cell, changed, after)
         if changed:
             self.ok['none'] = False
         if self.ok['map']:
@@ -208,10 +259,22 @@ class ClickModel:
                 if _inside(g, q) and self.off_tables[o].setdefault(int(g[q]), int(a[q])) != int(a[q]):
                     self.ok['offsets'] = False
 
-    def kind(self) -> Optional[str]:
+    def drop_dir(self) -> Optional[Pos]:
+        return next((d for d in SIDES if self.drops[d]), None) if self.drop_values is not None else None
+
+    def kind(self, narrow=False) -> Optional[str]:
+        """
+        The first kind that fits every click seen. narrow (for other players, whose clicked cell is
+        not seen): a drop that fits at least 3 moves comes first, as it allows the fewest moves
+        """
         if not self.seen:
             return None
-        return next((k for k in ('none', 'map', 'offsets') if self.ok[k]), None)
+        if narrow and len(self.seen) >= 3 and self.drop_dir() is not None and not self.ok['none']:
+            return 'drop'
+        kind = next((k for k in ('none', 'map', 'offsets') if self.ok[k]), None)
+        if kind is None and self.drop_dir() is not None:
+            return 'drop'
+        return kind
 
     @staticmethod
     def _swap(table) -> Optional[Tuple[int, int]]:
@@ -229,11 +292,16 @@ class ClickModel:
         swaps = {self._swap(t) for t in self.off_tables.values()}
         return swaps.pop() if len(swaps) == 1 and None not in swaps else None
 
-    def predict(self, grid, cell, obj) -> Optional[np.ndarray]:
-        kind = self.kind()
+    def predict(self, grid, cell, obj, narrow=False) -> Optional[np.ndarray]:
+        kind = self.kind(narrow)
         if kind == 'none':
             return grid
         out = grid.copy()
+        if kind == 'drop':
+            q = self.drop_target(grid, cell, self.drop_dir(), self.drop_values[0])
+            if q is not None:
+                out[q] = self.drop_values[1]
+            return out
         if kind == 'map':
             for q in obj:
                 if int(grid[q]) not in self.table:
@@ -309,6 +377,8 @@ class ObjectAgent:
         self.line_hits, self.line_misses = Counter(), Counter()     # wins in which, and other times, formed
         self.loss_hits, self.loss_misses = Counter(), Counter()
         self.line_events = self.loss_events = 0     # wins (losses) in which any line hypothesis formed
+        self._window_cache: Dict[tuple, np.ndarray] = {}
+        self._action_cache: Dict[bytes, List] = {}
         self.transforms: Dict[tuple, tuple] = {}    # (action, pattern) -> (new pattern, box offset)
         self.still: Dict[tuple, set] = {}           # (action, pattern) -> states where it changed nothing
         self.transform_ops: Dict[object, Counter] = {}  # action -> (geometric operation, box offset) seen
@@ -493,6 +563,13 @@ class ObjectAgent:
                         out.append(p)
             elif kind == 'offsets':
                 out.extend(cells)
+            elif kind == 'drop':
+                targets = set()
+                for p in cells:
+                    q = model.drop_target(grid, p, model.drop_dir(), model.drop_values[0])
+                    if q is not None and q not in targets:
+                        targets.add(q)
+                        out.append(p)
         return [('click',) + p for p in out[:MAX_CLICKS]]
 
     def _actions(self, grid, actions) -> List:
@@ -796,10 +873,28 @@ class ObjectAgent:
     def _mask(self, grid, v):
         return grid != self.bg if v == ANY else grid == v
 
+    def _windows(self, shape, k, d) -> np.ndarray:
+        """Flat indices of every k cells in a straight line along d (all directions if None)"""
+        key = (shape, k, d)
+        if key not in self._window_cache:
+            idx = []
+            for dd in ([d] if d else LINE_DIRS):
+                for r in range(shape[0]):
+                    for c in range(shape[1]):
+                        r1, c1 = r + (k - 1) * dd[0], c + (k - 1) * dd[1]
+                        if 0 <= r1 < shape[0] and 0 <= c1 < shape[1]:
+                            idx.append([(r + i * dd[0]) * shape[1] + c + i * dd[1] for i in range(k)])
+            self._window_cache[key] = np.array(idx, dtype=np.int64).reshape(-1, k)
+        return self._window_cache[key]
+
     def _count(self, grid, line) -> int:
+        """Windows of k cells along the line's direction(s) that all hold its value"""
         v, k, d = line
-        mask = self._mask(grid, v)
-        return sum(1 for dd in ([d] if d else LINE_DIRS) for n in runs(mask, dd) if n >= k)
+        w = self._windows(grid.shape, k, d)
+        if not len(w):
+            return 0
+        vals = grid.ravel()[w]
+        return int(((vals != self.bg) if v == ANY else (vals == v)).all(axis=1).sum())
 
     def _formed(self, before, after, lines) -> int:
         """How many new lines the transition formed, for the hypothesis that forms most"""
@@ -970,70 +1065,174 @@ class ObjectAgent:
     # ---------------------------------------------------------- planning
     # ------------------------------------------------------ other players
     def _others_known(self) -> bool:
-        return any(m.kind() in ('map', 'offsets') for d in self.others for m in d.values())
+        return any(m.kind(narrow=True) in ('map', 'offsets', 'drop') for d in self.others for m in d.values())
 
-    def _other_moves(self, i, grid) -> List[np.ndarray]:
+    def _other_moves(self, i, grid, limit=False) -> List[np.ndarray]:
         out, seen = [], set()
         for v, m in self.others[i].items():
-            if m.kind() not in ('map', 'offsets'):
+            kind = m.kind(narrow=True)
+            if kind not in ('map', 'offsets', 'drop'):
                 continue
             done = set()
-            for r, c in np.argwhere(grid == v):
-                p = (int(r), int(c))
+            cells = [(int(r), int(c)) for r, c in np.argwhere(grid == v)]
+            if limit and kind != 'drop':
+                cells = self._closest(grid, cells)
+            for p in cells:
                 if p in done:
                     continue
                 obj = self._clicked(grid, p)
-                if m.kind() == 'map':
+                if kind == 'map':
                     done |= obj
-                g = m.predict(grid, p, obj)
+                g = m.predict(grid, p, obj, narrow=True)
                 if g is not None and not np.array_equal(g, grid) and g.tobytes() not in seen:
                     seen.add(g.tobytes())
                     out.append(g)
         return out
 
-    def _minimax(self, grid, actions):
-        """(value, best actions) of the agent's move here, against the other players"""
-        memo = {}
+    def _placed(self) -> Tuple[set, set]:
+        """(values moves place, values they replace): from the agent's clicks and the other players' moves"""
+        marks, empties = set(), set()
+        for models in [self.click_models] + self.others:
+            for v, m in models.items():
+                kind = m.kind()
+                if kind == 'drop' or (kind is None and m.drop_dir() is not None):
+                    empties.add(m.drop_values[0])
+                    marks.add(m.drop_values[1])
+                elif kind == 'map' and m.table.get(v, v) != v:
+                    empties.add(v)
+                    marks.add(m.table[v])
+                elif kind == 'offsets' and m.off_tables.get((0, 0), {}).get(v, v) != v:
+                    empties.add(v)
+                    marks.add(m.off_tables[(0, 0)][v])
+        return marks, empties - marks
 
-        def ours(g, agent, depth):
-            key = ('us', g.tobytes(), depth)
-            if key in memo:
-                return memo[key]
-            best, acts = None, []
-            for a in self._actions(g, actions):
-                nxt = self.predict(g, agent, a)
-                if nxt is None or nxt[0].shape != g.shape or np.array_equal(nxt[0], g):
+    def _closest(self, grid, cells, cell_of=lambda p: p):
+        """At most MAX_OPTIONS of the cells: those next to a mark (cells moves have marked), else nearest the centre"""
+        if len(cells) <= MAX_OPTIONS:
+            return cells
+        marks, _ = self._placed()
+        placed = np.isin(grid, list(marks)) if marks else np.zeros(grid.shape, bool)
+        centre = ((grid.shape[0] - 1) / 2, (grid.shape[1] - 1) / 2)
+
+        def closeness(x):
+            r, c = cell_of(x)
+            touch = placed[max(r - 1, 0):r + 2, max(c - 1, 0):c + 2].any()
+            return (0 if touch else 1, abs(r - centre[0]) + abs(c - centre[1]))
+        return sorted(cells, key=closeness)[:MAX_OPTIONS]
+
+    def _search_actions(self, g, actions) -> List:
+        """The agent's moves considered in a search position: its moves, and at most MAX_OPTIONS clicks"""
+        key = g.tobytes()
+        if key not in self._action_cache:
+            acts = self._actions(g, actions)
+            moves = [a for a in acts if not isinstance(a, tuple)]
+            clicks = [a for a in acts if isinstance(a, tuple)]
+
+            def cell_of(a):
+                m = self.click_models.get(int(g[a[1:]]))
+                if m is not None and m.kind() == 'drop':
+                    q = m.drop_target(g, a[1:], m.drop_dir(), m.drop_values[0])
+                    return q if q is not None else a[1:]
+                return a[1:]
+            self._action_cache[key] = moves + self._closest(g, clicks, cell_of)
+        return self._action_cache[key]
+
+    def _eval(self, grid) -> float:
+        """
+        Progress toward the learned lines, in (-0.5, 0.5): each window of a goal line holding only its
+        value and cells moves replace counts 4^(its value's cells) / 4^k; the opponents' (loss lines) count
+        against
+        """
+        _, empties = self._placed()
+        score = 0.0
+        for sign, lines in ((1, self.line_goals or ()), (-1, self.line_losses or ())):
+            for v, k, d in lines:
+                if v == ANY:
                     continue
-                if self.wins_with(g, agent, a, nxt):
-                    v = 1.0
-                elif self._formed(g, nxt[0], self.line_losses) > 0:
-                    v = -1.0
-                elif depth <= 1:
-                    v = 0.0
-                else:
-                    v = DISCOUNT * theirs(nxt[0], nxt[1], 0, depth)
-                if best is None or v > best:
-                    best, acts = v, [a]
-                elif v == best:
-                    acts.append(a)
-            memo[key] = (best if best is not None else 0.0, acts)
-            return memo[key]
+                w = self._windows(grid.shape, k, d)
+                if not len(w):
+                    continue
+                vals = grid.ravel()[w]
+                mine = vals == v
+                open_ = (mine | np.isin(vals, list(empties))).all(axis=1)
+                score += sign * float((4.0 ** mine.sum(axis=1)[open_]).sum()) / 4.0 ** k
+        return 0.5 * float(np.tanh(score))
 
-        def theirs(g, agent, i, depth):
-            if i == len(self.others):
-                return ours(g, agent, depth - 1)[0]
-            key = ('them', g.tobytes(), i, depth)
-            if key in memo:
-                return memo[key]
-            moves = self._other_moves(i, g)
-            if not moves:
-                v = theirs(g, agent, i + 1, depth)
+    def _search(self, grid, actions):
+        """
+        (value, best actions): iterative deepening of a depth-limited search (alpha-beta, all other players
+        against the agent), each depth with a budget of SEARCH_NODES positions; the deepest depth finished
+        is used
+        """
+        result = None
+        self._action_cache = {}
+        for depth in range(1, MAX_DEPTH + 1):
+            self._nodes = SEARCH_NODES
+            value, acts = self._ours(grid, self.agent, depth, -2.0, 2.0, actions, root=True)
+            if self._nodes < 0 and result is not None:
+                break
+            result = (value, acts)
+            if abs(value) >= 0.99 * DISCOUNT ** (depth - 1) and value != 0:
+                break                           # a forced win or loss is found
+        return result
+
+    def _ours(self, g, agent, depth, alpha, beta, actions, root=False):
+        options = []
+        seen = set()
+        for a in self._search_actions(g, actions):
+            nxt = self.predict(g, agent, a)
+            if nxt is None or nxt[0].shape != g.shape or np.array_equal(nxt[0], g) or nxt[0].tobytes() in seen:
+                continue
+            seen.add(nxt[0].tobytes())
+            options.append((a, nxt))
+        if not options:
+            return 0.0, []
+        scored = []
+        for a, nxt in options:
+            if self.wins_with(g, agent, a, nxt):
+                scored.append((1.0, a, nxt, True))
+            elif self.line_losses and self._formed(g, nxt[0], self.line_losses) > 0:
+                scored.append((-1.0, a, nxt, True))
             else:
-                v = min(-1.0 if self._formed(g, m, self.line_losses) > 0 else theirs(m, agent, i + 1, depth)
-                        for m in moves)
-            memo[key] = v
-            return v
-        return ours(grid, self.agent, MAX_DEPTH)
+                scored.append((self._eval(nxt[0]), a, nxt, False))
+        scored.sort(key=lambda t: -t[0])
+        best, acts = None, []
+        for value, a, nxt, final in scored:
+            self._nodes -= 1
+            if not final and depth > 1:
+                value = DISCOUNT * self._theirs(nxt[0], nxt[1], 0, depth, alpha, beta, actions)
+            if best is None or value > best:
+                best, acts = value, [a]
+            elif value == best:
+                acts.append(a)
+            alpha = max(alpha, value)
+            if not root and (alpha >= beta or self._nodes < 0):
+                break
+        return best, acts
+
+    def _theirs(self, g, agent, i, depth, alpha, beta, actions):
+        if i == len(self.others):
+            return self._ours(g, agent, depth - 1, alpha, beta, actions)[0]
+        moves = self._other_moves(i, g, limit=True)[:MAX_OPTIONS]
+        if not moves:
+            return self._theirs(g, agent, i + 1, depth, alpha, beta, actions)
+        scored = []
+        for m in moves:
+            if self.line_losses and self._formed(g, m, self.line_losses) > 0:
+                scored.append((-1.0, m, True))
+            else:
+                scored.append((self._eval(m), m, False))
+        scored.sort(key=lambda t: t[0])
+        worst = None
+        for value, m, final in scored:
+            self._nodes -= 1
+            if not final:
+                value = self._theirs(m, agent, i + 1, depth, alpha, beta, actions)
+            worst = value if worst is None else min(worst, value)
+            beta = min(beta, value)
+            if alpha >= beta or self._nodes < 0:
+                break
+        return worst
 
     # ------------------------------------------------------------ drift
     def _settle(self, grid, agent, action):
@@ -1133,7 +1332,7 @@ class ObjectAgent:
         if self._others_known():
             # explore what is not known first (a value not clicked yet), then play the minimax move
             unknown = [a for a in self._actions(grid, actions) if self.predict(grid, self.agent, a) is None]
-            value, best = self._minimax(grid, actions)
+            value, best = self._search(grid, actions)
             if best and (value != 0 or not unknown or self.line_goals is not None):
                 self.exploring = False
                 return [self.rng.choice(best)]
