@@ -27,7 +27,8 @@ values. What is learned:
             learned per pair of keys: nothing moves, or both vanish (the
             agent stays)
   A value whose contacts only ever block is a wall value. When two outcomes
-  give the same grid (a merged agent that moved, or a pushed object), the
+  give the same grid (a merged agent that moved, or a pushed object; when
+  nothing changed, block is taken), the
   agent's next moves tell which (the first one that only one of them
   predicts); if the level ends first, the first outcome listed is taken.
 - the goal, from level completions: the winning move either touched an
@@ -358,6 +359,8 @@ class ObjectAgent:
                         matches[kind] = nxt[1]
                 if not matches and self._learn_collision(before, agent, d, objs, after):
                     return agent
+                if 'block' in matches:
+                    matches = {'block': matches['block']}     # nothing changed: the simplest account
                 if len(set(matches.values())) > 1:
                     self.pending = (before, objs, shifted(agent, d), matches)
                     return next(iter(matches.values()))
