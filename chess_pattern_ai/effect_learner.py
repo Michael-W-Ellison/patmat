@@ -29,9 +29,11 @@ Planning uses the first consistent model:
   modulo 2 and the plan with the fewest actions solves a linear system;
 - otherwise breadth-first search over the states the model predicts,
   leaving out transitions it cannot predict.
-With no plan, the learner explores: it takes an action whose outcome its
-model cannot predict, or else a random one. A plan is dropped when an
-outcome differs from its prediction.
+With no way to the goal, the learner explores: the search also finds the
+nearest state with an action whose outcome the model cannot predict, and
+the learner goes there and tries it; with no such state, it takes an
+action it cannot predict here, or else a random one. A plan is dropped
+when an outcome differs from its prediction.
 """
 
 import itertools
@@ -155,6 +157,7 @@ class EffectLearner:
         self.directions: Dict[object, Tuple[int, int]] = {}
         self.pending: List[Tuple[np.ndarray, object, np.ndarray]] = []
         self.plan: List = []
+        self.exploring = False
         self.moves_by = {'planned': 0, 'explored': 0}
 
     # ---------------------------------------------------------- learning
@@ -252,34 +255,44 @@ class EffectLearner:
                     return None
                 masks.append(after.ravel())
             x = solve_xor(np.array(masks), np.isin(grid, self.goal_absent).ravel().astype(int))
+            self.exploring = False
             return None if x is None else [a for a, bit in zip(actions, x) if bit]
         start = grid.tobytes()
         seen = {start: None}
         queue = deque([grid])
+        explore = None           # path to the nearest state with an action the model cannot predict
+
+        def path_to(k):
+            path = []
+            while seen[k] is not None:
+                k, a = seen[k]
+                path.append(a)
+            return path[::-1]
         while queue and len(seen) < BFS_LIMIT:
             g = queue.popleft()
             if self._goal(g):
-                path, k = [], g.tobytes()
-                while seen[k] is not None:
-                    k, a = seen[k]
-                    path.append(a)
-                return path[::-1]
+                self.exploring = False
+                return path_to(g.tobytes())
             for a in actions:
                 h = self.predict(g, a)
                 if h is None:
+                    if explore is None:
+                        explore = path_to(g.tobytes()) + [a]
                     continue
                 k = h.tobytes()
                 if k not in seen:
                     seen[k] = (g.tobytes(), a)
                     queue.append(h)
-        return None
+        # no known way to the goal: go and try the nearest action whose outcome is unknown
+        self.exploring = explore is not None
+        return explore
 
     # -------------------------------------------------------------- play
     def act(self, grid, actions):
         if not self.plan:
             self.plan = self.make_plan(grid, actions) or []
         if self.plan:
-            self.moves_by['planned'] += 1
+            self.moves_by['explored' if self.exploring else 'planned'] += 1
             return self.plan.pop(0)
         self.moves_by['explored'] += 1
         unknown = [a for a in actions if self.predict(grid, a) is None]
