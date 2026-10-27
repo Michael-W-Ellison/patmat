@@ -48,9 +48,11 @@ MAX_TRIES = 50
 
 class BinaryPuzzle:
     def __init__(self, rows: int, cols: int, filled: Set[Pos], clues: Dict[Pos, int], board: Set[Pos],
-                 shown_empty: Set[Pos] = frozenset(), shown_filled: Set[Pos] = frozenset()):
+                 shown_empty: Set[Pos] = frozenset(), shown_filled: Set[Pos] = frozenset(),
+                 markers: Optional[Dict[Pos, int]] = None):
         self.rows, self.cols = rows, cols
         self.filled, self.clues, self.board = set(filled), dict(clues), set(board)
+        self.markers = dict(markers or {})      # cells outside the board shown with a marker value
         self.shown_filled = set(shown_filled)
         self.playable = self.board - set(self.clues) - self.shown_filled
         self.shown_empty = set(shown_empty)
@@ -85,6 +87,8 @@ class BinaryPuzzle:
 
     def observation(self) -> List[List[int]]:
         view = [[OUTSIDE] * self.cols for _ in range(self.rows)]
+        for (r, c), v in self.markers.items():
+            view[r][c] = v
         for r, c in self.board:
             view[r][c] = EMPTY if (r, c) in self.revealed else MINE if (r, c) in self.shown_filled else HIDDEN
         for (r, c), v in self.clues.items():

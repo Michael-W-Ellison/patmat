@@ -17,6 +17,14 @@ shown as MINE) and from what it sees while playing.
    - region: "every row / every column / every 3x3 box of the board holds
              the same number k of mine cells" (k read from the first
              region seen)
+   - global: connectivity of the mine (or not-mine) cells, by sides or
+             through cells showing one marker value; no 2x2 block of one
+             class; islands (every group of not-mine cells holds one clue,
+             equal to its size); degree (every cell showing marker V touches
+             a number of mine cells in a set S). See global_constraints.py.
+             Each attempt adds as evidence how unlikely the rule would be to
+             hold by chance (on boards with the mines placed at random); one
+             is accepted at ACCEPT_AFTER_GLOBAL
    Every finished attempt checks every hypothesis wherever it applies; one
    violation rejects a hypothesis, and one confirmed ACCEPT_AFTER times
    without a violation is accepted.
@@ -48,6 +56,8 @@ import json
 import random
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
+import global_constraints
+
 from .minesweeper_game import HIDDEN, MINE, SHOWN_EMPTY
 
 Pos = Tuple[int, int]
@@ -65,6 +75,9 @@ LINES = 'its row and column'
 PROPERTIES = ('mine', 'not-mine')
 REGIONS = ('row', 'column', '3x3 box')
 ACCEPT_AFTER = 200
+ACCEPT_AFTER_GLOBAL = 10       # global rules (connected, no 2x2, islands, degree): evidence (surprise) needed
+GLOBAL_KINDS = ('connected', 'no 2x2', 'islands', 'degree')
+SOLVE_BUDGET = 3000            # backtracking steps when global rules are accepted and trials leave cells open
 
 Hypothesis = Tuple[str, str, str]
 
@@ -127,6 +140,9 @@ class ConstraintLearner:
         self.hypotheses[('runs', 'line', 'mine')] = {'confirmed': 0, 'violated': 0}
         for kind in REGIONS:
             self.hypotheses[('region', kind, 'mine')] = {'confirmed': 0, 'violated': 0, 'k': None}
+        for rule in global_constraints.rules([]):
+            self.hypotheses[rule] = {'confirmed': 0, 'violated': 0}
+        self.marker_values: Set[int] = set()
         self.accepted_at: Dict[Hypothesis, int] = {}
         self.clues_can_be_mines = False
         self.mine_rate: Dict[str, List[int]] = {}       # description -> [mines, cells]
@@ -134,17 +150,22 @@ class ConstraintLearner:
         self._seen: List[Tuple[Pos, str]] = []          # hidden cells described during the current game
         self._clues: Dict[Pos, int] = {}                # clue numbers seen during the current game
         self._board: Set[Pos] = set()                   # cells seen hidden during the current game
+        self._markers: Dict[Pos, int] = {}              # cells shown with a marker value (outside the board)
         self.moves_by = {'deduced': 0, 'guessed': 0}
 
     # ---------------------------------------------------------- learning
     def accepted(self) -> List[Hypothesis]:
-        return [h for h, s in self.hypotheses.items() if s['violated'] == 0 and s['confirmed'] >= self.accept_after]
+        def needed(h):
+            return min(self.accept_after, ACCEPT_AFTER_GLOBAL) if h[0] in GLOBAL_KINDS else self.accept_after
+        return [h for h, s in self.hypotheses.items() if s['violated'] == 0 and s['confirmed'] >= needed(h)]
 
     def _observe(self, obs):
         for r, row in enumerate(obs):
             for c, v in enumerate(row):
                 if v in (HIDDEN, SHOWN_EMPTY, MINE):
                     self._board.add((r, c))
+                elif v < 0:
+                    self._markers[(r, c)] = v
                 elif v >= 0:
                     self._clues[(r, c)] = v
 
@@ -196,8 +217,21 @@ class ConstraintLearner:
         board = self._board or {(r, c) for r in range(rows) for c in range(cols)}
         if any(p in mines for p in clues):
             self.clues_can_be_mines = True
+        markers = {p: v for p, v in self._markers.items() if p not in board}
+        for v in set(markers.values()) - self.marker_values:
+            for rule in global_constraints.rules([v]):
+                self.hypotheses.setdefault(rule, {'confirmed': 0, 'violated': 0})
+        self.marker_values |= set(markers.values())
         for (kind, what, prop), stats in self.hypotheses.items():
-            if kind == 'count':
+            if kind in GLOBAL_KINDS:
+                ok, surprise = global_constraints.evidence((kind, what, prop), mines & board, board - mines,
+                                                           {p: v for p, v in clues.items() if p not in board},
+                                                           markers, self.rng)
+                if not ok:
+                    stats['violated'] += 1
+                else:
+                    stats['confirmed'] += surprise
+            elif kind == 'count':
                 for pos, v in clues.items():
                     near = _scope(pos, what, rows, cols)
                     m = sum(1 for p in near if p in mines)
@@ -217,7 +251,7 @@ class ConstraintLearner:
             counts = self.mine_rate.setdefault(desc, [0, 0])
             counts[0] += pos in mines
             counts[1] += 1
-        self._seen, self._clues, self._board = [], {}, set()
+        self._seen, self._clues, self._board, self._markers = [], {}, set(), {}
 
     # --------------------------------------------------------- deduction
     def _constraints(self, obs):
@@ -238,18 +272,33 @@ class ConstraintLearner:
                     eqs.append(({p for p in near if p in unknown}, m))
             elif kind == 'runs':
                 lines += [(on, off) for on, off in self._lines(rows, cols, self._board, clues)]
-            else:
+            elif kind == 'region':
                 k = self.hypotheses[(kind, what, prop)]['k']
                 eqs += [({p for p in region if p in unknown}, k - sum(1 for p in region if p in known_mines))
                         for region in self._regions(what, self._board)]
-        return eqs, lines, unknown, known_mines
+        rules = [h for h in self.accepted() if h[0] in GLOBAL_KINDS]
+        glob = None
+        if rules:
+            markers = {p: v for p, v in self._markers.items() if p not in self._board}
+            glob = (rules, set(self._board), {p: v for p, v in clues.items() if p not in self._board}, markers)
+        return eqs, lines, unknown, known_mines, glob
 
     @staticmethod
-    def _propagate(eqs, lines, unknown, known_mines, safe: Set[Pos], mines: Set[Pos]):
+    def _global_ok(glob, unknown, known_mines, safe, mines) -> bool:
+        """The accepted global rules can still hold given what is known"""
+        rules, board, clues, markers = glob
+        open_cells = (unknown & board) - safe - mines
+        filled = (known_mines | mines) & board
+        empty = board - open_cells - filled
+        return all(global_constraints.consistent(r, filled, empty, open_cells, clues, markers) for r in rules)
+
+    @staticmethod
+    def _propagate(eqs, lines, unknown, known_mines, safe: Set[Pos], mines: Set[Pos], glob=None):
         """
         Everything the constraints force, starting from the given safe and
         mine cells: (safe, mines, consistent); consistent is False when the
-        constraints contradict each other or the starting cells
+        constraints contradict each other or the starting cells (global rules
+        are checked once the local ones force nothing more)
         """
         safe, mines = set(safe), set(mines)
         changed = True
@@ -297,6 +346,8 @@ class ConstraintLearner:
                 safe |= found_safe
                 mines |= found_mines
                 changed = True
+        if glob is not None and not ConstraintLearner._global_ok(glob, unknown, known_mines, safe, mines):
+            return safe, mines, False
         return safe, mines, True
 
     def deduce(self, obs, search: bool = False) -> Tuple[Set[Pos], Set[Pos]]:
@@ -304,13 +355,19 @@ class ConstraintLearner:
         (cells proven safe, cells proven mines) under the accepted constraints.
         With search, every undecided cell the constraints mention is also
         tried both ways: if assuming it is a mine (or safe) leads to a
-        contradiction, it is the other; repeated until nothing changes.
+        contradiction, it is the other; repeated until nothing changes. With
+        global rules accepted (whose checks on a partly known board are only
+        necessary conditions), cells still open are settled by enumerating
+        the solutions the rules allow: if there is exactly one, every cell is
+        decided.
         """
-        eqs, lines, unknown, known_mines = self._constraints(obs)
-        safe, mines, consistent = self._propagate(eqs, lines, unknown, known_mines, set(), set())
+        eqs, lines, unknown, known_mines, glob = self._constraints(obs)
+        safe, mines, consistent = self._propagate(eqs, lines, unknown, known_mines, set(), set(), glob)
         if not search or not consistent:
             return safe, mines
         mentioned = set().union(*(cells for cells, _ in eqs), *(set(c) for c, _ in lines)) & unknown
+        if glob is not None:
+            mentioned = unknown & glob[1]          # global rules concern every board cell
         progress = True
         while progress:
             progress = False
@@ -320,16 +377,52 @@ class ConstraintLearner:
                 for assume_mine in (True, False):
                     trial_safe = safe if assume_mine else safe | {p}
                     trial_mines = mines | {p} if assume_mine else mines
-                    if not self._propagate(eqs, lines, unknown, known_mines, trial_safe, trial_mines)[2]:
+                    if not self._propagate(eqs, lines, unknown, known_mines, trial_safe, trial_mines, glob)[2]:
                         # the assumption is impossible, so the opposite holds
                         safe, mines, consistent = self._propagate(
                             eqs, lines, unknown, known_mines,
-                            safe | {p} if assume_mine else safe, mines if assume_mine else mines | {p})
+                            safe | {p} if assume_mine else safe, mines if assume_mine else mines | {p}, glob)
                         if not consistent:
                             return safe, mines
                         progress = True
                         break
+        if glob is not None:
+            # global rules: if trials leave cells open, enumerate the solutions the rules allow
+            open_cells = (unknown & glob[1]) - safe - mines
+            if open_cells:
+                solutions, complete = self._enumerate(eqs, lines, unknown, known_mines, glob, safe, mines)
+                if complete and len(solutions) == 1:
+                    safe |= open_cells - solutions[0]
+                    mines |= open_cells & solutions[0]
         return safe, mines
+
+    def _enumerate(self, eqs, lines, unknown, known_mines, glob, safe, mines, limit=2):
+        """
+        Solutions (mine sets) the accepted constraints allow, up to `limit`, by
+        backtracking with propagation; (solutions, complete), complete False if
+        SOLVE_BUDGET steps ran out first
+        """
+        board = glob[1]
+        found, steps = [], [0]
+
+        def rec(safe, mines):
+            if len(found) >= limit or steps[0] > SOLVE_BUDGET:
+                return
+            steps[0] += 1
+            safe, mines, ok = self._propagate(eqs, lines, unknown, known_mines, safe, mines, glob)
+            if not ok:
+                return
+            open_cells = (unknown & board) - safe - mines
+            if not open_cells:
+                found.append(mines & board)
+                return
+            decided = safe | mines | (board - unknown)
+            p = max(sorted(open_cells), key=lambda q: sum((q[0] + dr, q[1] + dc) in decided
+                                                          for dr in (-1, 0, 1) for dc in (-1, 0, 1)))
+            rec(safe, mines | {p})
+            rec(safe | {p}, mines)
+        rec(set(safe), set(mines))
+        return found, steps[0] <= SOLVE_BUDGET
 
     # -------------------------------------------------------------- play
     def _rate(self, desc: str) -> float:
@@ -356,6 +449,14 @@ class ConstraintLearner:
     # ------------------------------------------------------------- state
     def describe(self, h: Hypothesis) -> str:
         kind, what, prop = h
+        if kind == 'connected':
+            return f'{what} cells connected ({"by sides" if prop == "sides" else "through cells showing " + prop[4:]})'
+        if kind == 'no 2x2':
+            return f'no 2x2 block of {what} cells'
+        if kind == 'islands':
+            return 'every group of not-mine cells holds one clue, equal to its size'
+        if kind == 'degree':
+            return f'every cell showing {what} touches {sorted(prop)} mine cells'
         if kind == 'count':
             return f'number = {prop} cells in {what if what == LINES else "its " + what}'
         if kind == 'runs':
@@ -372,18 +473,26 @@ class ConstraintLearner:
             'moves': dict(self.moves_by),
         }
 
+    @staticmethod
+    def _plain(h):
+        return [sorted(x) if isinstance(x, frozenset) else x for x in h]
+
+    @staticmethod
+    def _key(x):
+        return tuple(frozenset(v) if isinstance(v, list) else v for v in x[:3])
+
     def save(self, path: str):
         with open(path, 'w') as f:
-            json.dump({'hypotheses': [[*h, s] for h, s in self.hypotheses.items()],
-                       'accepted_at': [[*h, g] for h, g in self.accepted_at.items()],
+            json.dump({'hypotheses': [[*self._plain(h), s] for h, s in self.hypotheses.items()],
+                       'accepted_at': [[*self._plain(h), g] for h, g in self.accepted_at.items()],
                        'clues_can_be_mines': self.clues_can_be_mines,
                        'mine_rate': self.mine_rate, 'games': self.games}, f)
 
     def load(self, path: str):
         with open(path) as f:
             d = json.load(f)
-        self.hypotheses = {tuple(x[:3]): x[3] for x in d['hypotheses']}
-        self.accepted_at = {tuple(x[:3]): x[3] for x in d['accepted_at']}
+        self.hypotheses = {self._key(x): x[3] for x in d['hypotheses']}
+        self.accepted_at = {self._key(x): x[3] for x in d['accepted_at']}
         self.clues_can_be_mines = d.get('clues_can_be_mines', False)
         self.mine_rate = {k: list(v) for k, v in d['mine_rate'].items()}
         self.games = d['games']

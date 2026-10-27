@@ -10,15 +10,18 @@ the same puzzles. Reported per type: the hypotheses accepted (and after
 how many puzzles), the share solved, the mean share of empty cells
 uncovered, and how many moves were deduced rather than guessed.
 
-Usage: python3 evaluate_constraint_puzzles.py [puzzles per type] [seed]
+Usage: python3 evaluate_constraint_puzzles.py [puzzles per type] [seed] [puzzle type ...]
 """
 
 import copy
 import random
 import sys
 
-from constraint_puzzles import PUZZLES
+import connectivity_puzzles
+import constraint_puzzles
 from minesweeper.constraint_learner import ConstraintLearner
+
+PUZZLES = dict(constraint_puzzles.PUZZLES, **connectivity_puzzles.PUZZLES)
 
 
 def attempt(puzzle, choose, end=None):
@@ -55,7 +58,7 @@ def run(kind: str, n: int, seed: int):
 def main():
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 300
     seed = int(sys.argv[2]) if len(sys.argv) > 2 else 1
-    for kind in PUZZLES:
+    for kind in sys.argv[3:] or PUZZLES:
         res = run(kind, n, seed)
         print(f"== {kind}: accepted {res['accepted'] or 'nothing'}")
         print(f"   solved {100 * res['solved']:.1f}% (second half {100 * res['solved_second_half']:.1f}%), "
