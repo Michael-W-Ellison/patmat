@@ -11,7 +11,7 @@ vocabulary (grid_vocabulary.py), ordered by what the games taught
 2. A candidate is consistent if it reproduces every training output
    exactly; only consistent candidates may answer.
 3. Ordering: a candidate is scored by how it changes the vocabulary
-   relations from input to output on the training inputs (foreground
+   relations from the test input to its predicted output (foreground
    cells against background), summed with the cross-game lifts of those
    changes learned from the games. When several consistent candidates
    disagree on the test input, the highest-scoring one answers.
@@ -328,7 +328,7 @@ def relation_measures(a: Array, bg: int) -> Dict[str, float]:
 
 def game_score(cand_outputs: Sequence[Array], inputs: Sequence[Array], bg: int,
                lifts: Dict[Tuple[str, str], float]) -> float:
-    """Sum over relations and training inputs of the learned lift of the change the candidate makes"""
+    """Mean over the given inputs of the summed learned lifts of the relation changes the candidate makes"""
     total = 0.0
     for a, out in zip(inputs, cand_outputs):
         before, after = relation_measures(a, bg), relation_measures(out, bg)
@@ -363,7 +363,9 @@ def consistent_candidates(task: Dict, lifts) -> Tuple[List[Dict], int]:
         if any(p is None for p in preds):
             continue
         found.append({'name': cand.name, 'relation': cand.relation, 'order': cand.order,
-                      'preds': preds, 'score': game_score(outs, [a for a, _ in pairs], bg, lifts)})
+                      # Scored on the test inputs: on the training inputs every consistent
+                      # candidate makes the same changes (it reproduces the same outputs)
+                      'preds': preds, 'score': game_score(preds, tests, bg, lifts)})
     return found, len(cands)
 
 
