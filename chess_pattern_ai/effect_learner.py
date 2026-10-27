@@ -14,21 +14,36 @@ Models (hypotheses about an action's effect), simplest first:
   swap too.
 - agent model (k, shared), for other actions: one cell is the agent (the
   cell holding a value from the agent values: a set of values that together
-  occupy exactly one cell in every state seen, the one that moves most
-  often if several do); an action moves along a direction (learned per
+  occupy exactly one cell in the states seen, except in at most
+  AGENT_MISS_RATE of them (the agent may leave the view for a while); of
+  these, the one whose cell moves most often, less the states it is
+  missing from); an action moves along a direction (learned per
   action from how the agent moved); the k cells at the agent and ahead of
   it in that direction change by a table keyed by their current values
   (one table for all directions if shared, else one per action); every
   other cell stays as it was.
-A transition that contradicts a table entry, or changes a cell the model
-says stays, rejects the model.
+A transition that contradicts a cell model's table, or changes a cell the
+model says stays, rejects the model. An agent model keeps, for each key,
+how often each outcome was seen and predicts the most frequent one; a
+transition that differs from it, or changes a cell the model says stays,
+is an error, and the model is dropped while its errors exceed
+ERROR_RATE of its transitions (so a few exceptions, such as walls that are
+not drawn, do not reject it). A transition already seen (the same grid
+and action) is predicted as it was seen. An action that has changed nothing in
+NOOP_STATES different states (and never changed anything) is predicted to
+change nothing.
 
-Planning uses the first consistent model:
+Planning uses the consistent model with the lowest cost, errors plus
+TABLE_COST per table entry (so a model that avoids errors only by keeping
+a separate entry for nearly every case is not preferred), the first listed
+on a tie:
 - if it says every action toggles a fixed set of cells whatever their
   values (a cell model whose tables all swap 0 and 1), effects add up
   modulo 2 and the plan with the fewest actions solves a linear system;
 - otherwise breadth-first search over the states the model predicts,
-  leaving out transitions it cannot predict.
+  leaving out transitions it cannot predict; a subclass may also name
+  moves that reach the goal directly (wins_with), and the search stops at
+  the first state where one can be made.
 With no way to the goal, the learner explores: the search also finds the
 nearest state with an action whose outcome the model cannot predict, and
 the learner goes there and tries it; with no such state, it takes an
@@ -38,7 +53,7 @@ when an outcome differs from its prediction.
 
 import itertools
 import random
-from collections import deque
+from collections import Counter, deque
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -47,6 +62,10 @@ from action_puzzles import solve_xor
 
 OUT = -9            # value of a cell outside the grid in a key
 BFS_LIMIT = 100_000
+NOOP_STATES = 3
+ERROR_RATE = 0.1
+TABLE_COST = 0.5
+AGENT_MISS_RATE = 0.5
 
 
 class CellModel:
@@ -112,8 +131,16 @@ class AgentModel:
     def __init__(self, k: int, shared: bool):
         self.k, self.shared = k, shared
         self.name = f'agent model (k={k}, {"one table" if shared else "a table per action"})'
-        self.table: Dict[tuple, tuple] = {}
-        self.consistent = True
+        self.table: Dict[tuple, Counter] = {}
+        self.updates = self.violations = 0
+
+    @property
+    def errors(self) -> int:
+        return self.violations + sum(sum(c.values()) - max(c.values()) for c in self.table.values())
+
+    @property
+    def consistent(self) -> bool:
+        return self.errors <= ERROR_RATE * self.updates
 
     def key(self, grid, agent, d, action):
         cells = [(agent[0] + i * d[0], agent[1] + i * d[1]) for i in range(self.k)]
@@ -127,18 +154,19 @@ class AgentModel:
         mask = np.zeros(before.shape, dtype=bool)
         for p in inside:
             mask[p] = True
+        self.updates += 1
         if (before != after)[~mask].any():
-            self.consistent = False
+            self.violations += 1
             return
         new = tuple(int(after[p]) if p in inside else OUT for p in cells)
-        if self.table.setdefault(key, new) != new:
-            self.consistent = False
+        self.table.setdefault(key, Counter())[new] += 1
 
     def predict(self, grid, agent, d, action) -> Optional[np.ndarray]:
         cells, key = self.key(grid, agent, d, action)
-        new = self.table.get(key)
-        if new is None:
+        seen = self.table.get(key)
+        if seen is None:
             return None
+        new = seen.most_common(1)[0][0]
         out = grid.copy()
         for p, v in zip(cells, new):
             if v != OUT:
@@ -159,27 +187,56 @@ class EffectLearner:
         self.plan: List = []
         self.exploring = False
         self.moves_by = {'planned': 0, 'explored': 0}
+        self.unchanged_in: Dict[object, set] = {}     # action -> states it changed nothing in (None once it changed one)
+        self.outcomes: Dict[tuple, np.ndarray] = {}   # (grid shape, grid bytes, action) -> grid after
+        self._av = None                               # incremental state of _agent_values
 
     # ---------------------------------------------------------- learning
     def _agent_values(self) -> Optional[set]:
         """
-        The set of values that together occupy exactly one cell in every state
-        seen (among values occurring at most once); if several sets do, the one
-        whose cell moves most often
+        The set of values that together occupy exactly one cell in the states
+        seen (but for AGENT_MISS_RATE of them); of these, the one whose cell
+        moves most often, less the states it is missing from
         """
-        states = [b for b, _, _ in self.history] + [self.history[-1][2]]
-        values = sorted(set(np.unique(np.concatenate([s.ravel() for s in states])).tolist()))
-        once = [v for v in values if all((s == v).sum() <= 1 for s in states)]
-        best, moves = None, -1
-        for size in range(1, min(len(once), 3) + 1):
-            for subset in itertools.combinations(once, size):
-                if not all(np.isin(s, subset).sum() == 1 for s in states):
-                    continue
-                where = [tuple(zip(*np.nonzero(np.isin(s, subset))))[0] for s in states]
-                n = sum(1 for a, b in zip(where, where[1:]) if a != b)
-                if n > moves:
-                    best, moves = set(subset), n
+        # kept incrementally over the states before each transition (the last state after is checked
+        # at each call); a value not seen before starts the count again over all states
+        last = self.history[-1][2]
+        av = self._av
+        new = [b for b, _, _ in self.history[av['n']:]] if av else []
+        if av is None or any(not set(np.unique(g).tolist()) <= av['values'] for g in new + [last]):
+            states = [b for b, _, _ in self.history]
+            values = set(np.unique(np.concatenate([g.ravel() for g in states + [last]])).tolist())
+            av = self._av = {'n': 0, 'values': values,
+                             'subsets': {sub: [None, 0, 0] for size in (1, 2, 3)
+                                         for sub in itertools.combinations(sorted(values), size)}}
+            new = states
+        for g in new:
+            self._agent_step(g, av['subsets'])
+        av['n'] = len(self.history)
+        counts = dict(zip(*np.unique(last, return_counts=True)))
+        best, score = None, None
+        for sub, (where, n, miss) in av['subsets'].items():
+            if sum(counts.get(v, 0) for v in sub) == 1:
+                pos = tuple(np.argwhere(np.isin(last, sub))[0])
+                n += where is not None and pos != where
+            else:
+                miss += 1
+            if miss <= AGENT_MISS_RATE * (av['n'] + 1) and (score is None or n - miss > score):
+                best, score = set(sub), n - miss
         return best
+
+    @staticmethod
+    def _agent_step(grid, subsets):
+        """Count, for each value set, a state it does not occupy exactly one cell of, or a move"""
+        counts = dict(zip(*np.unique(grid, return_counts=True)))
+        for sub in list(subsets):
+            if sum(counts.get(v, 0) for v in sub) != 1:
+                subsets[sub][2] += 1
+                continue
+            pos = tuple(np.argwhere(np.isin(grid, sub))[0])
+            if subsets[sub][0] is not None and pos != subsets[sub][0]:
+                subsets[sub][1] += 1
+            subsets[sub][0] = pos
 
     def _agent(self, grid) -> Optional[Tuple[int, int]]:
         if not self.agent_values:
@@ -187,8 +244,18 @@ class EffectLearner:
         cells = list(zip(*np.nonzero(np.isin(grid, list(self.agent_values)))))
         return tuple(int(x) for x in cells[0]) if len(cells) == 1 else None
 
+    def _noop(self, action) -> bool:
+        seen = self.unchanged_in.get(action)
+        return seen is not None and len(seen) >= NOOP_STATES
+
     def observe(self, before, action, after):
         self.history.append((before, action, after))
+        self.outcomes[(before.shape, before.tobytes(), action)] = after
+        if np.array_equal(before, after):
+            if self.unchanged_in.get(action, set()) is not None:
+                self.unchanged_in.setdefault(action, set()).add(before.tobytes())
+        else:
+            self.unchanged_in[action] = None
         if isinstance(action, tuple):
             if not self.cell.update(before, action, after):
                 self.cell.fit(self.history)
@@ -221,15 +288,21 @@ class EffectLearner:
         if agent is None or d is None:
             return
         for m in self.agent_models:
-            if m.consistent:
-                m.update(before, after, agent, d, action)
+            m.update(before, after, agent, d, action)
 
     def model(self):
         if self.history and isinstance(self.history[0][1], tuple):
             return self.cell if self.cell.consistent and self.cell.offsets else None
-        return next((m for m in self.agent_models if m.consistent and m.table), None)
+        usable = [(m.errors + TABLE_COST * len(m.table), i) for i, m in enumerate(self.agent_models)
+                  if m.consistent and m.table]
+        return self.agent_models[min(usable)[1]] if usable else None
 
     def predict(self, grid, action) -> Optional[np.ndarray]:
+        seen = self.outcomes.get((grid.shape, grid.tobytes(), action))
+        if seen is not None:
+            return seen.copy()
+        if self._noop(action):
+            return grid.copy()
         m = self.model()
         if m is None:
             return None
@@ -241,6 +314,10 @@ class EffectLearner:
     # ---------------------------------------------------------- planning
     def _goal(self, grid) -> bool:
         return not np.isin(grid, self.goal_absent).any()
+
+    def wins_with(self, grid, action) -> bool:
+        """Whether the action reaches the goal from this grid (other than by the state it leads to)"""
+        return False
 
     def make_plan(self, grid, actions) -> Optional[List]:
         m = self.model()
@@ -274,6 +351,9 @@ class EffectLearner:
                 self.exploring = False
                 return path_to(g.tobytes())
             for a in actions:
+                if self.wins_with(g, a):
+                    self.exploring = False
+                    return path_to(g.tobytes()) + [a]
                 h = self.predict(g, a)
                 if h is None:
                     if explore is None:
