@@ -66,7 +66,7 @@ def main():
               f"random: solved {100 * res['random_solved']:.1f}%, uncovered {100 * res['random_progress']:.1f}%; "
               f"moves deduced {res['deduced']}, guessed {res['guessed']}")
         for h, st in res['hypotheses'].items():
-            print(f"     {h:45s} confirmed {st['confirmed']:6d}  violated {st['violated']:6d}")
+            print(f"     {h:45s} confirmed {round(st['confirmed'], 1):8}  violated {st['violated']:6d}")
 
 
 if __name__ == '__main__':

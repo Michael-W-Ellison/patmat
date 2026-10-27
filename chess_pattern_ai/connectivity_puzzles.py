@@ -107,8 +107,8 @@ def nurikabe(seed: int, n: int = 6) -> BinaryPuzzle:
     rng = random.Random(seed)
     while True:
         made = _nurikabe_solution(rng, n)
-        if made:
-            break
+        if made and any(len(isl) > 1 for isl in made[1]):
+            break                   # (islands all of size 1 would leave nothing to uncover)
     sea, islands = made
     clues = {}
     for isl in islands:

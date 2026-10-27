@@ -214,7 +214,10 @@ class ConstraintLearner:
         mines = {(r, c) for r in range(rows) for c in range(cols) if final_view[r][c] == MINE}
         clues = dict(self._clues)
         clues.update({(r, c): final_view[r][c] for r in range(rows) for c in range(cols) if final_view[r][c] >= 0})
-        board = self._board or {(r, c) for r in range(rows) for c in range(cols)}
+        # the board is the cells seen hidden, shown empty or as mines; if no view was seen during the
+        # attempt (it ended at once), the final view shows the same
+        board = self._board or {(r, c) for r in range(rows) for c in range(cols)
+                                if final_view[r][c] in (HIDDEN, SHOWN_EMPTY, MINE)}
         if any(p in mines for p in clues):
             self.clues_can_be_mines = True
         markers = {p: v for p, v in self._markers.items() if p not in board}

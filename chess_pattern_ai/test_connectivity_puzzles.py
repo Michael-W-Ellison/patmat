@@ -7,7 +7,7 @@ import unittest
 
 import global_constraints as gc
 from connectivity_puzzles import DOT, NURIKABE_RULES, SLITHERLINK_RULES, nurikabe, slitherlink, solve
-from constraint_puzzles import placement
+from constraint_puzzles import BinaryPuzzle, placement
 from evaluate_constraint_puzzles import attempt
 from minesweeper.constraint_learner import ConstraintLearner
 
@@ -68,6 +68,17 @@ class TestLearner(unittest.TestCase):
         learner, results = self.learn(nurikabe, 30)
         self.assertEqual(set(learner.accepted()), set(NURIKABE_RULES))
         self.assertTrue(all(results[20:]))
+
+    def test_attempt_with_no_moves_keeps_islands_rule(self):
+        # every island is one numbered cell: the puzzle is won before any move, and the learner never
+        # sees the board during the attempt; the final view must still give the board (not the clue cells)
+        sea = {(r, c) for r in range(3) for c in range(3)} - {(0, 0), (2, 2)}
+        clues = {(0, 0): 1, (2, 2): 1}
+        puzzle = BinaryPuzzle(3, 3, sea, clues, sea)
+        learner = ConstraintLearner(random.Random(0))
+        attempt(puzzle, learner.choose, learner.end_game)
+        rule = ('islands', 'not-mine', 'one clue = size')
+        self.assertEqual(learner.hypotheses[rule]['violated'], 0)
 
     def test_discovers_slitherlink(self):
         learner, results = self.learn(slitherlink, 30)
