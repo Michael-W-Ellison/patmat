@@ -143,7 +143,10 @@ Planning: breadth-first search over (grid, agent cells) states predicted
 by the rules, up to BFS_LIMIT states. Under the rules learned an agent
 only grows, so once the shape goal is known, a state whose agent no longer
 fits inside any object of the starting grid (same values at the same
-relative places) is not searched further. The search it stops at the first move that
+relative places) is not searched further; for the same reason a move into
+objects of unknown outcome is explored last when, if they merged into the
+agent, it would fit no target (a merge cannot be undone, and the level
+could no longer be won). The search it stops at the first move that
 reaches a goal, else goes to the nearest move whose outcome is unknown or
 would give the agent a pattern not seen before (with no goal known yet,
 the search stops there).
@@ -1824,7 +1827,7 @@ class ObjectAgent:
         k0 = self._key(*start)
         parent = {k0: None}
         queue = deque([start])
-        explore = None
+        explore = risky = None
         targets = self._targets(grid, self.agent) if self.shape_goal or self.prior_shape else None
         trials = self._goal_trials(grid)
         for v in sorted(self.absent_goals | trials, key=lambda v: int((grid == v).sum())):
@@ -1860,6 +1863,10 @@ class ObjectAgent:
                 if grew and targets is not None and not self._fits(nxt[0], nxt[1], targets):
                     continue
                 novel = grew and pattern(*nxt) not in self.seen_patterns
+                if nxt is None and targets is not None and self._spoils(g, agent, a, targets):
+                    if risky is None:
+                        risky = path_to(k) + [a]     # (only if nothing else is left to try)
+                    continue
                 if nxt is None or novel:
                     if explore is None:
                         explore = path_to(k) + [a]
@@ -1872,8 +1879,23 @@ class ObjectAgent:
                 if k2 not in parent:
                     parent[k2] = (k, a)
                     queue.append(nxt)
+        explore = explore or risky
         self.exploring = explore is not None
         return explore
+
+    def _spoils(self, grid, agent, action, targets) -> bool:
+        """
+        Whether touching objects of unknown outcome with this move would, if they merged into the agent
+        (which cannot be undone), give an agent that fits no target: such a move is explored last
+        """
+        d = self._dir(action)
+        if agent is None or d is None:
+            return False
+        objs = self._contacts(grid, agent, d)
+        if not objs:
+            return False
+        nxt = self._apply(grid, agent, d, 'merge', objs)
+        return nxt is not None and nxt[1] is not None and not self._fits(nxt[0], nxt[1], targets)
 
     def act(self, grid, actions):
         self.episode['actions'] += 1
