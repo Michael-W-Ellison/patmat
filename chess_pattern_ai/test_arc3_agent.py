@@ -1,0 +1,387 @@
+#!/usr/bin/env python3
+"""Unit tests for arc3_agent and evaluate_arc3 (run: python3 -m unittest test_arc3_agent)"""
+
+import random
+import unittest
+
+import numpy as np
+
+from arc3_agent import Arc3Agent, GridReader, cell_grid, find_scale
+from object_agent import ObjectAgent
+
+try:
+    from arcengine import ARCBaseGame, ActionInput, BlockingMode, Camera, GameAction, Level, Sprite
+except ImportError:         # the ARC-AGI toolkit is not installed
+    ARCBaseGame = None
+
+WALLS = [
+    [5, 5, 5, 5, 5, 5, 5, 5],
+    [5, -1, -1, -1, 5, -1, -1, 5],
+    [5, -1, 5, -1, 5, -1, 5, 5],
+    [5, -1, 5, -1, -1, -1, -1, 5],
+    [5, -1, 5, 5, 5, 5, -1, 5],
+    [5, -1, -1, -2, -1, 5, -1, 5],      # -2: a wall that is not drawn
+    [5, 5, 5, 5, -1, -1, -1, 5],
+    [5, 5, 5, 5, 5, 5, 5, 5],
+]
+
+
+def maze_game():
+    """A one-level maze: the player (8) must step onto the exit (9); one wall is not drawn"""
+    class Maze(ARCBaseGame):
+        def __init__(self):
+            sprites = [Sprite(pixels=WALLS, name='walls', blocking=BlockingMode.PIXEL_PERFECT, layer=-1),
+                       Sprite(pixels=[[8]], name='player', blocking=BlockingMode.BOUNDING_BOX).set_position(1, 1),
+                       Sprite(pixels=[[9]], name='exit', blocking=BlockingMode.BOUNDING_BOX).set_position(6, 6)]
+            super().__init__(game_id='maze', levels=[Level(sprites=sprites, grid_size=(8, 8))],
+                             camera=Camera(background=0, letter_box=3))
+
+        def step(self):
+            dx, dy = {GameAction.ACTION1: (0, -1), GameAction.ACTION2: (0, 1),
+                      GameAction.ACTION3: (-1, 0), GameAction.ACTION4: (1, 0)}.get(self.action.id, (0, 0))
+            hit = self.try_move('player', dx, dy)
+            if hit and any(s.name == 'exit' for s in hit):
+                self.win()
+            self.complete_action()
+    return Maze()
+
+
+def merge_game():
+    """
+    The player (9) absorbs pieces it walks into; the level is won when its
+    shape equals the target's, lost when no piece is left otherwise
+    """
+    import numpy as np
+
+    class MergeGame(ARCBaseGame):
+        def __init__(self):
+            border = [[5] * 10] + [[5] + [-1] * 8 + [5] for _ in range(8)] + [[5] * 10]
+            sprites = [Sprite(pixels=border, name='walls', blocking=BlockingMode.PIXEL_PERFECT, layer=-1),
+                       Sprite(pixels=[[9]], name='player', blocking=BlockingMode.PIXEL_PERFECT,
+                              tags=['merge']).set_position(2, 7),
+                       Sprite(pixels=[[8], [8]], name='piece', blocking=BlockingMode.PIXEL_PERFECT,
+                              tags=['merge']).set_position(5, 4),
+                       Sprite(pixels=[[-1, 8], [9, 8]], name='target', blocking=BlockingMode.PIXEL_PERFECT,
+                              tags=['target']).set_position(7, 1)]
+            super().__init__(game_id='merge', levels=[Level(sprites=sprites, grid_size=(10, 10))],
+                             camera=Camera(width=10, height=10, background=1, letter_box=3))
+
+        def on_set_level(self, level):
+            self._player = level.get_sprites_by_name('player')[0]
+            self._target = level.get_sprites_by_tag('target')[0]
+
+        def step(self):
+            dx, dy = {GameAction.ACTION1: (0, -1), GameAction.ACTION2: (0, 1),
+                      GameAction.ACTION3: (-1, 0), GameAction.ACTION4: (1, 0)}.get(self.action.id, (0, 0))
+            if dx or dy:
+                for other in self.try_move('player', dx, dy):
+                    if 'merge' in other.tags:
+                        old, self._player = self._player, self._player.merge(other)
+                        self.current_level.remove_sprite(other)
+                        self.current_level.remove_sprite(old)
+                        self.current_level.add_sprite(self._player)
+                        self._player.move(dx, dy)
+            if np.array_equal(self.get_pixels_at_sprite(self._player), self.get_pixels_at_sprite(self._target)):
+                self.win()
+            elif len(self.current_level.get_sprites_by_tag('merge')) <= 1:
+                self.lose()
+            self.complete_action()
+    return MergeGame()
+
+
+class LocalEnv:
+    """The reset/step interface of the toolkit's environment wrappers, over a game object"""
+
+    def __init__(self, game):
+        self.game = game
+
+    def reset(self):
+        return self.game.perform_action(ActionInput(id=GameAction.RESET), raw=True)
+
+    def step(self, action, data=None):
+        return self.game.perform_action(ActionInput(id=action, data=data or {}), raw=True)
+
+
+class TestGrid(unittest.TestCase):
+    def test_drop_target(self):
+        from object_agent import ClickModel
+        g = np.array([[5, 5, 5], [5, 0, 5], [5, 0, 5], [5, 2, 5], [5, 5, 5]])
+        self.assertEqual(ClickModel.drop_target(g, (1, 1), (1, 0), 0), (2, 1))     # onto the 2
+        self.assertEqual(ClickModel.drop_target(g, (3, 1), (1, 0), 0), (2, 1))     # a click on the 2 too
+        g[2, 1] = g[1, 1] = 2
+        self.assertIsNone(ClickModel.drop_target(g, (1, 1), (1, 0), 0))            # a full column
+
+    def test_scale_letterbox_and_status_bar(self):
+        rng = np.random.default_rng(0)
+        cells = rng.integers(0, 10, size=(12, 12))
+        frame = np.full((64, 64), 3)
+        frame[2:62, 2:62] = np.kron(cells, np.ones((5, 5), dtype=int))
+        frame[0:2, :] = 6                       # a status bar over the top edge
+        frame[2:4, 10:20] = 6                   # ... reaching into the outer ring of cells
+        self.assertEqual(find_scale(frame), (5, 2, 2))
+        self.assertTrue(np.array_equal(cell_grid(frame), cells))
+
+    def test_reader_finds_new_scale(self):
+        read = GridReader()
+        a = np.kron(np.arange(64).reshape(8, 8) % 7, np.ones((8, 8), dtype=int))
+        self.assertEqual(read(a).shape, (8, 8))
+        b = np.kron(np.arange(256).reshape(16, 16) % 5, np.ones((4, 4), dtype=int))
+        self.assertEqual(read(b).shape, (16, 16))
+
+
+@unittest.skipIf(ARCBaseGame is None, 'arcengine is not installed')
+class TestAgent(unittest.TestCase):
+    def test_learns_maze_with_hidden_wall(self):
+        from evaluate_arc3 import play
+        agent = Arc3Agent(random.Random(0))
+        results = []
+        for _ in range(3):
+            agent.new_episode()
+            results.append(play(LocalEnv(maze_game()), agent.act, 300, agent))
+        self.assertEqual([r[0] for r in results], [1, 1, 1])
+        self.assertEqual(agent.agent_values, {8})
+        self.assertEqual(agent.directions, {1: (-1, 0), 2: (1, 0), 3: (0, -1), 4: (0, 1)})
+        self.assertEqual(agent.win_keys, {(8, 9)})
+        self.assertIsNotNone(agent.model())
+        # once learned, the shortest route (10 moves) is taken
+        self.assertEqual(results[2][2], [10])
+
+
+@unittest.skipIf(ARCBaseGame is None, 'arcengine is not installed')
+class TestObjectAgent(unittest.TestCase):
+    def episodes(self, make, n, budget):
+        from evaluate_arc3 import play
+        agent = ObjectAgent(random.Random(0))
+        results = []
+        for _ in range(n):
+            agent.new_episode()
+            results.append(play(LocalEnv(make()), agent.act, budget, agent))
+        return agent, results
+
+    def test_maze_contact_goal(self):
+        agent, results = self.episodes(maze_game, 3, 300)
+        self.assertEqual([r[0] for r in results], [1, 1, 1])
+        self.assertEqual(agent.bg, 0)
+        self.assertEqual(agent.directions, {1: (-1, 0), 2: (1, 0), 3: (0, -1), 4: (0, 1)})
+        self.assertEqual(agent.win_contacts, {((9,),)})
+        self.assertEqual(results[2][2], [10])
+
+    def test_merge_shape_goal(self):
+        agent, results = self.episodes(merge_game, 3, 1000)
+        self.assertEqual([r[0] for r in results], [1, 1, 1])
+        self.assertTrue(agent.shape_goal)
+        self.assertEqual(agent.rules[((8,), (8,))].most_common(1)[0][0], 'merge')
+        self.assertEqual(agent._walls(), {5})
+        # once learned: the player walks to the piece's left side and absorbs it (no losses)
+        self.assertEqual(results[2][3], 0)
+
+
+@unittest.skipIf(ARCBaseGame is None, 'arcengine is not installed')
+class TestClicks(unittest.TestCase):
+    def episodes(self, name, n, budget):
+        from arc3_games import GAMES, local_env
+        from evaluate_arc3 import play
+        agent = ObjectAgent(random.Random(0))
+        results = []
+        for _ in range(n):
+            agent.new_episode()
+            results.append(play(local_env(GAMES[name]()), agent.act, budget, agent))
+        return agent, results
+
+    def test_clear_red(self):
+        agent, results = self.episodes('clear', 2, 300)
+        self.assertEqual([r[0] for r in results], [3, 3])
+        self.assertEqual(agent.click_models[2].kind(), 'map')
+        self.assertEqual(agent.click_models[2].table, {2: 0})
+        self.assertEqual(agent.absent_goals, {2})
+        self.assertEqual(results[1][2], [2, 3, 4])          # one click per red object
+
+    def test_lights_out(self):
+        agent, results = self.episodes('lights', 2, 300)
+        self.assertEqual([r[0] for r in results], [3, 3])
+        self.assertEqual(agent.click_models[11].toggles(), (1, 11))
+        self.assertEqual(agent.click_models[11].offsets, {(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)})
+        self.assertEqual(agent.absent_goals, {11})
+        self.assertEqual(results[1][3], 0)
+
+    def test_tic_tac_toe(self):
+        from arc3_games import GAMES, local_env
+        from evaluate_arc3 import play
+        agent = ObjectAgent(random.Random(0))
+        results = []
+        for ep in range(6):
+            agent.new_episode()
+            results.append(play(local_env(GAMES['tictactoe'](seed=ep)), agent.act, 300, agent))
+        self.assertEqual(len(agent.others), 1)                  # one other player, seen in the second frame
+        self.assertEqual(agent.line_goals, {(2, 3, None)})        # three of the agent's marks in a line
+        self.assertIn((1, 3, None), agent.line_losses)            # three of the opponent's
+        self.assertEqual([r[0] for r in results[1:]], [3] * 5)
+        self.assertEqual(sum(r[3] for r in results[1:]), 0)       # no game lost after the first episode
+
+    def test_tetris_frames_and_score(self):
+        from arc3_games import GAMES, local_env
+        from evaluate_arc3 import play
+        from object_agent import ANY
+        agent = ObjectAgent(random.Random(0))
+        scores = []
+        for ep in range(10):
+            agent.new_episode()
+            scores.append(play(local_env(GAMES['tetris'](seed=ep)), agent.act, 3000, agent, stop_on_loss=True)[4])
+        self.assertEqual(agent._drift_dir(1), (1, 0))                       # pieces fall by themselves
+        self.assertEqual(agent.transform_ops[1].most_common(1)[0][0], ('turn right', (0, 0)))
+        self.assertIn((ANY, 16, (0, 1)), agent.line_goals)                 # a full row scores
+        self.assertGreater(sum(scores), 0)
+
+    def test_connect_four(self):
+        from arc3_games import GAMES, local_env
+        from evaluate_arc3 import play
+        agent = ObjectAgent(random.Random(0))
+        results = []
+        for ep in range(6):
+            agent.new_episode()
+            env = local_env(GAMES['connect4'](seed=ep))
+            play(env, agent.act, 300, agent, stop_on_loss=True)
+            results.append(env.game.result)
+        self.assertEqual(agent.click_models[0].kind(), 'drop')            # a click drops into its column
+        self.assertEqual(agent.click_models[0].drop_dir(), (1, 0))
+        self.assertIn((2, 4, None), agent.line_goals)
+        self.assertGreaterEqual(results[2:].count('win'), 3)
+
+    def test_empty_board_scale(self):
+        from arc3_games import GAMES, local_env
+        env = local_env(GAMES['connect4'](seed=0))
+        self.assertEqual(find_scale(np.asarray(env.reset().frame[-1]))[0], 7)    # not a larger, empty-looking one
+
+    def test_grid_reader_pixel(self):
+        read = GridReader()
+        frame = np.full((64, 64), 3)
+        frame[2:62, 2:62] = np.kron(np.arange(25).reshape(5, 5) % 4, np.ones((12, 12), dtype=int))
+        read(frame)
+        self.assertEqual(read.pixel((0, 0)), (8, 8))
+        self.assertEqual(read.pixel((4, 2)), (32, 56))
+
+
+
+@unittest.skipIf(ARCBaseGame is None, 'arcengine is not installed')
+class TestPatternStore(unittest.TestCase):
+    @staticmethod
+    def session(agent, colours, n, rows=3, k=3):
+        from arc3_games import KInARow, local_env
+        from evaluate_arc3 import play
+        results = []
+        for i in range(n):
+            env = local_env(KInARow(seed=i, rows=rows, cols=rows, k=k, drop=False, colours=colours))
+            agent.new_episode()
+            play(env, agent.act, 100, agent, stop_on_loss=True)
+            results.append(env.game.result)
+        return results
+
+    def test_state_round_trip(self):
+        import json
+        from pattern_store import decode, encode
+        agent = ObjectAgent(random.Random(0))
+        self.session(agent, (0, 9, 6, 4), 6)
+        again = ObjectAgent(random.Random(0))
+        again.import_state(decode(json.loads(json.dumps(encode(agent.export_state())))))
+        self.assertEqual(again.facts(), agent.facts())
+        self.assertEqual(again.line_goals, agent.line_goals)
+        self.assertEqual(again.click_models[0].kind(), agent.click_models[0].kind())
+
+    def test_generic_from_two_games(self):
+        import tempfile
+        from pattern_store import PatternStore
+        with tempfile.TemporaryDirectory() as d:
+            store = PatternStore(d)
+            for name, colours, rows in (('a', (0, 9, 6, 4), 3), ('b', (0, 2, 1, 5), 4)):
+                agent = ObjectAgent(random.Random(0))
+                self.assertEqual(store.start(name, agent), 'generic')
+                self.session(agent, colours, 8, rows)
+                store.save(name, agent, 8)
+            self.assertEqual(store.games(), ['a', 'b'])
+            generic = {p['key']: p for p in store.generic()}
+            # the same patterns in both games, though drawn in other colours
+            self.assertIn(('line_goal', 'mine', None), generic)
+            self.assertIn(('players', 1), generic[('line_goal', 'mine', None)]['context'])
+            self.assertIn(('others_like_me',), generic)
+            # a third game, in colours of its own: the goal is taken to be a line of its marks (7) at once
+            agent = ObjectAgent(random.Random(0))
+            store.start('c', agent)
+            self.session(agent, (0, 7, 8, 5), 1)
+            self.assertIn(('line_goal', 'mine', None), agent.priors_applied)
+            self.assertIn((7, 3, None), agent.line_goals)
+            # a game played again goes on from its own entry
+            agent = ObjectAgent(random.Random(0))
+            self.assertEqual(store.start('a', agent), 'specific')
+            self.assertIn((9, 3, None), agent.line_goals)
+
+
+    def test_directions_and_contact_goal(self):
+        import tempfile
+        from arc3_games import Maze, local_env
+        from evaluate_arc3 import play
+        from pattern_store import PatternStore
+        with tempfile.TemporaryDirectory() as d:
+            store = PatternStore(d)
+            for name, colours in (('a', (0, 5, 8, 9, 7)), ('b', (1, 4, 12, 14, 6))):
+                agent = ObjectAgent(random.Random(0))
+                store.start(name, agent)
+                agent.new_episode()
+                play(local_env(Maze(seed=1, colours=colours)), agent.act, 500, agent)
+                store.save(name, agent, 1)
+            generic = {p['key'] for p in store.generic()}
+            self.assertIn(('contact_goal', 'unique'), generic)
+            self.assertIn(('direction', 1, (-1, 0)), generic)
+            # a maze in other colours: once one move is seen, the other directions are taken from the store,
+            # and the only object of its pattern (the exit) is tried as the goal
+            agent = ObjectAgent(random.Random(0))
+            store.start('c', agent)
+            agent.new_episode()
+            result = play(local_env(Maze(seed=2, colours=(2, 10, 11, 13, 15))), agent.act, 500, agent)
+            self.assertEqual(result[0], 3)
+            self.assertIn(('contact_goal', 'unique'), agent.priors_applied)
+            self.assertTrue(any(k[0] == 'direction' for k in agent.priors_applied))
+            self.assertEqual(agent.win_contacts, {((13,),)})
+        # a generic direction that is wrong here is dropped once the action is seen to do otherwise
+        agent = ObjectAgent(random.Random(0))
+        agent.use_generic([{'key': ('direction', 1, (1, 0)), 'params': {}, 'context': [('acts_by', 'moves')]}])
+        agent.new_episode()
+        result = play(local_env(Maze(seed=2)), agent.act, 500, agent)
+        self.assertEqual(result[0], 3)
+        self.assertEqual(agent.directions.get(1, (-1, 0)), (-1, 0))
+
+
+class TestMetaPatterns(unittest.TestCase):
+    def test_elements_need_two_mechanisms(self):
+        import tempfile
+        from meta_patterns import MetaStore, arc_elements
+        with tempfile.TemporaryDirectory() as d:
+            m = MetaStore(d)
+            m.add_game('tetris', {('drift', 1, (1, 0)): {}, ('transform', 1, 'turn right', (0, 0)): {}})
+            self.assertEqual(m.elements(), {})          # each element seen one way only
+            m.add_game('connect4', {('own_click', 'empty', 'drop', (1, 0)): {}})
+            self.assertEqual(set(m.elements()), {'gravity'})     # a falling piece and a dropped disc
+            m.add_arc('t1', 'C', 'rot90')
+            self.assertIn('rotation', m.elements())     # a turning piece and an ARC rotation
+            self.assertEqual(m.family_order(['A', 'C', 'K', 'N'])[:2], ['C', 'N'])
+            self.assertEqual(MetaStore(d).elements().keys(), m.elements().keys())    # (kept in meta.json)
+        self.assertEqual(arc_elements('K', 'rays from every element S in own colour, at obstacle stop'), {'alignment'})
+        self.assertEqual(arc_elements('N', 'complete rot90 symmetry about the grid centre'), {'rotation', 'reflection'})
+
+    @unittest.skipIf(ARCBaseGame is None, 'arcengine is not installed')
+    def test_universal_elements_in_connect_four(self):
+        from arc3_games import GAMES, local_env
+        from evaluate_arc3 import play
+        # gravity and alignment as seen elsewhere (Tetris, ARC): no Connect Four or board game among them
+        agent = ObjectAgent(random.Random(0))
+        agent.use_meta({'gravity': {'params': [{'d': [1, 0], 'mechanism': 'drift'}, {'mechanism': 'arc:C'}]},
+                        'alignment': {'params': [{'role': 'any', 'k': [16], 'full': True, 'mechanism': 'line_goal:any'},
+                                                 {'mechanism': 'arc:K'}]}})
+        agent.new_episode()
+        play(local_env(GAMES['connect4'](seed=0)), agent.act, 100, agent, stop_on_loss=True)
+        self.assertEqual(agent.meta_applied, {'gravity', 'alignment'})
+        self.assertEqual(agent.click_models[0].kind(), 'drop')                  # the disc falls
+        self.assertEqual(agent.others[0][0].kind(narrow=True), 'drop')         # the opponent's too
+
+
+if __name__ == '__main__':
+    unittest.main()
