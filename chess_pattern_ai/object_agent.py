@@ -33,7 +33,11 @@ values. What is learned:
   predicts); if the level ends first, the first outcome listed is taken.
 - the goal, from level completions: the winning move either touched an
   object (contact goal, by key), or produced an agent whose pattern equals
-  another object's pattern (shape goal). If the outcome of the winning move
+  another object's pattern (shape goal); a winning touch of an object that
+  had the agent's pattern also makes "touch an object while having its
+  shape" a goal (both conditions at once), kept until such a touch does
+  not win, as a contact goal is kept until its object is touched without
+  a win. If the outcome of the winning move
   was not known, the outcomes that would make it a shape match are tried
   and the one that does is learned.
 - after a transition the rules do not explain, the agent is found again
@@ -401,6 +405,7 @@ class ObjectAgent:
         self.contact_kinds: Dict[tuple, str] = {}  # contact goal pattern -> 'unique' / 'repeated' (in its level)
         self.contact_rejected: set = set()          # patterns touched without a win
         self.shape_goal = False
+        self.shape_contact = False                  # goal: touch an object that has the agent's shape
         self.pending = None                         # a contact whose outcome the next move will tell
         self.hidden_walls: set = set()              # cells of this level that block though drawn as background
         self.seen_patterns: set = set()             # patterns the agent has had
@@ -457,7 +462,9 @@ class ObjectAgent:
 
     # ------------------------------------------------------------ objects
     def _walls(self) -> set:
-        return {v for v, c in self.value_rules.items() if set(c) == {'block'}}
+        """Values whose contacts only ever block (not values the agent itself has held)"""
+        own = {v for pat in self.agent_patterns | self.start_patterns for row in pat for v in row}
+        return {v for v, c in self.value_rules.items() if set(c) == {'block'} and v not in own}
 
     def _object(self, grid, start: Pos, agent) -> FrozenSet[Pos]:
         walls = self._walls()
@@ -985,7 +992,7 @@ class ObjectAgent:
 
     def _goal_trials(self, grid) -> set:
         """Values to try as "no cell holds v" goals: only while no goal is known and clicks change something"""
-        if self.win_contacts or self.shape_goal or self.absent_goals or self.line_goals:
+        if self.win_contacts or self.shape_goal or self.shape_contact or self.absent_goals or self.line_goals:
             return set()
         if self.drift:
             return set()
@@ -1083,9 +1090,11 @@ class ObjectAgent:
         d = self._dir(action)
         if agent is None or d is None:
             return False
-        if self.win_contacts or self.prior_contacts:
+        if self.win_contacts or self.prior_contacts or self.shape_contact:
             objs = self._contacts(grid, agent, d) or []
             if any(pattern(grid, o) in self.win_contacts | self.prior_contacts for o in objs):
+                return True
+            if self.shape_contact and any(pattern(grid, o) == pattern(grid, agent) for o in objs):
                 return True
         # (the agent's pattern can only have changed if its number of cells did)
         return ((self.shape_goal or self.prior_shape) and nxt is not None and nxt[1] is not None and len(nxt[1]) != len(agent)
@@ -1158,6 +1167,9 @@ class ObjectAgent:
                     for o in objs:
                         self.win_contacts.add(pattern(grid, o))
                         self.contact_kinds[pattern(grid, o)] = self._contact_kind(grid, o, agent)
+                    if any(pattern(grid, o) == pattern(grid, agent) for o in objs):
+                        # (or the win needed both: touching an object while having its shape)
+                        self.shape_contact = True
         self._new_level()
 
     def lost(self, grid=None, action=None, frames=None):
@@ -1244,6 +1256,7 @@ class ObjectAgent:
             ('contact_goal', kind)              touching an object wins ('unique': no other object of its
                                                 pattern was in the level; 'repeated')
             ('shape_goal',)
+            ('shape_contact_goal',)             touching an object while having its shape wins
             ('drift', i, d)                     at frame i the agent moves along d by itself
             ('transform', action, op, offset)   the action turns or mirrors the agent's pattern
             ('drift_weights',)  {mean, std}     the score weights learned for where a piece comes to rest
@@ -1298,6 +1311,8 @@ class ObjectAgent:
             out[('contact_goal', self.contact_kinds.get(pat, 'unique'))] = {}
         if self.shape_goal:
             out[('shape_goal',)] = {}
+        if self.shape_contact:
+            out[('shape_contact_goal',)] = {}
         for i, c in self.drift.items():
             d, n = c.most_common(1)[0]
             if d in SIDES and n >= 2:
@@ -1428,7 +1443,7 @@ class ObjectAgent:
         kinds = {key[1] for key in usable if key[0] == 'contact_goal'}
         inside = any(key[0] == 'contact_goal' and key[2:] == ('inside',) for key in usable)
         self.prior_contacts = set()
-        if kinds and self.agent is not None and not (self.win_contacts or self.shape_goal or self.absent_goals
+        if kinds and self.agent is not None and not (self.win_contacts or self.shape_goal or self.shape_contact or self.absent_goals
                                                      or self.line_events):
             objs = [(o, pattern(grid, o)) for o in self._components(grid, self.agent)]
             if self._level_first is None or self._level_first[0].shape != grid.shape:
@@ -1507,7 +1522,8 @@ class ObjectAgent:
         # reach and shape_match are tried in turn, never at once: the one tried keeps its turn until it is
         # used up (reach: no candidate left to touch; shape_match: a match reached without a win), and
         # then the other may be tried
-        no_goal = not (self.win_contacts or self.shape_goal or self.absent_goals or self.line_events)
+        no_goal = not (self.win_contacts or self.shape_goal or self.shape_contact or self.absent_goals
+                       or self.line_events)
         shape_ok = 'shape_match' in self.meta and not self.shape_rejected and no_goal and \
             any('merge' in c for c in self.rules.values())
         reach_ok = 'reach' in self.meta and not any(k[0] == 'contact_goal' for k in usable)
@@ -1539,7 +1555,7 @@ class ObjectAgent:
         return all(first[p] == grid[p] for p in around if _inside(grid, p) and p not in skip)
 
     STATE = ('bg', 'start_patterns', 'directions', 'rules', 'value_rules', 'pair_rules', 'win_contacts',
-             'shape_goal', 'seen_patterns', 'click_models', 'absent_goals', 'absent_rejected', 'others',
+             'shape_goal', 'shape_contact', 'seen_patterns', 'click_models', 'absent_goals', 'absent_rejected', 'others',
              'line_goals', 'line_losses', 'line_hits', 'line_misses', 'loss_hits', 'loss_misses',
              'line_events', 'loss_events', 'transforms', 'transform_ops', 'drift', 'agent_patterns',
              'ce_mean', 'ce_std', 'ce_done', 'ce_generations', 'wins', 'losses', 'shape', 'contact_kinds',
@@ -1847,7 +1863,8 @@ class ObjectAgent:
         parent = {k0: None}
         queue = deque([start])
         explore = risky = None
-        targets = self._targets(grid, self.agent) if self.shape_goal or self.prior_shape else None
+        targets = self._targets(grid, self.agent) if self.shape_goal or self.prior_shape or self.shape_contact \
+            else None
         trials = self._goal_trials(grid)
         for v in sorted(self.absent_goals | trials, key=lambda v: int((grid == v).sum())):
             xor = self._xor_plan(grid, v)
@@ -1890,7 +1907,8 @@ class ObjectAgent:
                     if explore is None:
                         explore = path_to(k) + [a]
                         if not self.win_contacts and not self.shape_goal and not self.absent_goals \
-                                and not trials and not self.prior_contacts and not self.prior_shape:
+                                and not trials and not self.prior_contacts and not self.prior_shape \
+                                and not self.shape_contact:
                             queue.clear()           # no goal known yet: nothing to search further for
                             break
                     continue
@@ -2041,6 +2059,8 @@ class ObjectAgent:
         d = self._dir(action)
         if self.agent is not None and d is not None:
             touched = {pattern(before, o) for o in self._contacts(before, self.agent, d) or []}
+            if self.shape_contact and pattern(before, self.agent) in touched:
+                self.shape_contact = False      # touched an object of the agent's shape without a win
             self.win_contacts -= touched
             self.contact_rejected |= touched
             self.prior_contacts -= touched

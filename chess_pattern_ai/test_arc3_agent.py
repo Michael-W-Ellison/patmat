@@ -176,6 +176,32 @@ class TestObjectAgent(unittest.TestCase):
         self.assertEqual(results[2][3], 0)
 
 
+    def test_exit_and_shape_levels(self):
+        from arc3_games import GAMES, local_env
+        from evaluate_arc3 import play
+        agent = ObjectAgent(random.Random(0))
+        results = []
+        for _ in range(2):
+            agent.new_episode()
+            results.append(play(local_env(GAMES['exit-shape']()), agent.act, 1000, agent))
+        self.assertEqual([r[0] for r in results], [4, 4])
+        self.assertTrue(agent.win_contacts)              # levels won by reaching the exit
+        self.assertTrue(agent.shape_goal)                # ... and by taking the target's shape
+        self.assertEqual(results[1][3], 0)
+
+    def test_shape_and_touch(self):
+        from arc3_games import GAMES, local_env
+        from evaluate_arc3 import play
+        agent = ObjectAgent(random.Random(0))
+        results = []
+        for _ in range(2):
+            agent.new_episode()
+            results.append(play(local_env(GAMES['shape-touch']()), agent.act, 1000, agent))
+        self.assertEqual([r[0] for r in results], [3, 3])
+        self.assertTrue(agent.shape_contact)             # touching the target while having its shape
+        self.assertIn(('shape_contact_goal',), agent.facts())
+        self.assertEqual(sum(r[3] for r in results), 0)
+
 @unittest.skipIf(ARCBaseGame is None, 'arcengine is not installed')
 class TestClicks(unittest.TestCase):
     def episodes(self, name, n, budget):

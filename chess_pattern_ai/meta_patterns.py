@@ -124,6 +124,9 @@ def game_elements(facts: Dict[tuple, dict]) -> List[tuple]:
                 out.append(('reflection', 'turn', {'op': key[2]}))
         elif kind == 'shape_goal':
             out.append(('shape_match', 'shape_goal', {}))
+        elif kind == 'shape_contact_goal':           # both at once: an instance of each element
+            out.append(('shape_match', 'shape_contact', {}))
+            out.append(('reach', 'shape_contact', {}))
         elif kind == 'absent_goal':
             out.append(('removal', 'absent_goal', {}))
         elif kind == 'contact_goal':

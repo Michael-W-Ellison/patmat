@@ -49,6 +49,15 @@ the player.
   is always a way to the exit. 'maze' (10 x 10: background 0, walls 5,
   player 8, exit 9, decoys 7) and 'maze-b' (12 x 12, background 1, walls
   4, player 12, exit 14, decoys 6).
+- Shape games (10 x 10, background 0, walls 5): the player (9) moves up,
+  down, left, right; a piece (8) it walks into merges with it (the merged
+  player then moves on, if it can); the target (cells of 9 and 8) does not
+  move or merge. 'exit-shape' (4 levels) alternates level kinds: reach the
+  exit (14), then take the target's shape (the level is won when the
+  player's cells equal the target's), and so on. 'shape-touch' (3 levels):
+  a level is won by walking into the target while the player has its
+  shape; walking into it with another shape does nothing. A shape level
+  is lost when every piece has merged and the player has another shape.
 - Tetris variants: 'tetris-small' (a 6 x 12 well), 'tetris-wide' (10 x 16,
   the pieces in other colours).
 
@@ -503,6 +512,88 @@ class Maze(ARCBaseGame):
         self.complete_action()
 
 
+SHAPE_LEVELS = {
+    # name: (rows of the walls (#) and open cells (.), player, pieces [(cells)], target (cells: value), exit)
+    'exit1': (['##########', '#........#', '#.####...#', '#....#...#', '##.#.#.###', '#..#.....#',
+               '#.##.###.#', '#........#', '#....#...#', '##########'], (1, 1), [], {}, (8, 8)),
+    'exit2': (['##########', '#....#...#', '#.##...#.#', '#..#.###.#', '##.#.....#', '#..####..#',
+               '#.......##', '#.#.##...#', '#.#.....##', '##########'], (8, 1), [], {}, (1, 8)),
+    'shape1': (['##########'] + ['#........#'] * 8 + ['##########'], (7, 2), [[(4, 5), (5, 5)]],
+               {(1, 7): 8, (2, 6): 9, (2, 7): 8}, None),
+    'shape2': (['##########'] + ['#........#'] * 8 + ['##########'], (7, 6), [[(3, 2), (3, 3)]],
+               {(6, 3): 8, (6, 4): 8, (7, 3): 9}, None),
+    'shape3': (['##########'] + ['#........#'] * 8 + ['##########'], (8, 8), [[(6, 2)], [(5, 6), (6, 6)]],
+               {(1, 1): 8, (2, 1): 9, (2, 2): 8, (3, 2): 8}, None),
+}
+
+
+class ShapeGame(ARCBaseGame):
+    """The shape games (see the module notes): `kinds` is the list of level names, `touch` the win rule"""
+
+    def __init__(self, seed: int = 0, kinds=('exit1', 'shape1', 'exit2', 'shape2'), touch: bool = False):
+        self.touch = touch
+        super().__init__(game_id='shapes', levels=[self._level(SHAPE_LEVELS[k]) for k in kinds],
+                         camera=Camera(width=10, height=10, background=0, letter_box=3))
+
+    @staticmethod
+    def _level(spec) -> Level:
+        rows, player, pieces, target, exit_ = spec
+        walls = np.array([[5 if ch == '#' else -1 for ch in row] for row in rows], dtype=np.int8)
+        sprites = [Sprite(pixels=walls, name='walls', blocking=BlockingMode.PIXEL_PERFECT, layer=-1),
+                   Sprite(pixels=[[9]], name='player', blocking=BlockingMode.PIXEL_PERFECT,
+                          tags=['merge']).set_position(player[1], player[0])]
+        for i, cells in enumerate(pieces):
+            r0, c0 = min(r for r, _ in cells), min(c for _, c in cells)
+            px = np.full((max(r for r, _ in cells) - r0 + 1, max(c for _, c in cells) - c0 + 1), -1, dtype=np.int8)
+            for r, c in cells:
+                px[r - r0, c - c0] = 8
+            sprites.append(Sprite(pixels=px, name=f'piece{i}', blocking=BlockingMode.PIXEL_PERFECT,
+                                  tags=['merge']).set_position(c0, r0))
+        if target:
+            r0, c0 = min(r for r, _ in target), min(c for _, c in target)
+            px = np.full((max(r for r, _ in target) - r0 + 1, max(c for _, c in target) - c0 + 1), -1, dtype=np.int8)
+            for (r, c), v in target.items():
+                px[r - r0, c - c0] = v
+            sprites.append(Sprite(pixels=px, name='target', blocking=BlockingMode.PIXEL_PERFECT,
+                                  tags=['target']).set_position(c0, r0))
+        if exit_:
+            sprites.append(Sprite(pixels=[[14]], name='exit', blocking=BlockingMode.PIXEL_PERFECT).set_position(
+                exit_[1], exit_[0]))
+        return Level(sprites=sprites, grid_size=(10, 10))
+
+    def on_set_level(self, level):
+        self._player = level.get_sprites_by_name('player')[0]
+        targets = level.get_sprites_by_tag('target')
+        self._target = targets[0] if targets else None
+
+    def _same_shape(self) -> bool:
+        # (the sprites' own cells: the screen region around the player would also show what is next to it)
+        return self._target is not None and np.array_equal(self._player.render(), self._target.render())
+
+    def step(self):
+        dx, dy = {GameAction.ACTION1: (0, -1), GameAction.ACTION2: (0, 1),
+                  GameAction.ACTION3: (-1, 0), GameAction.ACTION4: (1, 0)}.get(self.action.id, (0, 0))
+        won = False
+        if dx or dy:
+            for other in self.try_move_sprite(self._player, dx, dy) or []:
+                if 'merge' in other.tags:
+                    old, self._player = self._player, self._player.merge(other)
+                    self.current_level.remove_sprite(other)
+                    self.current_level.remove_sprite(old)
+                    self.current_level.add_sprite(self._player)
+                    self.try_move_sprite(self._player, dx, dy)
+                elif other.name == 'exit':
+                    won = True
+                elif other.name == 'target' and self.touch and self._same_shape():
+                    won = True
+        if won or (not self.touch and self._same_shape()):
+            self.next_level()
+        elif self._target is not None and len(self.current_level.get_sprites_by_tag('merge')) <= 1 \
+                and not self._same_shape():
+            self.lose()                         # every piece merged into another shape: no way left to win
+        self.complete_action()
+
+
 def _k_game(**kw):
     def make(seed: int = 0):
         return KInARow(seed=seed, **kw)
@@ -517,7 +608,9 @@ GAMES = {'lights': LightsOut, 'clear': ClearRed, 'tictactoe': TicTacToe, 'tetris
          'tictactoe-random': _k_game(rows=3, cols=3, k=3, drop=False, colours=(0, 9, 6, 4)),
          'tetris-wide': lambda seed=0: Tetris(seed, width=10, height=16, colours=[14, 13, 15, 10, 7, 4, 1]),
          'tetris-small': lambda seed=0: Tetris(seed, width=6, height=12),
-         'maze': Maze, 'maze-b': lambda seed=0: Maze(seed, n=12, colours=(1, 4, 12, 14, 6))}
+         'maze': Maze, 'maze-b': lambda seed=0: Maze(seed, n=12, colours=(1, 4, 12, 14, 6)),
+         'exit-shape': ShapeGame,
+         'shape-touch': lambda seed=0: ShapeGame(seed, kinds=('shape1', 'shape2', 'shape3'), touch=True)}
 BOARD_GAMES = ('connect4', 'connect4-block', 'gomoku', 'gomoku-block', 'tictactoe-block', 'tictactoe-random')
 
 
