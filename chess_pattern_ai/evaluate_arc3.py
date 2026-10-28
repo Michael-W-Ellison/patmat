@@ -40,6 +40,11 @@ a random opponent by default): each episode is one game, a different seed
 each (so who moves first alternates); wins, losses and draws are reported
 for each block of BLOCK games, for the agent and for a random player.
 
+Stored patterns: with `--store <dir>` (object agent only), each game's
+session starts from the game's specific entry in that pattern store if it
+has one, with the store's generic patterns offered (pattern_store.py), and
+the game's entry is saved at the end (which rebuilds the generic store).
+
 Frames: an action can produce several frames (a game shows, for example,
 the player's move and then each other player's). An agent with
 `uses_frames = True` gets them all, as cell grids, in after_step,
@@ -105,7 +110,7 @@ def play(env, choose, max_actions: int, agent=None, clicks=None, stop_on_loss=Fa
                 agent.level_won(grid, a, **extra)
         elif nxt.state == GameState.GAME_OVER and agent:
             if getattr(agent, 'learns_from_losses', False):
-                agent.after_step(grid, a, after, **extra)
+                agent.after_step(grid, a, after, lost=True, **extra)
             agent.lost(grid, a, **extra)
         elif agent:
             agent.after_step(grid, a, after, **extra)
@@ -120,14 +125,26 @@ def random_choice(rng):
     return choose
 
 
+def _store_arg():
+    """The PatternStore named by --store <dir> (removed from sys.argv), or None"""
+    if '--store' not in sys.argv:
+        return None
+    from pattern_store import PatternStore
+    i = sys.argv.index('--store')
+    path = sys.argv[i + 1]
+    del sys.argv[i:i + 2]
+    return PatternStore(path)
+
+
 def main():
     logging.disable(logging.INFO)
+    store = _store_arg()
     episodes = int(sys.argv[2]) if len(sys.argv) > 2 else 3
     max_actions = int(sys.argv[3]) if len(sys.argv) > 3 else 2000
     seed = int(sys.argv[4]) if len(sys.argv) > 4 else 0
     make = AGENTS[sys.argv[5]] if len(sys.argv) > 5 else ObjectAgent
     if sys.argv[1] == '--board-games':
-        board_games(episodes, max_actions, seed, make, sys.argv[6:] or ['connect4', 'gomoku'])
+        board_games(episodes, max_actions, seed, make, sys.argv[6:] or ['connect4', 'gomoku'], store)
         return
     stop_on_loss = sys.argv[1] == '--score-games'
     if sys.argv[1] in ('--click-games', '--score-games'):
@@ -152,7 +169,7 @@ def main():
     for gid, new_env in games:
         agent = make(random.Random(seed))
         rng = random.Random(seed)
-        print(f'== {gid}')
+        print(f'== {gid}' + (f' (from the {store.start(gid, agent)} store)' if store else ''))
         for ep in range(episodes):
             agent.new_episode()
             done, total, per_level, losses, score = play(new_env(), agent.act, max_actions, agent,
@@ -164,14 +181,16 @@ def main():
         print(f'   random: levels {done}/{total}, actions per level {per_level}, losses {losses}'
               + (f', score {score}' if stop_on_loss else ''))
         print(f'   agent: {agent.describe()}')
+        if store:
+            store.save(gid, agent, episodes)
 
 
-def board_games(games, max_actions, seed, make, names):
+def board_games(games, max_actions, seed, make, names, store=None):
     from arc3_games import GAMES, local_env
     for name in names:
         agent = make(random.Random(seed))
         rng = random.Random(seed)
-        print(f'== {name}')
+        print(f'== {name}' + (f' (from the {store.start(name, agent)} store)' if store else ''))
         for who in ('agent', 'random'):
             results = []
             for i in range(games):
@@ -188,6 +207,8 @@ def board_games(games, max_actions, seed, make, names):
                                             + (f' {b.count("unfinished")} unfinished' if b.count('unfinished') else '')
                                             for i, b in enumerate(blocks)), flush=True)
         print(f'   agent: {agent.describe()}')
+        if store:
+            store.save(name, agent, games)
 
 
 if __name__ == '__main__':

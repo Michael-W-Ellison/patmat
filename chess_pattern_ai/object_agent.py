@@ -147,6 +147,21 @@ relative places) is not searched further. The search it stops at the first move 
 reaches a goal, else goes to the nearest move whose outcome is unknown or
 would give the agent a pattern not seen before (with no goal known yet,
 the search stops there).
+
+Stored patterns (pattern_store.py): facts() lists what was learned with
+each value replaced by its role in the game (roles(): placed by the
+agent's clicks, by the other players, replaced by moves, background,
+wall), so that what two games share can be found though they are drawn in
+other colours; export_state() / import_state() keep the learned rules,
+models, goals and weights of one game. use_generic() offers the agent
+patterns found in several games, which it uses only where its own
+evidence is still missing, and only once the pattern's conditions hold in
+this game (_apply_priors): a line goal or loss of the role's values (the
+length tried rising each time a line forms without a win or loss), losses
+as the goal's lines for the other players, the other players' moves as
+drops like the agent's clicks, the score weights to start from, and drift
+and turns taken from one observation instead of two. priors_applied
+records which were used.
 """
 
 import random
@@ -170,6 +185,7 @@ SEARCH_NODES = 3000         # positions searched per depth of the iterative deep
 MAX_OPTIONS = 12            # moves considered per player in a position (those near marks, if more)
 LINE_DIRS = ((0, 1), (1, 0), (1, 1), (1, -1))
 ANY = -100                  # line hypotheses over any non-background value
+MIN_LINE = 3                # the shortest line a line hypothesis is about
 MISS_RATIO = 3              # a line hypothesis is kept while formed MISS_RATIO times as often in wins as elsewhere
 CE_POPULATION, CE_ELITE, CE_MIN_STD, CE_SMOOTH = 8, 3, 0.2, 0.7
 GEOMETRY = {
@@ -205,6 +221,7 @@ class ClickModel:
         self.off_tables: Dict[Pos, Dict[int, int]] = {}
         self.drops = {d: True for d in SIDES}       # drop along d still fits every click seen
         self.drop_values: Optional[Tuple[int, int]] = None    # (value the cell held, value placed)
+        self.like: Optional[Pos] = None             # a drop direction expected (a generic pattern), if any
 
     @staticmethod
     def drop_target(grid, cell, d, empty) -> Optional[Pos]:
@@ -260,7 +277,11 @@ class ClickModel:
                     self.ok['offsets'] = False
 
     def drop_dir(self) -> Optional[Pos]:
-        return next((d for d in SIDES if self.drops[d]), None) if self.drop_values is not None else None
+        if self.drop_values is None:
+            return None
+        if self.like is not None and self.drops[self.like]:
+            return self.like
+        return next((d for d in SIDES if self.drops[d]), None)
 
     def kind(self, narrow=False) -> Optional[str]:
         """
@@ -269,7 +290,8 @@ class ClickModel:
         """
         if not self.seen:
             return None
-        if narrow and len(self.seen) >= 3 and self.drop_dir() is not None and not self.ok['none']:
+        if narrow and (len(self.seen) >= 3 or self.like is not None) and self.drop_dir() is not None \
+                and not self.ok['none']:
             return 'drop'
         kind = next((k for k in ('none', 'map', 'offsets') if self.ok[k]), None)
         if kind is None and self.drop_dir() is not None:
@@ -388,6 +410,7 @@ class ObjectAgent:
         self.ce_mean = np.zeros(len(FEATURES))
         self.ce_std = np.ones(len(FEATURES))
         self.ce_done: List[tuple] = []              # (fitness, weights) of this generation's episodes
+        self.ce_generations = 0
         self.weights = self.ce_mean.copy()
         self.episode = {'score': 0, 'actions': 0, 'used': False}
         self.plan: List = []
@@ -395,6 +418,12 @@ class ObjectAgent:
         self.moves_by = {'planned': 0, 'explored': 0}
         self.exploring = False
         self._before_agent = None
+        self.generic: Dict[tuple, dict] = {}        # generic patterns to try (pattern_store), by key
+        self.priors_applied: set = set()            # keys of the generic patterns used in this game
+        self.prior_lines: Dict[tuple, dict] = {}    # line pattern key -> {'k': length tried, 'falsified': bool}
+        self._prior_hyps: Dict[tuple, tuple] = {}   # line hypothesis -> the line pattern key it came from
+        self._generic_weights = False               # the score weights started from a generic pattern
+        self.shape: Optional[Tuple[int, int]] = None    # the last grid's shape
 
     # ------------------------------------------------------------ objects
     def _walls(self) -> set:
@@ -605,7 +634,9 @@ class ObjectAgent:
         if not c:
             return None
         (op, offset), n = c.most_common(1)[0]
-        if n < 2:
+        if n == 1 and ('transform', action, op, offset) in self.generic:
+            self.priors_applied.add(('transform', action, op, offset))
+        elif n < 2:
             return None
         new = GEOMETRY[op](np.array(pat))
         return tuple(map(tuple, new.tolist())), offset
@@ -913,7 +944,7 @@ class ObjectAgent:
                 continue                        # nothing of v was added
             for d in LINE_DIRS:
                 ra, rb = runs(ma, d), runs(mb, d)
-                for k in sorted({n for n in ra if n >= 3}, reverse=True):
+                for k in sorted({n for n in ra if n >= MIN_LINE}, reverse=True):
                     if sum(n >= k for n in ra) > sum(n >= k for n in rb):
                         out |= {(v, k, d), (v, k, None)}
                         break
@@ -947,6 +978,8 @@ class ObjectAgent:
                     misses[h] += 1
                     if MISS_RATIO * misses[h] > hits[h]:
                         space.discard(h)        # (and it stays out: _kept checks the same)
+                        if h in self._prior_hyps:
+                            self.prior_lines[self._prior_hyps[h]]['falsified'] = True
             if self.absent_goals and not lost:
                 self.absent_goals = {v for v in self.absent_goals if not ((prev == v).any() and not (cur == v).any())}
 
@@ -1041,8 +1074,6 @@ class ObjectAgent:
         self.loss_hits.update(found)
         self.loss_events += bool(found)
         self.line_losses = self._kept(self.loss_hits, self.loss_misses, self.loss_events)
-        if grid is not None:
-            self._falsify(grid, frames, lost=True)
         self.base = None
         self._new_level()
 
@@ -1061,6 +1092,244 @@ class ObjectAgent:
         self._ce_next()
         self.base = None
         self._new_level()
+
+    # -------------------------------------------------- stored patterns
+    def roles(self) -> Dict[int, str]:
+        """
+        The role of each value in this game: 'mine' (placed by the agent's clicks), 'theirs' (placed by
+        the other players' moves), 'empty' (replaced by moves), 'background', 'wall'; the first that
+        applies, in that order (ANY is 'any')
+        """
+        mine, _ = self._placed([self.click_models])
+        theirs, _ = self._placed(self.others)
+        _, empty = self._placed()
+        out = {ANY: 'any'}
+        for role, values in (('wall', self._walls()), ('background', {self.bg}), ('empty', empty),
+                             ('theirs', theirs - mine), ('mine', mine)):
+            out.update({v: role for v in values if v is not None})
+        return out
+
+    def _role_values(self, role) -> set:
+        return {v for v, r in self.roles().items() if r == role}
+
+    def _click_keys(self, role) -> set:
+        """(role of the clicked value, kind, drop direction) of the agent's click models whose kind is known"""
+        out = set()
+        for v, m in self.click_models.items():
+            kind = m.kind()
+            if kind in ('map', 'offsets', 'drop'):
+                out.add((role.get(v, 'other'), kind, m.drop_dir() if kind == 'drop' else None))
+        return out
+
+    def _players(self) -> int:
+        """Other players whose moves are known (a model of a known kind)"""
+        return sum(any(m.kind(narrow=True) in ('map', 'offsets', 'drop') for m in models.values())
+                   for models in self.others)
+
+    def facts(self) -> Dict[tuple, dict]:
+        """
+        What was learned in this game, with values replaced by their roles (roles()): key -> parameters.
+            ('direction', action, d)
+            ('acts_by', how)                    'moves' (actions move the agent), 'clicks' (clicks change cells)
+            ('own_click', role, kind, d)        the agent's clicks on a value (d: a drop's direction)
+            ('other_click', role, kind, d)      the same for the other players' moves
+            ('players', n)                      n other players whose moves are known
+            ('others_like_me',)                 every other player's moves are of a kind the agent's are
+            ('line_goal', role, d)  {k, full}   a line of k cells of the role's value wins (d None: any
+            ('line_loss', role, d)  {k, full}   direction); loses (full: k is the grid's extent along d)
+            ('loss_like_goal',)                 a line of k in any direction wins for 'mine', loses for 'theirs'
+            ('absent_goal', role)               no cell holding the value wins ('cleared': a value its
+                                                clicks clear to the background, 'toggled': one they toggle)
+            ('contact_goal',), ('shape_goal',)
+            ('drift', i, d)                     at frame i the agent moves along d by itself
+            ('transform', action, op, offset)   the action turns or mirrors the agent's pattern
+            ('drift_weights',)  {mean, std}     the score weights learned for where a piece comes to rest
+        Line goals and losses are included once wins (losses) have formed lines.
+        """
+        role = self.roles()
+        r = lambda v: role.get(v, 'other')
+        out = {('direction', a, d): {} for a, d in self.directions.items()}
+        own = self._click_keys(role)
+        out.update({('own_click',) + k: {} for k in own})
+        out.update({k: {} for k in self._acts_by(own)})
+        like = True
+        for models in self.others:
+            for v, m in models.items():
+                kind = m.kind(narrow=True)
+                if kind in ('map', 'offsets', 'drop'):
+                    key = (r(v), kind, m.drop_dir() if kind == 'drop' else None)
+                    out[('other_click',) + key] = {}
+                    like &= key in own
+        players = self._players()
+        if players:
+            out[('players', players)] = {}
+            if like and own:
+                out[('others_like_me',)] = {}
+        lines = {}
+        for name, space, events in (('line_goal', self.line_goals, self.line_events),
+                                    ('line_loss', self.line_losses, self.loss_events)):
+            if events and space:
+                for v, k, d in space:
+                    p = out.setdefault((name, r(v), d), {'k': [], 'full': True})
+                    p['k'].append(k)
+                    p['full'] &= d is not None and k == self._extent(d)
+                lines[name] = {(r(v), k, d) for v, k, d in space}
+        if len(lines) == 2:
+            goal = {k for rv, k, d in lines['line_goal'] if rv == 'mine' and d is None}
+            loss = {k for rv, k, d in lines['line_loss'] if rv == 'theirs' and d is None}
+            if goal & loss:
+                out[('loss_like_goal',)] = {}
+        for p in out.values():
+            if 'k' in p:
+                p['k'] = sorted(set(p['k']))
+        for v in self.absent_goals:
+            m = self.click_models.get(v)
+            if m is not None and m.kind() == 'map' and m.table.get(v) == self.bg:
+                out[('absent_goal', 'cleared')] = {}
+            elif any(v in (mm.toggles() or ()) for mm in self.click_models.values()):
+                out[('absent_goal', 'toggled')] = {}
+            else:
+                out[('absent_goal', r(v))] = {}
+        if self.win_contacts:
+            out[('contact_goal',)] = {}
+        if self.shape_goal:
+            out[('shape_goal',)] = {}
+        for i, c in self.drift.items():
+            d, n = c.most_common(1)[0]
+            if d in SIDES and n >= 2:
+                out[('drift', i, d)] = {}
+        for a, c in self.transform_ops.items():
+            (op, offset), n = c.most_common(1)[0]
+            if n >= 2:
+                out[('transform', a, op, offset)] = {}
+        if self.ce_generations:
+            out[('drift_weights',)] = {'mean': self.ce_mean.tolist(), 'std': self.ce_std.tolist()}
+        return out
+
+    def _acts_by(self, own) -> set:
+        return {('acts_by', how) for how, yes in (('moves', bool(self.directions)), ('clicks', bool(own))) if yes}
+
+    def _extent(self, d) -> Optional[int]:
+        """The most cells a line along d can have in the last grid"""
+        if self.shape is None or d is None:
+            return None
+        return min(n for n, step in zip(self.shape, d) if step)
+
+    def conditions(self) -> set:
+        """The facts a generic pattern's conditions are checked against: how the agent acts, players, drift, own clicks"""
+        own = self._click_keys(self.roles())
+        out = {('own_click',) + k for k in own} | self._acts_by(own)
+        players = self._players()
+        if players:
+            out.add(('players', players))
+        for i, c in self.drift.items():
+            d, n = c.most_common(1)[0]
+            if d in SIDES and n >= 2:
+                out.add(('drift', i, d))
+        return out
+
+    def use_generic(self, patterns):
+        """
+        Generic patterns (pattern_store) to try in this game. Score weights start from the pattern's
+        (unless this game's own were learned); the others are used as described in _apply_priors.
+        """
+        self.generic = {p['key']: p for p in patterns}
+        w = self.generic.get(('drift_weights',))
+        if w and not self.ce_generations:
+            self.ce_mean = np.array(w['params']['mean'], dtype=float)
+            self.ce_std = np.maximum(np.array(w['params']['std'], dtype=float), CE_MIN_STD)
+            self.weights = self.ce_mean.copy()
+            self._generic_weights = True
+
+    def _apply_priors(self, grid):
+        """
+        Generic patterns used while this game's own evidence is missing (each once its conditions, the
+        pattern's 'context', hold here):
+        - line goals (losses), while no win (loss) has formed lines: a line of the role's values; its
+          length k differs between games (the pattern lists those seen), so the shortest, MIN_LINE, is
+          tried first, and when a line of k forms without a win (loss), k + 1 (up to the board's size);
+          if k was the grid's extent along the line in every game (a full row), that extent is tried With loss_like_goal, goals and losses share k, and once the
+          goal is known from wins, losses are taken to be its lines for the other players
+        - others_like_me: the other players' moves are taken to drop like the agent's clicks, as soon as
+          their moves fit that (rather than after 3 moves)
+        (drift and transforms need one observation instead of two when a generic pattern names them; see
+        _drift_dir and _geometric)
+        """
+        if not self.generic:
+            return
+        cond = self.conditions()
+        usable = {k: p for k, p in self.generic.items() if p.get('context') and set(p['context']) <= cond}
+        if not usable:
+            return
+        mirror = ('loss_like_goal',) in usable
+        for name, events in (('line_goal', self.line_events), ('line_loss', self.loss_events)):
+            if events:
+                continue
+            for key, p in usable.items():
+                if key[0] != name or key in self.prior_lines or not self._role_values(key[1]):
+                    continue
+                full = p['params'].get('full') and key[2] is not None
+                self.prior_lines[key] = {'k': self._extent(key[2]) if full else MIN_LINE, 'falsified': False}
+                self.priors_applied.add(key)
+        for state in self.prior_lines.values():
+            if state['falsified']:
+                state['k'] += 1
+                state['falsified'] = False
+        goal_keys = [k for k in self.prior_lines if k[0] == 'line_goal']
+        loss_keys = [k for k in self.prior_lines if k[0] == 'line_loss']
+        if mirror and loss_keys and not self.loss_events:
+            self.priors_applied.add(('loss_like_goal',))
+            if self.line_events and self.line_goals:
+                mine = self._role_values('mine')
+                ks = [k for v, k, d in self.line_goals if v in mine]
+                if ks:
+                    for key in loss_keys:
+                        self.prior_lines[key]['k'] = max(self.prior_lines[key]['k'], min(ks))
+            elif goal_keys:
+                k = max(self.prior_lines[key]['k'] for key in goal_keys + loss_keys)
+                for key in goal_keys + loss_keys:
+                    self.prior_lines[key]['k'] = k
+        size = max(grid.shape)
+        for name, events in (('line_goal', self.line_events), ('line_loss', self.loss_events)):
+            if events:
+                continue
+            hyps = set()
+            for key, state in self.prior_lines.items():
+                if key[0] == name and state['k'] <= size:
+                    for v in self._role_values(key[1]):
+                        hyps.add((v, state['k'], key[2]))
+                        self._prior_hyps[(v, state['k'], key[2])] = key
+            if name == 'line_goal':
+                self.line_goals = hyps or None
+            else:
+                self.line_losses = hyps or None
+        if ('others_like_me',) in usable:
+            drops = {m.drop_dir() for m in self.click_models.values() if m.kind() == 'drop'}
+            if len(drops) == 1:
+                d = drops.pop()
+                for models in self.others:
+                    for m in models.values():
+                        m.like = d
+                self.priors_applied.add(('others_like_me',))
+
+    STATE = ('bg', 'start_patterns', 'directions', 'rules', 'value_rules', 'pair_rules', 'win_contacts',
+             'shape_goal', 'seen_patterns', 'click_models', 'absent_goals', 'absent_rejected', 'others',
+             'line_goals', 'line_losses', 'line_hits', 'line_misses', 'loss_hits', 'loss_misses',
+             'line_events', 'loss_events', 'transforms', 'transform_ops', 'drift', 'agent_patterns',
+             'ce_mean', 'ce_std', 'ce_done', 'ce_generations', 'wins', 'losses', 'shape')
+
+    def export_state(self) -> dict:
+        """
+        What the agent learned of a game (STATE: rules, models, goals, weights), to go on with the game
+        later; the exact transitions remembered, and what holds only for the current level, are left out
+        """
+        return {name: getattr(self, name) for name in self.STATE}
+
+    def import_state(self, state: dict):
+        for name, value in state.items():
+            if name in self.STATE:
+                setattr(self, name, value)
+        self.weights = self.ce_mean.copy()
 
     # ---------------------------------------------------------- planning
     # ------------------------------------------------------ other players
@@ -1089,10 +1358,13 @@ class ObjectAgent:
                     out.append(g)
         return out
 
-    def _placed(self) -> Tuple[set, set]:
-        """(values moves place, values they replace): from the agent's clicks and the other players' moves"""
+    def _placed(self, groups=None) -> Tuple[set, set]:
+        """
+        (values moves place, values they replace): from the agent's clicks and the other players' moves
+        (or the groups of click models given)
+        """
         marks, empties = set(), set()
-        for models in [self.click_models] + self.others:
+        for models in groups if groups is not None else [self.click_models] + self.others:
             for v, m in models.items():
                 kind = m.kind()
                 if kind == 'drop' or (kind is None and m.drop_dir() is not None):
@@ -1309,6 +1581,8 @@ class ObjectAgent:
                     queue.append((g2, a2))
         self.exploring = False
         self.episode['used'] = True
+        if self._generic_weights:
+            self.priors_applied.add(('drift_weights',))
         return best_path
 
     def _ce_next(self):
@@ -1321,10 +1595,12 @@ class ObjectAgent:
                 self.ce_mean = CE_SMOOTH * elite.mean(axis=0) + (1 - CE_SMOOTH) * self.ce_mean
                 self.ce_std = np.maximum(CE_SMOOTH * elite.std(axis=0) + (1 - CE_SMOOTH) * self.ce_std, CE_MIN_STD)
                 self.ce_done = []
+                self.ce_generations += 1
         self.weights = np.array([self.rng.gauss(m, s) for m, s in zip(self.ce_mean, self.ce_std)])
         self.episode = {'score': 0, 'actions': 0, 'used': False}
 
     def make_plan(self, grid, actions) -> Optional[List]:
+        self._apply_priors(grid)
         if self._drift_dir(1) is not None and self.agent is not None:
             plan = self._drift_plan(grid, actions)
             if plan:
@@ -1396,6 +1672,7 @@ class ObjectAgent:
 
     def act(self, grid, actions):
         self.episode['actions'] += 1
+        self.shape = grid.shape
         if self.agent is None:
             self.agent = self._locate(grid)
         if not self.plan:
@@ -1412,11 +1689,17 @@ class ObjectAgent:
         return ('click', self.rng.randrange(grid.shape[0]), self.rng.randrange(grid.shape[1]))
 
     def _drift_dir(self, i=1) -> Optional[Pos]:
+        """The direction the agent drifts in at frame i: seen twice (once, if a generic pattern says it)"""
         c = self.drift.get(i)
         if not c:
             return None
         d, n = c.most_common(1)[0]
-        return d if n >= 2 and d in SIDES else None
+        if d not in SIDES:
+            return None
+        if n == 1 and ('drift', i, d) in self.generic:
+            self.priors_applied.add(('drift', i, d))
+            return d
+        return d if n >= 2 else None
 
     def _appeared(self, prev, cur) -> Optional[FrozenSet[Pos]]:
         """
@@ -1505,9 +1788,10 @@ class ObjectAgent:
             objs = self._contacts(before, self.agent, d) or []
             self.win_contacts -= {pattern(before, o) for o in objs}
 
-    def after_step(self, before, action, after, frames=None):
+    def after_step(self, before, action, after, frames=None, lost=False):
+        """lost: the step lost the game (lost() follows); its lines are no evidence against loss hypotheses"""
         self._track_base([before] + list(frames or [after]))
-        self._falsify(before, frames or [after])
+        self._falsify(before, frames or [after], lost=lost)
         self._contact_falsify(before, action)
         if frames and len(frames) > 1:
             own = frames[0]

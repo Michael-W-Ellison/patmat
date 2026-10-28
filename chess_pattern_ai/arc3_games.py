@@ -39,7 +39,11 @@ the player.
   opponent's first move is on the board at the start). k in a row of the
   player's wins (WIN), of the opponent's loses (GAME_OVER), a full board is
   a draw (also GAME_OVER); `result` says which. Games: 'connect4' (6 x 7,
-  k 4, drop), 'gomoku' (15 x 15, k 5), and '-block' versions.
+  k 4, drop), 'gomoku' (15 x 15, k 5), and '-block' versions;
+  'tictactoe-random' and 'tictactoe-block' (3 x 3, k 3, drawn in other
+  colours: empty 0, the player's 9, the opponent's 6, border 4).
+- Tetris variants: 'tetris-small' (a 6 x 12 well), 'tetris-wide' (10 x 16,
+  the pieces in other colours).
 
 GAMES maps names to game classes; local_env(game) gives the reset/step
 interface of the ARC-AGI toolkit's environment wrappers.
@@ -246,22 +250,24 @@ WELL_W, WELL_H = 8, 14
 
 
 class Tetris(ARCBaseGame):
-    def __init__(self, seed: int = 0):
+    def __init__(self, seed: int = 0, width: int = WELL_W, height: int = WELL_H, colours=None):
         self.rng = random.Random(seed)
+        self.w, self.h = width, height
+        self.colours = colours or [c for _, c in TETROMINOES]
         self._phase = 0
         self.piece = None                       # (cells, colour), cells as (row, col) on the grid
-        px = np.full((WELL_H + 2, WELL_W + 2), 5, dtype=np.int8)
+        px = np.full((height + 2, width + 2), 5, dtype=np.int8)
         px[1:-1, 1:-1] = 0
-        level = Level(sprites=[Sprite(pixels=px, name='board')], grid_size=(WELL_W + 2, WELL_H + 2))
+        level = Level(sprites=[Sprite(pixels=px, name='board')], grid_size=(width + 2, height + 2))
         super().__init__(game_id='tetris', levels=[level], win_score=200,
-                         camera=Camera(width=WELL_W + 2, height=WELL_H + 2, background=0, letter_box=3))
+                         camera=Camera(width=width + 2, height=height + 2, background=0, letter_box=3))
 
     def _px(self):
         return self.current_level.get_sprites_by_name('board')[0]
 
     def _free(self, px, cells):
         own = set(self.piece[0])
-        return all(1 <= r <= WELL_H and 1 <= c <= WELL_W and (px[r, c] == 0 or (r, c) in own) for r, c in cells)
+        return all(1 <= r <= self.h and 1 <= c <= self.w and (px[r, c] == 0 or (r, c) in own) for r, c in cells)
 
     def _put(self, px, cells, colour):
         for p in self.piece[0]:
@@ -271,8 +277,9 @@ class Tetris(ARCBaseGame):
         self.piece = (cells, colour)
 
     def _spawn(self, px) -> bool:
-        shape, colour = TETROMINOES[self.rng.randrange(len(TETROMINOES))]
-        cells = [(1 + r, 3 + c) for r, c in shape]
+        i = self.rng.randrange(len(TETROMINOES))
+        shape, colour = TETROMINOES[i][0], self.colours[i]
+        cells = [(1 + r, 1 + (self.w - 4) // 2 + c) for r, c in shape]
         if any(px[p] != 0 for p in cells):
             return False
         self.piece = (cells, colour)
@@ -320,10 +327,10 @@ class Tetris(ARCBaseGame):
             else:
                 self._phase = 2                 # locked: rows and the next piece in one more frame
             return
-        full = [r for r in range(1, WELL_H + 1) if all(px[r, c] != 0 for c in range(1, WELL_W + 1))]
+        full = [r for r in range(1, self.h + 1) if all(px[r, c] != 0 for c in range(1, self.w + 1))]
         if full:
-            keep = [px[r, 1:-1].copy() for r in range(1, WELL_H + 1) if r not in full]
-            rows = [np.zeros(WELL_W, dtype=np.int8) for _ in full] + keep
+            keep = [px[r, 1:-1].copy() for r in range(1, self.h + 1) if r not in full]
+            rows = [np.zeros(self.w, dtype=np.int8) for _ in full] + keep
             for i, row in enumerate(rows):
                 px[1 + i, 1:-1] = row
             self._score += len(full)
@@ -342,26 +349,27 @@ class Tetris(ARCBaseGame):
 
 class KInARow(ARCBaseGame):
     def __init__(self, seed: int = 0, rows: int = 6, cols: int = 7, k: int = 4, drop: bool = True,
-                 opponent: str = 'random'):
+                 opponent: str = 'random', colours=(EMPTY, MINE, THEIRS, BORDER)):
         self.rng = random.Random(seed)
+        self.empty, self.mine, self.theirs, border = colours
         self.rows, self.cols, self.k, self.drop, self.opponent = rows, cols, k, drop, opponent
         self.agent_first = seed % 2 == 0
         self.result = None
         self._reply = False
-        px = np.full((rows + 2, cols + 2), BORDER, dtype=np.int8)
-        px[1:-1, 1:-1] = EMPTY
+        px = np.full((rows + 2, cols + 2), border, dtype=np.int8)
+        px[1:-1, 1:-1] = self.empty
         level = Level(sprites=[Sprite(pixels=px, name='board')], grid_size=(cols + 2, rows + 2))
         super().__init__(game_id='kinarow', levels=[level],
-                         camera=Camera(width=cols + 2, height=rows + 2, background=EMPTY, letter_box=3))
+                         camera=Camera(width=cols + 2, height=rows + 2, background=self.empty, letter_box=3))
 
     def _board(self):
         return self.current_level.get_sprites_by_name('board')[0]
 
     def _legal(self, b):
         if self.drop:
-            return [(max(r for r in range(self.rows) if b[r, c] == EMPTY), c)
-                    for c in range(self.cols) if b[0, c] == EMPTY]
-        return [(r, c) for r in range(self.rows) for c in range(self.cols) if b[r, c] == EMPTY]
+            return [(max(r for r in range(self.rows) if b[r, c] == self.empty), c)
+                    for c in range(self.cols) if b[0, c] == self.empty]
+        return [(r, c) for r in range(self.rows) for c in range(self.cols) if b[r, c] == self.empty]
 
     def _line(self, b, v, p) -> bool:
         """k of v in a line through p"""
@@ -379,7 +387,7 @@ class KInARow(ARCBaseGame):
     def _opponent_move(self, b):
         legal = self._legal(b)
         if self.opponent == 'block':
-            for v in (THEIRS, MINE):
+            for v in (self.theirs, self.mine):
                 for p in legal:
                     trial = b.copy()
                     trial[p] = v
@@ -393,7 +401,7 @@ class KInARow(ARCBaseGame):
         if not self.agent_first:
             sprite = level.get_sprites_by_name('board')[0]
             px = sprite.pixels.copy()
-            px[1:-1, 1:-1][self._opponent_move(px[1:-1, 1:-1])] = THEIRS
+            px[1:-1, 1:-1][self._opponent_move(px[1:-1, 1:-1])] = self.theirs
             sprite.pixels = px
 
     def step(self):
@@ -403,9 +411,9 @@ class KInARow(ARCBaseGame):
         if self._reply:                         # the opponent's move, in a second frame
             self._reply = False
             p = self._opponent_move(b)
-            b[p] = THEIRS
+            b[p] = self.theirs
             sprite.pixels = px
-            if self._line(b, THEIRS, p):
+            if self._line(b, self.theirs, p):
                 self.result = 'loss'
                 self.lose()
             elif not self._legal(b):
@@ -421,12 +429,12 @@ class KInARow(ARCBaseGame):
                 if 0 <= r < self.rows and 0 <= c < self.cols:
                     if self.drop:
                         target = next((q for q in self._legal(b) if q[1] == c), None)
-                    elif b[r, c] == EMPTY:
+                    elif b[r, c] == self.empty:
                         target = (r, c)
                 if target is not None:
-                    b[target] = MINE
+                    b[target] = self.mine
                     sprite.pixels = px
-                    if self._line(b, MINE, target):
+                    if self._line(b, self.mine, target):
                         self.result = 'win'
                         self.win()
                     elif not self._legal(b):
@@ -447,8 +455,12 @@ def _k_game(**kw):
 GAMES = {'lights': LightsOut, 'clear': ClearRed, 'tictactoe': TicTacToe, 'tetris': Tetris,
          'connect4': _k_game(), 'connect4-block': _k_game(opponent='block'),
          'gomoku': _k_game(rows=15, cols=15, k=5, drop=False),
-         'gomoku-block': _k_game(rows=15, cols=15, k=5, drop=False, opponent='block')}
-BOARD_GAMES = ('connect4', 'connect4-block', 'gomoku', 'gomoku-block')
+         'gomoku-block': _k_game(rows=15, cols=15, k=5, drop=False, opponent='block'),
+         'tictactoe-block': _k_game(rows=3, cols=3, k=3, drop=False, opponent='block', colours=(0, 9, 6, 4)),
+         'tictactoe-random': _k_game(rows=3, cols=3, k=3, drop=False, colours=(0, 9, 6, 4)),
+         'tetris-wide': lambda seed=0: Tetris(seed, width=10, height=16, colours=[14, 13, 15, 10, 7, 4, 1]),
+         'tetris-small': lambda seed=0: Tetris(seed, width=6, height=12)}
+BOARD_GAMES = ('connect4', 'connect4-block', 'gomoku', 'gomoku-block', 'tictactoe-block', 'tictactoe-random')
 
 
 class _LocalEnv:

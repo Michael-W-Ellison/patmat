@@ -261,5 +261,59 @@ class TestClicks(unittest.TestCase):
         self.assertEqual(read.pixel((4, 2)), (32, 56))
 
 
+
+@unittest.skipIf(ARCBaseGame is None, 'arcengine is not installed')
+class TestPatternStore(unittest.TestCase):
+    @staticmethod
+    def session(agent, colours, n, rows=3, k=3):
+        from arc3_games import KInARow, local_env
+        from evaluate_arc3 import play
+        results = []
+        for i in range(n):
+            env = local_env(KInARow(seed=i, rows=rows, cols=rows, k=k, drop=False, colours=colours))
+            agent.new_episode()
+            play(env, agent.act, 100, agent, stop_on_loss=True)
+            results.append(env.game.result)
+        return results
+
+    def test_state_round_trip(self):
+        import json
+        from pattern_store import decode, encode
+        agent = ObjectAgent(random.Random(0))
+        self.session(agent, (0, 9, 6, 4), 6)
+        again = ObjectAgent(random.Random(0))
+        again.import_state(decode(json.loads(json.dumps(encode(agent.export_state())))))
+        self.assertEqual(again.facts(), agent.facts())
+        self.assertEqual(again.line_goals, agent.line_goals)
+        self.assertEqual(again.click_models[0].kind(), agent.click_models[0].kind())
+
+    def test_generic_from_two_games(self):
+        import tempfile
+        from pattern_store import PatternStore
+        with tempfile.TemporaryDirectory() as d:
+            store = PatternStore(d)
+            for name, colours, rows in (('a', (0, 9, 6, 4), 3), ('b', (0, 2, 1, 5), 4)):
+                agent = ObjectAgent(random.Random(0))
+                self.assertEqual(store.start(name, agent), 'generic')
+                self.session(agent, colours, 8, rows)
+                store.save(name, agent, 8)
+            self.assertEqual(store.games(), ['a', 'b'])
+            generic = {p['key']: p for p in store.generic()}
+            # the same patterns in both games, though drawn in other colours
+            self.assertIn(('line_goal', 'mine', None), generic)
+            self.assertIn(('players', 1), generic[('line_goal', 'mine', None)]['context'])
+            self.assertIn(('others_like_me',), generic)
+            # a third game, in colours of its own: the goal is taken to be a line of its marks (7) at once
+            agent = ObjectAgent(random.Random(0))
+            store.start('c', agent)
+            self.session(agent, (0, 7, 8, 5), 1)
+            self.assertIn(('line_goal', 'mine', None), agent.priors_applied)
+            self.assertIn((7, 3, None), agent.line_goals)
+            # a game played again goes on from its own entry
+            agent = ObjectAgent(random.Random(0))
+            self.assertEqual(store.start('a', agent), 'specific')
+            self.assertIn((9, 3, None), agent.line_goals)
+
+
 if __name__ == '__main__':
     unittest.main()
