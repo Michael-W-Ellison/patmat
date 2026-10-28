@@ -315,5 +315,40 @@ class TestPatternStore(unittest.TestCase):
             self.assertIn((9, 3, None), agent.line_goals)
 
 
+    def test_directions_and_contact_goal(self):
+        import tempfile
+        from arc3_games import Maze, local_env
+        from evaluate_arc3 import play
+        from pattern_store import PatternStore
+        with tempfile.TemporaryDirectory() as d:
+            store = PatternStore(d)
+            for name, colours in (('a', (0, 5, 8, 9, 7)), ('b', (1, 4, 12, 14, 6))):
+                agent = ObjectAgent(random.Random(0))
+                store.start(name, agent)
+                agent.new_episode()
+                play(local_env(Maze(seed=1, colours=colours)), agent.act, 500, agent)
+                store.save(name, agent, 1)
+            generic = {p['key'] for p in store.generic()}
+            self.assertIn(('contact_goal', 'unique'), generic)
+            self.assertIn(('direction', 1, (-1, 0)), generic)
+            # a maze in other colours: once one move is seen, the other directions are taken from the store,
+            # and the only object of its pattern (the exit) is tried as the goal
+            agent = ObjectAgent(random.Random(0))
+            store.start('c', agent)
+            agent.new_episode()
+            result = play(local_env(Maze(seed=2, colours=(2, 10, 11, 13, 15))), agent.act, 500, agent)
+            self.assertEqual(result[0], 3)
+            self.assertIn(('contact_goal', 'unique'), agent.priors_applied)
+            self.assertTrue(any(k[0] == 'direction' for k in agent.priors_applied))
+            self.assertEqual(agent.win_contacts, {((13,),)})
+        # a generic direction that is wrong here is dropped once the action is seen to do otherwise
+        agent = ObjectAgent(random.Random(0))
+        agent.use_generic([{'key': ('direction', 1, (1, 0)), 'params': {}, 'context': [('acts_by', 'moves')]}])
+        agent.new_episode()
+        result = play(local_env(Maze(seed=2)), agent.act, 500, agent)
+        self.assertEqual(result[0], 3)
+        self.assertEqual(agent.directions.get(1, (-1, 0)), (-1, 0))
+
+
 if __name__ == '__main__':
     unittest.main()

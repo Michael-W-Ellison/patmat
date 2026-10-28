@@ -42,6 +42,13 @@ the player.
   k 4, drop), 'gomoku' (15 x 15, k 5), and '-block' versions;
   'tictactoe-random' and 'tictactoe-block' (3 x 3, k 3, drawn in other
   colours: empty 0, the player's 9, the opponent's 6, border 4).
+- Maze (3 levels, random n x n mazes inside a wall border): the player
+  (one cell) moves up (1), down (2), left (3) or right (4) unless a wall or
+  an object is in the way; stepping onto the exit (one cell) wins the
+  level. Decoys (several one-cell objects of one value) only block. There
+  is always a way to the exit. 'maze' (10 x 10: background 0, walls 5,
+  player 8, exit 9, decoys 7) and 'maze-b' (12 x 12, background 1, walls
+  4, player 12, exit 14, decoys 6).
 - Tetris variants: 'tetris-small' (a 6 x 12 well), 'tetris-wide' (10 x 16,
   the pieces in other colours).
 
@@ -52,7 +59,7 @@ interface of the ARC-AGI toolkit's environment wrappers.
 import random
 
 import numpy as np
-from arcengine import ARCBaseGame, ActionInput, Camera, GameAction, Level, Sprite
+from arcengine import ARCBaseGame, ActionInput, BlockingMode, Camera, GameAction, Level, Sprite
 
 OFF, ON = 1, 11
 LIGHTS_SIDES = ((0, 0), (-1, 0), (1, 0), (0, -1), (0, 1))
@@ -446,6 +453,56 @@ class KInARow(ARCBaseGame):
         self.complete_action()
 
 
+class Maze(ARCBaseGame):
+    def __init__(self, seed: int = 0, n: int = 10, colours=(0, 5, 8, 9, 7), decoys: int = 4):
+        self.colours = colours
+        levels = [self._level(random.Random(seed * 10 + i), n, decoys) for i in range(3)]
+        super().__init__(game_id='maze', levels=levels,
+                         camera=Camera(width=n, height=n, background=colours[0], letter_box=3))
+
+    def _level(self, rng, n, decoys) -> Level:
+        _, wall, player, exit_, decoy = self.colours
+        while True:
+            walls = np.zeros((n, n), dtype=bool)
+            walls[0, :] = walls[-1, :] = walls[:, 0] = walls[:, -1] = True
+            for r in range(1, n - 1):
+                for c in range(1, n - 1):
+                    walls[r, c] = rng.random() < 0.25
+            free = [(r, c) for r in range(n) for c in range(n) if not walls[r, c]]
+            start, goal = rng.sample(free, 2)
+            if abs(start[0] - goal[0]) + abs(start[1] - goal[1]) < n // 2:
+                continue
+            others = [p for p in free if p not in (start, goal)]
+            blocks = rng.sample(others, min(decoys, len(others)))
+            seen, queue = {start}, [start]
+            while queue:
+                p = queue.pop()
+                for dr, dc in LIGHTS_SIDES[1:]:
+                    q = (p[0] + dr, p[1] + dc)
+                    if not walls[q] and q not in blocks and q not in seen:
+                        seen.add(q)
+                        queue.append(q)
+            if goal in seen:
+                break
+        sprites = [Sprite(pixels=np.where(walls, wall, -1).astype(np.int8), name='walls',
+                          blocking=BlockingMode.PIXEL_PERFECT, layer=-1),
+                   Sprite(pixels=[[player]], name='player', blocking=BlockingMode.BOUNDING_BOX).set_position(
+                       start[1], start[0]),
+                   Sprite(pixels=[[exit_]], name='exit', blocking=BlockingMode.BOUNDING_BOX).set_position(
+                       goal[1], goal[0])]
+        sprites += [Sprite(pixels=[[decoy]], name=f'decoy{i}', blocking=BlockingMode.BOUNDING_BOX).set_position(
+            c, r) for i, (r, c) in enumerate(blocks)]
+        return Level(sprites=sprites, grid_size=(n, n))
+
+    def step(self):
+        dx, dy = {GameAction.ACTION1: (0, -1), GameAction.ACTION2: (0, 1),
+                  GameAction.ACTION3: (-1, 0), GameAction.ACTION4: (1, 0)}.get(self.action.id, (0, 0))
+        hit = self.try_move('player', dx, dy)
+        if hit and any(s.name == 'exit' for s in hit):
+            self.next_level()
+        self.complete_action()
+
+
 def _k_game(**kw):
     def make(seed: int = 0):
         return KInARow(seed=seed, **kw)
@@ -459,7 +516,8 @@ GAMES = {'lights': LightsOut, 'clear': ClearRed, 'tictactoe': TicTacToe, 'tetris
          'tictactoe-block': _k_game(rows=3, cols=3, k=3, drop=False, opponent='block', colours=(0, 9, 6, 4)),
          'tictactoe-random': _k_game(rows=3, cols=3, k=3, drop=False, colours=(0, 9, 6, 4)),
          'tetris-wide': lambda seed=0: Tetris(seed, width=10, height=16, colours=[14, 13, 15, 10, 7, 4, 1]),
-         'tetris-small': lambda seed=0: Tetris(seed, width=6, height=12)}
+         'tetris-small': lambda seed=0: Tetris(seed, width=6, height=12),
+         'maze': Maze, 'maze-b': lambda seed=0: Maze(seed, n=12, colours=(1, 4, 12, 14, 6))}
 BOARD_GAMES = ('connect4', 'connect4-block', 'gomoku', 'gomoku-block', 'tictactoe-block', 'tictactoe-random')
 
 

@@ -131,6 +131,8 @@ def _merge(params: List[dict]) -> dict:
 
 def _tested(key, facts) -> bool:
     """Whether the game learned something of the key's kind (so that the key's absence counts against it)"""
+    if key[0] == 'direction':
+        return any(k[0] in ('direction', 'no_direction') and k[1] == key[1] for k in facts)
     needs = {'loss_like_goal': ('line_goal', 'line_loss'), 'others_like_me': ('other_click',)}.get(key[0], (key[0],))
     return all(any(k[0] == n and (n not in ('drift', 'transform') or k[1] == key[1]) for k in facts) for n in needs)
 

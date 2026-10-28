@@ -159,9 +159,16 @@ evidence is still missing, and only once the pattern's conditions hold in
 this game (_apply_priors): a line goal or loss of the role's values (the
 length tried rising each time a line forms without a win or loss), losses
 as the goal's lines for the other players, the other players' moves as
-drops like the agent's clicks, the score weights to start from, and drift
-and turns taken from one observation instead of two. priors_applied
-records which were used.
+drops like the agent's clicks, the score weights to start from, drift and
+turns taken from one observation instead of two, the directions of actions
+not yet seen to move the agent (dropped when an action is seen to do
+otherwise), and, while no goal is known, touching objects of the kind that
+won elsewhere (the only object of its pattern) as candidate goals.
+priors_applied records which were used.
+
+An action that changed nothing counts toward its being a no-op (or, for a
+pattern, toward an action that leaves it as it is) only where it could not
+have been a blocked move: see _maybe_blocked.
 """
 
 import random
@@ -384,6 +391,8 @@ class ObjectAgent:
         self.unchanged_in: Dict[object, Optional[set]] = {}
         self.losing: set = set()                    # (state key, action)
         self.win_contacts: set = set()
+        self.contact_kinds: Dict[tuple, str] = {}  # contact goal pattern -> 'unique' / 'repeated' (in its level)
+        self.contact_rejected: set = set()          # patterns touched without a win
         self.shape_goal = False
         self.pending = None                         # a contact whose outcome the next move will tell
         self.hidden_walls: set = set()              # cells of this level that block though drawn as background
@@ -424,6 +433,11 @@ class ObjectAgent:
         self._prior_hyps: Dict[tuple, tuple] = {}   # line hypothesis -> the line pattern key it came from
         self._generic_weights = False               # the score weights started from a generic pattern
         self.shape: Optional[Tuple[int, int]] = None    # the last grid's shape
+        self.prior_directions: Dict[object, Pos] = {}   # action -> direction from generic patterns (not seen yet)
+        self.directions_rejected: set = set()           # actions whose generic direction did not hold here
+        self._dir_misses: Counter = Counter()           # action -> times it left the agent where it was, with room
+        self.prior_contacts: set = set()                # object patterns to try touching (a generic contact goal)
+        self._level_first = None                        # (grid, agent cells) when contact goals were first tried in the level
 
     # ------------------------------------------------------------ objects
     def _walls(self) -> set:
@@ -658,9 +672,17 @@ class ObjectAgent:
             out[p] = v
         return out, frozenset(cells)
 
+    def _dir(self, action) -> Optional[Pos]:
+        """The action's direction: seen in this game, else from a generic pattern (while not contradicted)"""
+        d = self.directions.get(action)
+        if d is None and action in self.prior_directions:
+            d = self.prior_directions[action]
+            self.priors_applied.add(('direction', action, d))
+        return d
+
     def _by_rules(self, grid, agent, action):
         """The transition the contact rules predict (None if they do not say)"""
-        d = self.directions.get(action)
+        d = self._dir(action)
         if agent is not None and d is None and self.bg is not None:
             return self._transform(grid, agent, action)
         if agent is None or d is None or self.bg is None:
@@ -752,16 +774,66 @@ class ObjectAgent:
             self.agent = agent_after
             return
         if np.array_equal(before, after):
-            if self.unchanged_in.get(action, set()) is not None:
+            blocked = self._maybe_blocked(before, action)
+            if self.unchanged_in.get(action, set()) is not None and not blocked:
                 self.unchanged_in.setdefault(action, set()).add(state)
         else:
             self.unchanged_in[action] = None
+        agent = self.agent
         agent_after = self._follow(before, action, after)
+        self._check_prior_direction(before, action, after, agent)
         self.outcomes[(state, action)] = (after, agent_after)
         self.outcomes_by_grid[(before.shape, before.tobytes(), action)] = (after, agent_after)
         self.agent = agent_after
         if agent_after:
             self.seen_patterns.add(pattern(after, agent_after))
+
+    def _maybe_blocked(self, grid, action) -> bool:
+        """
+        Whether an action that changed nothing may have been a move that was blocked: its direction (seen or
+        generic) is blocked, or, not known to move the agent, the agent is blocked on a side that no known
+        direction takes. Such a state is no sign that the action does nothing.
+        """
+        if self.agent is None or isinstance(action, tuple):
+            return False
+        d = self.directions.get(action) or self.prior_directions.get(action)
+        if d is not None:
+            return not self._free(grid, self.agent, d)
+        taken = set(self.directions.values()) | set(self.prior_directions.values())
+        return any(not self._free(grid, self.agent, s) for s in SIDES if s not in taken)
+
+    def _check_prior_direction(self, before, action, after, agent):
+        """
+        A generic direction is dropped for the action when, with room to move that way, the action changed
+        the grid in some other way, or left it as it was twice (once could be a wall that is not drawn)
+        """
+        d = self.prior_directions.get(action)
+        if d is None or action in self.directions or agent is None or not self._free(before, agent, d):
+            return
+        if np.array_equal(before, after):
+            self._dir_misses[action] += 1
+            if self._dir_misses[action] < 2:
+                return
+        self.directions_rejected.add(action)
+        del self.prior_directions[action]
+
+    def _pushed_by_prior(self, before, action, after, agent) -> bool:
+        """
+        Whether the action's generic direction explains a change at objects in the agent's front: one of
+        OUTCOMES other than block gives the grid after, or every changed cell is within two steps ahead
+        of the agent's or those objects' cells (a pushed object that hit another)
+        """
+        d = self.prior_directions.get(action)
+        objs = self._contacts(before, agent, d) if d is not None else None
+        if not objs:
+            return False
+        for kind in OUTCOMES[1:]:
+            nxt = self._apply(before, agent, d, kind, objs)
+            if nxt is not None and np.array_equal(nxt[0], after):
+                return True
+        near = set(agent).union(*objs)
+        near |= shifted(near, d) | shifted(shifted(near, d), d)
+        return all((int(r), int(c)) in near for r, c in np.argwhere(before != after))
 
     def _follow(self, before, action, after) -> Optional[FrozenSet[Pos]]:
         """Learn from the transition; the agent's cells after it (None if lost track)"""
@@ -798,6 +870,8 @@ class ObjectAgent:
             for s in SIDES:
                 if self._free(before, agent, s) and np.array_equal(self._move(before, agent, s), after):
                     d = self.directions[action] = s
+            if d is None and self._pushed_by_prior(before, action, after, agent):
+                d = self.directions[action] = self.prior_directions[action]
         if agent is not None and d is not None:
             objs = self._contacts(before, agent, d)
             if objs is not None and objs:
@@ -840,7 +914,7 @@ class ObjectAgent:
                     turned = self._transform(before, agent, action)
                     if turned is not None and not np.array_equal(turned[0], before):
                         self.transforms[key] = (key[1], (0, 0))     # room to turn, and nothing happened
-                elif key not in self.transforms:
+                elif key not in self.transforms and not self._maybe_blocked(before, action):
                     tries = self.still.setdefault(key, set())
                     tries.add(before.tobytes())
                     if len(tries) >= 2:     # it changed nothing in two places: it does not change this pattern
@@ -988,12 +1062,12 @@ class ObjectAgent:
             return True
         if self.line_goals and nxt is not None and self._formed(grid, nxt[0], self.line_goals) > 0:
             return True
-        d = self.directions.get(action)
+        d = self._dir(action)
         if agent is None or d is None:
             return False
-        if self.win_contacts:
+        if self.win_contacts or self.prior_contacts:
             objs = self._contacts(grid, agent, d) or []
-            if any(pattern(grid, o) in self.win_contacts for o in objs):
+            if any(pattern(grid, o) in self.win_contacts | self.prior_contacts for o in objs):
                 return True
         # (the agent's pattern can only have changed if its number of cells did)
         return (self.shape_goal and nxt is not None and nxt[1] is not None and len(nxt[1]) != len(agent)
@@ -1021,6 +1095,7 @@ class ObjectAgent:
         self.hidden_walls = set()
         # a win that a goal known before it explains gives line hypotheses no support
         lines, self.line_goals = self.line_goals, None
+        self.prior_contacts = set()
         explained = self.wins_with(grid, self.agent, action, self.predict(grid, self.agent, action))
         self.line_goals = lines
         found = set()
@@ -1043,7 +1118,7 @@ class ObjectAgent:
         if own is None:
             nxt = self.predict(grid, self.agent, action)
             own = nxt[0] if nxt is not None and nxt[0].shape == grid.shape else None
-        agent, d = self.agent, self.directions.get(action)
+        agent, d = self.agent, self._dir(action)
         if agent is not None and d is not None:
             objs = self._contacts(grid, agent, d) or []
             if objs:
@@ -1061,7 +1136,9 @@ class ObjectAgent:
                                 self._learn_rule(grid, o, kind, shifted(agent, d))
                         break
                 else:
-                    self.win_contacts |= {pattern(grid, o) for o in objs}
+                    for o in objs:
+                        self.win_contacts.add(pattern(grid, o))
+                        self.contact_kinds[pattern(grid, o)] = self._contact_kind(grid, o, agent)
         self._new_level()
 
     def lost(self, grid=None, action=None, frames=None):
@@ -1087,6 +1164,7 @@ class ObjectAgent:
         self.pending = None
         self.level_fresh = True
         self.plan = []
+        self._level_first = None
 
     def new_episode(self):
         self._ce_next()
@@ -1130,6 +1208,7 @@ class ObjectAgent:
         """
         What was learned in this game, with values replaced by their roles (roles()): key -> parameters.
             ('direction', action, d)
+            ('no_direction', action)            a generic direction for the action did not hold here
             ('acts_by', how)                    'moves' (actions move the agent), 'clicks' (clicks change cells)
             ('own_click', role, kind, d)        the agent's clicks on a value (d: a drop's direction)
             ('other_click', role, kind, d)      the same for the other players' moves
@@ -1140,7 +1219,9 @@ class ObjectAgent:
             ('loss_like_goal',)                 a line of k in any direction wins for 'mine', loses for 'theirs'
             ('absent_goal', role)               no cell holding the value wins ('cleared': a value its
                                                 clicks clear to the background, 'toggled': one they toggle)
-            ('contact_goal',), ('shape_goal',)
+            ('contact_goal', kind)              touching an object wins ('unique': no other object of its
+                                                pattern was in the level; 'repeated')
+            ('shape_goal',)
             ('drift', i, d)                     at frame i the agent moves along d by itself
             ('transform', action, op, offset)   the action turns or mirrors the agent's pattern
             ('drift_weights',)  {mean, std}     the score weights learned for where a piece comes to rest
@@ -1149,6 +1230,7 @@ class ObjectAgent:
         role = self.roles()
         r = lambda v: role.get(v, 'other')
         out = {('direction', a, d): {} for a, d in self.directions.items()}
+        out.update({('no_direction', a): {} for a in self.directions_rejected if a not in self.directions})
         own = self._click_keys(role)
         out.update({('own_click',) + k: {} for k in own})
         out.update({k: {} for k in self._acts_by(own)})
@@ -1190,8 +1272,8 @@ class ObjectAgent:
                 out[('absent_goal', 'toggled')] = {}
             else:
                 out[('absent_goal', r(v))] = {}
-        if self.win_contacts:
-            out[('contact_goal',)] = {}
+        for pat in self.win_contacts:
+            out[('contact_goal', self.contact_kinds.get(pat, 'unique'))] = {}
         if self.shape_goal:
             out[('shape_goal',)] = {}
         for i, c in self.drift.items():
@@ -1252,6 +1334,13 @@ class ObjectAgent:
           goal is known from wins, losses are taken to be its lines for the other players
         - others_like_me: the other players' moves are taken to drop like the agent's clicks, as soon as
           their moves fit that (rather than after 3 moves)
+        - directions: an action not seen to move the agent yet is taken to move it as the pattern says
+          (_dir), until it is seen to do otherwise (_check_prior_direction); not if a no_direction
+          pattern for the action applies too
+        - contact goals, while no goal is known: the objects of the kind the pattern names ('unique':
+          the only object of its pattern in the grid; 'repeated') are tried as goals, nearest first,
+          among those unchanged since they were first tried in the level; one touched without a win is
+          not tried again
         (drift and transforms need one observation instead of two when a generic pattern names them; see
         _drift_dir and _geometric)
         """
@@ -1303,6 +1392,28 @@ class ObjectAgent:
                 self.line_goals = hyps or None
             else:
                 self.line_losses = hyps or None
+        dirs: Dict[object, set] = {}
+        for key in usable:
+            if key[0] == 'direction':
+                dirs.setdefault(key[1], set()).add(key[2])
+        self.prior_directions = {a: ds.pop() for a, ds in dirs.items()
+                                 if len(ds) == 1 and a not in self.directions and a not in self.directions_rejected
+                                 and ('no_direction', a) not in usable}
+        kinds = {key[1] for key in usable if key[0] == 'contact_goal'}
+        self.prior_contacts = set()
+        if kinds and self.agent is not None and not (self.win_contacts or self.shape_goal or self.absent_goals
+                                                     or self.line_events):
+            objs = [(o, pattern(grid, o)) for o in self._components(grid, self.agent)]
+            if self._level_first is None or self._level_first[0].shape != grid.shape:
+                self._level_first = (grid.copy(), self.agent)
+            counts = Counter(p for _, p in objs)
+            # (only objects unchanged since then: not, for example, a bar that shrinks as actions are used)
+            self.prior_contacts = {p for o, p in objs if self._unchanged(grid, o) and p not in self.contact_rejected
+                                   and ('unique' if counts[p] == 1 else 'repeated') in kinds}
+            for kind in kinds:
+                if any(('unique' if n == 1 else 'repeated') == kind for p, n in counts.items()
+                       if p in self.prior_contacts):
+                    self.priors_applied.add(('contact_goal', kind))
         if ('others_like_me',) in usable:
             drops = {m.drop_dir() for m in self.click_models.values() if m.kind() == 'drop'}
             if len(drops) == 1:
@@ -1312,11 +1423,19 @@ class ObjectAgent:
                         m.like = d
                 self.priors_applied.add(('others_like_me',))
 
+    def _unchanged(self, grid, obj) -> bool:
+        """Whether the object's cells and those around it hold what they held when first seen (the agent aside)"""
+        first, first_agent = self._level_first
+        skip = set(self.agent or ()) | set(first_agent or ())
+        around = {(p[0] + dr, p[1] + dc) for p in obj for dr, dc in SIDES} | set(obj)
+        return all(first[p] == grid[p] for p in around if _inside(grid, p) and p not in skip)
+
     STATE = ('bg', 'start_patterns', 'directions', 'rules', 'value_rules', 'pair_rules', 'win_contacts',
              'shape_goal', 'seen_patterns', 'click_models', 'absent_goals', 'absent_rejected', 'others',
              'line_goals', 'line_losses', 'line_hits', 'line_misses', 'loss_hits', 'loss_misses',
              'line_events', 'loss_events', 'transforms', 'transform_ops', 'drift', 'agent_patterns',
-             'ce_mean', 'ce_std', 'ce_done', 'ce_generations', 'wins', 'losses', 'shape')
+             'ce_mean', 'ce_std', 'ce_done', 'ce_generations', 'wins', 'losses', 'shape', 'contact_kinds',
+             'contact_rejected', 'directions_rejected')
 
     def export_state(self) -> dict:
         """
@@ -1659,7 +1778,7 @@ class ObjectAgent:
                     if explore is None:
                         explore = path_to(k) + [a]
                         if not self.win_contacts and not self.shape_goal and not self.absent_goals \
-                                and not trials:
+                                and not trials and not self.prior_contacts:
                             queue.clear()           # no goal known yet: nothing to search further for
                             break
                     continue
@@ -1781,12 +1900,20 @@ class ObjectAgent:
             else:
                 self.base &= g != self.bg
 
+    def _contact_kind(self, grid, obj, agent) -> str:
+        """'unique' if no other object in the grid has the object's pattern, else 'repeated'"""
+        pat = pattern(grid, obj)
+        n = sum(pattern(grid, o) == pat for o in self._components(grid, agent or frozenset()))
+        return 'unique' if n <= 1 else 'repeated'
+
     def _contact_falsify(self, before, action):
-        """A contact goal touched without a win is not the goal"""
-        d = self.directions.get(action)
-        if self.win_contacts and self.agent is not None and d is not None:
-            objs = self._contacts(before, self.agent, d) or []
-            self.win_contacts -= {pattern(before, o) for o in objs}
+        """A contact goal (or a pattern tried as one) touched without a win is not the goal"""
+        d = self._dir(action)
+        if self.agent is not None and d is not None:
+            touched = {pattern(before, o) for o in self._contacts(before, self.agent, d) or []}
+            self.win_contacts -= touched
+            self.contact_rejected |= touched
+            self.prior_contacts -= touched
 
     def after_step(self, before, action, after, frames=None, lost=False):
         """lost: the step lost the game (lost() follows); its lines are no evidence against loss hypotheses"""

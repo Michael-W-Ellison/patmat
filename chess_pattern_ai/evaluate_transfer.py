@@ -19,7 +19,11 @@ run used, with how each turned out.
 
 Board games are one game per episode (KInARow: 'result'); Tetris games
 (names starting with 'tetris') end at the first loss and score the rows
-cleared.
+cleared. Other games ('maze', 'maze-b', or a game of the ARC-AGI toolkit
+in the directory named by the environment variable ARC3_ENVS, such as
+the example games) are played for at most MAX_ACTIONS['levels'] actions
+per episode, a lost level reset; each episode reports the levels
+completed, the actions taken and the levels lost.
 """
 
 import glob
@@ -31,17 +35,24 @@ import shutil
 import sys
 import time
 
-from arc3_games import GAMES, local_env
+from arc3_games import BOARD_GAMES, GAMES, local_env
 from evaluate_arc3 import play
 from object_agent import ObjectAgent
 from pattern_store import PatternStore
 
 BLOCK = 10
-MAX_ACTIONS = {'board': 500, 'tetris': 5000}
+MAX_ACTIONS = {'board': 500, 'tetris': 5000, 'levels': 2000}
 
 
 def _kind(game) -> str:
-    return 'tetris' if game.startswith('tetris') else 'board'
+    return 'tetris' if game.startswith('tetris') else 'board' if game in BOARD_GAMES else 'levels'
+
+
+def _env(game, seed):
+    if game in GAMES:
+        return local_env(GAMES[game](seed=seed))
+    from arc_agi import Arcade, OperationMode
+    return Arcade(operation_mode=OperationMode.OFFLINE, environments_dir=os.environ['ARC3_ENVS']).make(game)
 
 
 def session(game, games, seed, store: PatternStore, sources=None) -> dict:
@@ -51,10 +62,15 @@ def session(game, games, seed, store: PatternStore, sources=None) -> dict:
     out = []
     t0 = time.time()
     for i in range(games):
-        env = local_env(GAMES[game](seed=seed * 1000 + i))
+        env = _env(game, seed * 1000 + i)
         agent.new_episode()
-        _, _, _, _, score = play(env, agent.act, MAX_ACTIONS[_kind(game)], agent, stop_on_loss=True)
-        out.append(score if _kind(game) == 'tetris' else (getattr(env.game, 'result', None) or 'unfinished'))
+        kind = _kind(game)
+        done, total, per_level, losses, score = play(env, agent.act, MAX_ACTIONS[kind], agent,
+                                                     stop_on_loss=kind != 'levels')
+        if kind == 'levels':
+            out.append({'levels': done, 'of': total, 'actions': sum(per_level), 'losses': losses})
+        else:
+            out.append(score if kind == 'tetris' else (getattr(env.game, 'result', None) or 'unfinished'))
         print(f'{game} {i + 1}: {out[-1]}', flush=True)
     store.save(game, agent, games)
     use = {}
@@ -69,6 +85,9 @@ def session(game, games, seed, store: PatternStore, sources=None) -> dict:
 
 
 def _blocks(game, results) -> str:
+    if _kind(game) == 'levels':
+        return '; '.join(f'{i + 1}: {r["levels"]}/{r["of"]} levels in {r["actions"]} actions, {r["losses"]} lost'
+                         for i, r in enumerate(results))
     parts = []
     for i in range(0, len(results), BLOCK):
         b = results[i:i + BLOCK]
@@ -88,7 +107,8 @@ def report(path):
             r = json.load(fh)
         runs.setdefault(r['game'], {})['transfer' if r['sources'] is not None else 'fresh'] = r
     for game, by in sorted(runs.items()):
-        print(f'== {game}' + (' (mean score per block)' if _kind(game) == 'tetris' else ' (wins-losses-draws per block)'))
+        print(f'== {game}' + {'tetris': ' (mean score per block)', 'board': ' (wins-losses-draws per block)',
+                              'levels': ' (per episode)'}[_kind(game)])
         for name in ('fresh', 'transfer'):
             r = by.get(name)
             if r is None:
@@ -98,6 +118,8 @@ def report(path):
             if _kind(game) == 'board':
                 first = next((i + 1 for i, x in enumerate(res) if x == 'win'), None)
                 extra = f', first win: game {first}'
+            elif _kind(game) == 'levels':
+                extra = ''
             else:
                 extra = f', all {len(res)}: {sum(res) / len(res):.1f}'
             print(f'   {name:8}: {_blocks(game, res)}{extra} ({r["seconds"]} s)')
