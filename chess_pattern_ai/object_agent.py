@@ -1336,7 +1336,8 @@ class ObjectAgent:
           their moves fit that (rather than after 3 moves)
         - directions: an action not seen to move the agent yet is taken to move it as the pattern says
           (_dir), until it is seen to do otherwise (_check_prior_direction); not if a no_direction
-          pattern for the action applies too
+          or a transform pattern for the action applies too, or the action was seen to turn the agent
+          here (an action the agent believes moves it may never be tried as a turn)
         - contact goals, while no goal is known: the objects of the kind the pattern names ('unique':
           the only object of its pattern in the grid; 'repeated') are tried as goals, nearest first,
           among those unchanged since they were first tried in the level; one touched without a win is
@@ -1398,7 +1399,8 @@ class ObjectAgent:
                 dirs.setdefault(key[1], set()).add(key[2])
         self.prior_directions = {a: ds.pop() for a, ds in dirs.items()
                                  if len(ds) == 1 and a not in self.directions and a not in self.directions_rejected
-                                 and ('no_direction', a) not in usable}
+                                 and ('no_direction', a) not in usable and a not in self.transform_ops
+                                 and not any(k[0] == 'transform' and k[1] == a for k in usable)}
         kinds = {key[1] for key in usable if key[0] == 'contact_goal'}
         self.prior_contacts = set()
         if kinds and self.agent is not None and not (self.win_contacts or self.shape_goal or self.absent_goals
