@@ -29,6 +29,11 @@ play they are an instance of, independent of how it is carried out:
     movement      an object moved step by step in four directions (actions
                   that move the player, ARC objects shifted or moved)
     opponents     other players act by the same rules as the player
+    repetition    a pattern repeated at regular intervals (ARC tilings
+                  repaired, continued or reduced to their tile, repeated
+                  rows removed, cells alternating by the parity of their
+                  place, a grid tiled with copies of itself); no game fact
+                  is an instance of it yet, so it is used only for ARC
 
 Each instance is recorded with its mechanism (how it was carried out: for
 games the kind of fact, such as 'drift', 'drop' or 'line_goal:any'; for
@@ -67,7 +72,7 @@ from collections import Counter
 from typing import Dict, List
 
 ELEMENTS = ('gravity', 'alignment', 'rotation', 'reflection', 'shape_match', 'removal', 'reach', 'movement',
-            'opponents')
+            'opponents', 'repetition')
 MIN_MECHANISMS = 2
 TURNS = ('turn right', 'turn left', 'half turn')
 MIRRORS = ('mirror left-right', 'mirror up-down', 'transpose')
@@ -77,24 +82,28 @@ FAMILY_ELEMENTS = {
     'B': ('rotation', 'reflection'),                    # a cropped region, optionally turned or mirrored
     'C': ('rotation', 'reflection', 'gravity', 'alignment', 'removal'),
     'D': ('movement', 'gravity'),                       # shifted, or slid until blocked
+    'E': ('repetition',),                               # tiled, possibly with copies of itself
     'F': ('reach', 'shape_match'),                      # approach until blocked; a template stamped
     'K': ('alignment',),                                # rays
     'M': ('movement',),
     'N': ('reflection', 'rotation'),                    # symmetry completed
     'O': ('shape_match', 'alignment'),                  # cells placed around objects; objects lined up
     'Q': ('reflection',),
+    'R': ('repetition',),                               # tilings repaired, continued, reduced; repeats removed
+    'S': ('repetition', 'alignment'),                   # recoloured by parity; by the first colour in the row
 }
 
 # words in an ARC pattern's name that show an element
 ARC_WORDS = {
     'gravity': ('gravity:', 'slid'),
-    'alignment': ('rays from', 'ray:', 'extend_lines', 'connect:', 'line up'),
+    'alignment': ('rays from', 'ray:', 'extend_lines', 'connect:', 'line up', 'first other cell from the'),
     'rotation': ('rot90', 'rot180', 'rot270', 'anti_transpose'),
     'reflection': ('flip_', 'transpose', 'mirror', 'symmetry', 'reflection'),
     'shape_match': ('stamp', 'template', 'cells placed around'),
     'removal': ('remove_', 'keep_'),
     'reach': ('approach',),
     'movement': ('shift[', ' move '),
+    'repetition': ('tiling', 'tile', 'repeated', 'parity'),
 }
 
 

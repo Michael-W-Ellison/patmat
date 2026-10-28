@@ -392,6 +392,17 @@ class TestMetaPatterns(unittest.TestCase):
             self.assertEqual(MetaStore(d).elements().keys(), m.elements().keys())    # (kept in meta.json)
         self.assertEqual(arc_elements('K', 'rays from every element S in own colour, at obstacle stop'), {'alignment'})
         self.assertEqual(arc_elements('N', 'complete rot90 symmetry about the grid centre'), {'rotation', 'reflection'})
+        # the repetition and cell-rule families
+        self.assertEqual(arc_elements('R', 'repair the tiling under 0'), {'repetition'})
+        self.assertEqual(arc_elements('S', 'cells of 5 recoloured by column parity from the tr corner'), {'repetition'})
+        self.assertEqual(arc_elements('S', 'cells of 5 take the colour of the first other cell from the left'),
+                         {'alignment'})
+        with tempfile.TemporaryDirectory() as d:
+            m = MetaStore(d)
+            m.add_arc('t1', 'R', 'smallest repeated tile')
+            m.add_arc('t2', 'E', 'tile 2x2')
+            self.assertEqual(set(m.elements()), {'repetition'})     # two ARC families: a meta-pattern
+            self.assertEqual(m.family_order(['A', 'C', 'E', 'R', 'S'])[:3], ['E', 'R', 'S'])
 
     @unittest.skipIf(ARCBaseGame is None, 'arcengine is not installed')
     def test_universal_elements_in_connect_four(self):
