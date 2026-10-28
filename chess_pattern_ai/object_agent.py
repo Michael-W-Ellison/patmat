@@ -185,6 +185,7 @@ from typing import Dict, FrozenSet, List, Optional, Tuple
 import numpy as np
 
 from action_puzzles import solve_xor
+from shapes import GEOMETRY, MIRRORS, TURNS, fits_in, pattern       # (shared with the ARC solver)
 
 Pos = Tuple[int, int]
 SIDES = ((-1, 0), (1, 0), (0, -1), (0, 1))
@@ -202,12 +203,6 @@ ANY = -100                  # line hypotheses over any non-background value
 MIN_LINE = 3                # the shortest line a line hypothesis is about
 MISS_RATIO = 3              # a line hypothesis is kept while formed MISS_RATIO times as often in wins as elsewhere
 CE_POPULATION, CE_ELITE, CE_MIN_STD, CE_SMOOTH = 8, 3, 0.2, 0.7
-TURNS = ('turn right', 'turn left', 'half turn')
-MIRRORS = ('mirror left-right', 'mirror up-down', 'transpose')
-GEOMETRY = {
-    'turn right': lambda a: np.rot90(a, -1), 'turn left': lambda a: np.rot90(a, 1), 'half turn': lambda a: np.rot90(a, 2),
-    'mirror left-right': np.fliplr, 'mirror up-down': np.flipud, 'transpose': np.transpose,
-}
 FEATURES = ('height', 'holes', 'roughness')
 
 
@@ -366,17 +361,6 @@ class ClickModel:
 
 def _inside(grid, p) -> bool:
     return 0 <= p[0] < grid.shape[0] and 0 <= p[1] < grid.shape[1]
-
-
-def pattern(grid, cells) -> tuple:
-    """Values of the cells over their bounding box (-1 off the cells)"""
-    rows = [p[0] for p in cells]
-    cols = [p[1] for p in cells]
-    r0, c0 = min(rows), min(cols)
-    out = [[-1] * (max(cols) - c0 + 1) for _ in range(max(rows) - r0 + 1)]
-    for p in cells:
-        out[p[0] - r0][p[1] - c0] = int(grid[p])
-    return tuple(map(tuple, out))
 
 
 def shifted(cells, d) -> FrozenSet[Pos]:
@@ -1106,15 +1090,7 @@ class ObjectAgent:
     @staticmethod
     def _fits(grid, agent, targets) -> bool:
         """Whether the agent's cells, translated, fall on cells of the same values in one of the targets"""
-        cells = [(p, int(grid[p])) for p in agent]
-        (a0, v0) = cells[0]
-        for t in targets:
-            if len(t) < len(cells):
-                continue
-            for q, v in t.items():
-                if v == v0 and all(t.get((p[0] - a0[0] + q[0], p[1] - a0[1] + q[1])) == w for p, w in cells):
-                    return True
-        return False
+        return fits_in([(p, int(grid[p])) for p in agent], targets)
 
     def level_won(self, grid, action, frames=None):
         self.wins += 1

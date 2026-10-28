@@ -71,11 +71,11 @@ import os
 from collections import Counter
 from typing import Dict, List
 
+from shapes import MIRRORS, TURNS
+
 ELEMENTS = ('gravity', 'alignment', 'rotation', 'reflection', 'shape_match', 'removal', 'reach', 'movement',
             'opponents', 'repetition')
 MIN_MECHANISMS = 2
-TURNS = ('turn right', 'turn left', 'half turn')
-MIRRORS = ('mirror left-right', 'mirror up-down', 'transpose')
 
 # the elements each family of arc_pattern_solver can embody (its description in that module)
 FAMILY_ELEMENTS = {
@@ -91,15 +91,16 @@ FAMILY_ELEMENTS = {
     'Q': ('reflection',),
     'R': ('repetition',),                               # tilings repaired, continued, reduced; repeats removed
     'S': ('repetition', 'alignment'),                   # recoloured by parity; by the first colour in the row
+    'T': ('shape_match', 'rotation', 'reflection'),     # templates copied and fitted, possibly turned or mirrored
 }
 
 # words in an ARC pattern's name that show an element
 ARC_WORDS = {
     'gravity': ('gravity:', 'slid'),
     'alignment': ('rays from', 'ray:', 'extend_lines', 'connect:', 'line up', 'first other cell from the'),
-    'rotation': ('rot90', 'rot180', 'rot270', 'anti_transpose'),
+    'rotation': ('rot90', 'rot180', 'rot270', 'anti_transpose', 'turned'),
     'reflection': ('flip_', 'transpose', 'mirror', 'symmetry', 'reflection'),
-    'shape_match': ('stamp', 'template', 'cells placed around'),
+    'shape_match': ('stamp', 'template', 'cells placed around', 'holes of their shape'),
     'removal': ('remove_', 'keep_'),
     'reach': ('approach',),
     'movement': ('shift[', ' move '),

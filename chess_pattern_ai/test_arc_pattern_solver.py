@@ -645,5 +645,57 @@ class TestRepetitionAndCellRules(unittest.TestCase):
         self.assertTrue(right(best(t), t))
 
 
+class TestTemplatesAndFitting(unittest.TestCase):
+    def test_shared_shapes(self):
+        import shapes
+        g = A([[0, 1, 1], [0, 0, 1], [2, 0, 0]])
+        objs = shapes.components(g, 0)
+        self.assertEqual(sorted(len(o) for o in objs), [1, 3])
+        pat = shapes.pattern(g, max(objs, key=len))
+        self.assertEqual(pat, ((1, 1), (-1, 1)))
+        self.assertIn(((1, -1), (1, 1)), [img for _, img in shapes.images(pat, tuple(shapes.GEOMETRY))])
+        self.assertEqual(shapes.holes(A([[1, 1, 1], [1, 0, 1], [1, 1, 1]]), 0), [frozenset({(1, 1)})])
+        # the agent's test of whether its shape fits inside a target
+        self.assertTrue(shapes.fits_in([((5, 5), 3), ((5, 6), 4)], [{(0, 0): 3, (0, 1): 4, (1, 0): 4}]))
+        self.assertFalse(shapes.fits_in([((5, 5), 4), ((5, 6), 3)], [{(0, 0): 3, (0, 1): 4, (1, 0): 4}]))
+
+    def test_blanks_take_the_template_colours(self):
+        t = task([(A([[0, 0, 0, 0, 0], [0, 7, 6, 0, 0], [0, 9, 4, 0, 0], [0, 0, 0, 8, 8], [0, 0, 0, 8, 8]]),
+                    A([[0, 0, 0, 0, 0], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0], [0, 0, 0, 7, 6], [0, 0, 0, 9, 4]])),
+                   (A([[3, 2, 0, 0, 0], [0, 0, 0, 0, 0], [0, 8, 8, 0, 0], [0, 0, 0, 0, 0], [0, 0, 8, 8, 0]]),
+                    A([[0, 0, 0, 0, 0], [0, 0, 0, 0, 0], [0, 3, 2, 0, 0], [0, 0, 0, 0, 0], [0, 0, 3, 2, 0]]))],
+                 A([[1, 5, 0, 0], [0, 0, 0, 0], [0, 0, 8, 8]]), A([[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 1, 5]]))
+        e = best(t)
+        self.assertTrue(right(e, t))
+        self.assertEqual(e['family'], 'T')
+
+    def test_pieces_fill_holes(self):
+        box = lambda: A([[5, 5, 5, 5, 0, 0], [5, 0, 0, 5, 0, 0], [5, 5, 5, 5, 0, 0], [0, 0, 0, 0, 0, 0],
+                         [0, 0, 0, 0, 0, 0]])
+        a1, b1 = box(), box()
+        a1[4, 1:3] = 3
+        b1[1, 1:3] = 3
+        a2, b2 = box(), box()
+        a2[4, 3:5] = 6
+        a2[3, 5] = 2
+        b2[1, 1:3] = 6
+        b2[3, 5] = 2
+        test_in, test_out = box(), box()
+        test_in[3, 4:6] = 9
+        test_out[1, 1:3] = 9
+        t = task([(a1, b1), (a2, b2)], test_in, test_out)
+        e = best(t)
+        self.assertTrue(right(e, t))
+        self.assertIn('holes', e['name'])
+
+    def test_template_completed_at_scale(self):
+        # the template (a 4 with a 2 on its right); each block of 2s gets the 4 part at its own scale
+        t = task([(A([[4, 2, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 2, 2], [0, 0, 0, 0, 2, 2]]),
+                   A([[4, 2, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0], [0, 0, 4, 4, 2, 2], [0, 0, 4, 4, 2, 2]])),
+                  (A([[0, 0, 0, 0, 0], [4, 2, 0, 0, 2], [0, 0, 0, 0, 0]]),
+                   A([[0, 0, 0, 0, 0], [4, 2, 0, 4, 2], [0, 0, 0, 0, 0]]))],
+                 A([[0, 0, 0, 2], [4, 2, 0, 0]]), A([[0, 0, 4, 2], [4, 2, 0, 0]]))
+        self.assertTrue(right(best(t), t))
+
 if __name__ == '__main__':
     unittest.main()

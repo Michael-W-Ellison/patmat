@@ -93,6 +93,14 @@ Pattern families:
                      both counted from a corner; every cell not of the most
                      common colour (or not of the most common colour of the
                      foreground) given one colour
+  T templates        shapes copied and fitted, with the object representation
+                     the game-playing agent uses (shapes.py): blank objects of
+                     one colour whose silhouette is a template's (as it is, or
+                     turned or mirrored) take the template's colours; a
+                     template stamped at each single-cell marker (the
+                     template's one cell of the marker's colour on it, or its
+                     centre); pieces moved into the enclosed holes whose shape
+                     they have
   X exceptions       a pattern that is right except near some objects (a
                      transform, rays, a symmetry, or family A / J / O formed
                      by majority, with the exceptions left as they are), made
@@ -116,6 +124,7 @@ import numpy as np
 
 from arc_elements import RULE_PROPERTIES, SEGMENTATIONS, Obj, background, segment
 from arc_relation_solver import GEOMETRIC, game_score, generate_candidates, load_relation_lifts
+import shapes
 
 Array = np.ndarray
 TRANSFORMS = dict({'identity': lambda a: a}, **GEOMETRIC)
@@ -2571,11 +2580,213 @@ def cell_rule_patterns(pairs, bg) -> List[Pattern]:
     return found
 
 
+# ------------------------------------------------------------- family T
+
+OPERATION_SETS = {'as it is': (), 'turned or mirrored': tuple(shapes.GEOMETRY)}
+
+
+def _paint_blanks(a: Array, bg: int, operations, remove_template: bool) -> Optional[Array]:
+    """Objects of one colour whose silhouette is a template's take the template's colours"""
+    objs = [(o, shapes.pattern(a, o)) for o in shapes.components(a, bg)]
+    templates = [(o, p) for o, p in objs if len({v for row in p for v in row} - {-1}) > 1]
+    if not templates:
+        return None
+    out, painted = a.copy(), False
+    for o, p in objs:
+        if len({v for row in p for v in row} - {-1}) != 1:
+            continue
+        for _, tp in templates:
+            img = next((im for _, im in shapes.images(tp, operations) if shapes.silhouette(im) == shapes.silhouette(p)),
+                       None)
+            if img is not None:
+                out = shapes.stamp(out, img, shapes.box(o))
+                painted = True
+                break
+    if not painted:
+        return None
+    if remove_template:
+        for o, _ in templates:
+            for q in o:
+                out[q] = bg
+    return out
+
+
+def _stamp_at_markers(a: Array, bg: int, centre: bool, ops: Optional[Dict[int, str]] = None) -> Optional[Array]:
+    """
+    Each single-cell object (a marker) gets a copy of the template that has one cell of its colour, on it
+    (turned or mirrored by the operation learned for the marker's colour, if any)
+    """
+    objs = shapes.components(a, bg, diagonal=True)
+    templates = [shapes.pattern(a, o) for o in objs if len(o) > 1]
+    markers = [next(iter(o)) for o in objs if len(o) == 1]
+    if not templates or not markers:
+        return None
+    out, stamped = a.copy(), False
+    for m in markers:
+        colour = int(a[m])
+        for tp in templates:
+            op = (ops or {}).get(colour, 'same')
+            if op != 'same':
+                tp = shapes.as_tuple(shapes.GEOMETRY[op](np.array(tp)))
+            at = [(i, j) for i, row in enumerate(tp) for j, v in enumerate(row) if v == colour]
+            if len(at) == 1 and not centre:
+                anchor = at[0]
+            elif not at and centre and len(tp) % 2 and len(tp[0]) % 2:
+                anchor = (len(tp) // 2, len(tp[0]) // 2)
+            else:
+                continue
+            nxt = shapes.stamp(out, tp, (m[0] - anchor[0], m[1] - anchor[1]))
+            if nxt is not None:
+                out, stamped = nxt, True
+                break
+    return out if stamped else None
+
+
+def _fill_holes(a: Array, bg: int, operations) -> Optional[Array]:
+    """
+    Pieces (objects of one colour) moved into the enclosed holes they fill exactly: each piece once, and it
+    leaves its place; of several that fit, one away from the grid's edge, if only one is
+    """
+    objs = shapes.components(a, bg, one_colour=True)
+    h, w = a.shape
+    edge = lambda o: any(r in (0, h - 1) or c in (0, w - 1) for r, c in o)
+    out, used, filled = a.copy(), set(), False
+    for hole in shapes.holes(a, bg):
+        shape = shapes.silhouette(shapes.pattern(np.ones(a.shape, int), hole))
+        around = {(p[0] + d[0], p[1] + d[1]) for p in hole for d in shapes.SIDES}
+        fits = []
+        for i, o in enumerate(objs):
+            if i in used or o & around:
+                continue                # (not the object the hole is in)
+            img = next((im for _, im in shapes.images(shapes.pattern(a, o), operations)
+                        if shapes.silhouette(im) == shape), None)
+            if img is not None:
+                fits.append((i, o, img))
+        if len(fits) > 1:
+            fits = [f for f in fits if not edge(f[1])]
+        if len(fits) != 1:
+            continue
+        i, o, img = fits[0]
+        for q in o:
+            out[q] = bg
+        out = shapes.stamp(out, img, shapes.box(hole))
+        used.add(i)
+        filled = True
+    return out if filled else None
+
+
+def _scaled(pat: tuple, k: int) -> tuple:
+    return shapes.as_tuple(np.kron(np.array(pat), np.ones((k, k), dtype=int))) if k > 1 else pat
+
+
+def _complete_from_template(a: Array, bg: int, key: Optional[int], operations, scaling: bool) -> Optional[Array]:
+    """
+    Wherever the grid shows a template's key part (its cells of colour `key`) - turned or mirrored by one of
+    the operations, scaled by a whole factor if allowed, covering whole objects of the key colour outside the
+    template - the rest of the template is drawn around it the same way (cut off at the grid's edge); a
+    template colour other than the key is drawn in the colour the target's object has besides the key, if it
+    has one. With no key given, the template (an object of several colours) and the key are the first pair,
+    fewest key cells and then most cells first, for which the grid shows the key part somewhere.
+    """
+    objs = shapes.components(a, bg, diagonal=True)
+    multi = [o for o in objs if len({int(a[p]) for p in o}) > 1]
+    if len(multi) > 8:
+        return None                     # (a noisy grid: too many candidate templates)
+    if key is None:
+        options = sorted(((sum(a[p] == k for p in o), -len(o), i, k) for i, o in enumerate(multi)
+                          for k in sorted({int(a[p]) for p in o})))
+        for _, _, i, k in options:
+            out = _complete_with(a, bg, multi[i], k, objs, operations, scaling)
+            if out is not None:
+                return out
+        return None
+    templates = [o for o in multi if any(a[p] == key for p in o)]
+    if len(templates) != 1:
+        return None
+    return _complete_with(a, bg, templates[0], key, objs, operations, scaling)
+
+
+def _complete_with(a, bg, t, key, objs, operations, scaling) -> Optional[Array]:
+    tpat = shapes.pattern(a, t)
+    t_other = sorted({v for row in tpat for v in row} - {-1, key})
+    key_objs = [o for o in shapes.components(a, bg, one_colour=True) if a[next(iter(o))] == key and not o & t]
+    owner = {p: o for o in key_objs for p in o}
+    whole = {p: o for o in objs for p in o}
+    out, done, used = a.copy(), False, set()
+    h, w = a.shape
+    for _, img in shapes.images(tpat, operations):
+        for k in (range(1, 6) if scaling else (1,)):
+            big = np.array(_scaled(img, k))
+            kc = [tuple(x) for x in np.argwhere(big == key)]
+            dc = [(tuple(x), int(big[tuple(x)])) for x in np.argwhere((big != -1) & (big != key))]
+            if not kc:
+                continue
+            first = kc[0]   # (placements that put the key part's first cell on a cell of the key colour)
+            for r, c in sorted({(p[0] - first[0], p[1] - first[1]) for p in owner}):
+                cells = [(r + i, c + j) for i, j in kc]
+                if any(not (0 <= p[0] < h and 0 <= p[1] < w) or p not in owner or p in used for p in cells):
+                    continue
+                covered = set(cells)
+                if any(not owner[p] <= covered for p in cells):
+                    continue            # (whole objects of the key colour only)
+                others = sorted({int(a[q]) for p in cells for q in whole[p]} - {key})
+                cmap = dict(zip(t_other, others)) if len(others) == 1 and len(t_other) == 1 else {}
+                draw = [((r + i, c + j), cmap.get(v, v)) for (i, j), v in dc
+                        if 0 <= r + i < h and 0 <= c + j < w]
+                if any(a[p] not in (bg, v) for p, v in draw):
+                    continue
+                for p, v in draw:
+                    out[p] = v
+                used |= covered
+                done = True
+    return out if done else None
+
+
+def template_patterns(pairs, bg) -> List[Pattern]:
+    found = []
+    if not all(a.shape == b.shape for a, b in pairs):
+        return found
+    for ops_name, ops in OPERATION_SETS.items():
+        extra = 0 if not ops else 1
+        for remove in (False, True):
+            found.append(Pattern('T', f'blank shapes take the template colours ({ops_name})'
+                                      + (', the template removed' if remove else ''), 3 + extra + remove,
+                                 lambda a, ops=ops, r=remove: _paint_blanks(a, background([a]), ops, r)))
+        found.append(Pattern('T', f'pieces fill the holes of their shape ({ops_name})', 3 + extra,
+                             lambda a, ops=ops: _fill_holes(a, background([a]), ops)))
+    for centre in (False, True):
+        found.append(Pattern('T', 'template stamped at each marker' + (' (centred)' if centre else ''), 3,
+                             lambda a, c=centre: _stamp_at_markers(a, background([a]), c)))
+    # the rest of a template drawn around every object that shows its key part
+    a0, b0 = pairs[0]
+    for key in [None] + sorted(set(np.unique(a0).tolist()) - {bg}):
+        for ops_name, ops in OPERATION_SETS.items():
+            for scaling in (False, True):
+                fn = lambda a, k=key, o=ops, s=scaling: _complete_from_template(a, background([a]), k, o, s)
+                if (lambda o: o is not None and np.array_equal(o, b0))(_safe(fn, a0)):
+                    found.append(Pattern('T', f'template completed around each copy of its '
+                                              f'{"shared colour" if key is None else key} part ({ops_name}'
+                                              + (', scaled)' if scaling else ')'), 3 + bool(ops) + scaling, fn))
+    # the copy at a marker turned or mirrored by an operation learned per marker colour
+    a0 = pairs[0][0]
+    colours = sorted({int(a0[next(iter(o))]) for o in shapes.components(a0, bg, diagonal=True) if len(o) == 1})
+    if 0 < len(colours) <= 3:
+        for choice in itertools.product(['same'] + list(shapes.GEOMETRY), repeat=len(colours)):
+            if all(c == 'same' for c in choice):
+                continue
+            table = dict(zip(colours, choice))
+            fn = lambda a, t=table: _stamp_at_markers(a, background([a]), False, t)
+            if all((lambda o: o is not None and np.array_equal(o, b))(_safe(fn, a)) for a, b in pairs):
+                found.append(Pattern('T', f'template stamped at each marker, turned by its colour {table}', 4, fn))
+                break
+    return found
+
+
 FAMILIES = {'A': object_action_patterns, 'B': select_crop_patterns, 'C': transform_patterns,
             'D': move_patterns, 'E': resize_patterns, 'F': relation_patterns,
             'H': count_patterns, 'I': build_patterns, 'J': role_patterns, 'K': ray_patterns,
             'M': param_patterns, 'N': symmetry_patterns, 'O': relative_patterns, 'Q': mirror_patterns,
-            'R': repetition_patterns, 'S': cell_rule_patterns}
+            'R': repetition_patterns, 'S': cell_rule_patterns, 'T': template_patterns}
 COMBINATION_SECONDS = 60     # time budget for combinations, used only when no single pattern fits
 
 
