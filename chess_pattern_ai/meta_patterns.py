@@ -48,8 +48,8 @@ Using elements:
   the agent's pattern accepted from one observation; shape_match makes
   "the agent takes another object's shape" a candidate goal once the
   agent has grown; reach makes the only object of its pattern a candidate
-  goal; reach and shape_match are not both used in one game, the first used
-  is kept (see ObjectAgent._meta_usable)
+  goal; reach and shape_match are tried in turn, never at once (the one
+  tried is kept until it is used up; see ObjectAgent._meta_usable)
 - in ARC (evaluate_meta_arc.py): the pattern solver's families are
   searched in the order of the weight of the elements they embody
   (FAMILY_ELEMENTS), and ties among equally simple patterns are broken by

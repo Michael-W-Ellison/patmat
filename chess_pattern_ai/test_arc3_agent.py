@@ -384,20 +384,49 @@ class TestMetaPatterns(unittest.TestCase):
 
 
     @unittest.skipIf(ARCBaseGame is None, 'arcengine is not installed')
-    def test_reach_and_shape_match_not_together(self):
+    def test_reach_and_shape_match_in_turn(self):
         from evaluate_arc3 import play
         for first in ('reach', 'shape_match'):
             agent = ObjectAgent(random.Random(0))
             agent.use_meta({'reach': {'params': [{'mechanism': 'contact_goal'}, {'mechanism': 'arc:F'}]},
                             'shape_match': {'params': [{'mechanism': 'shape_goal'}, {'mechanism': 'arc:O'}]}})
             if first == 'shape_match':
-                agent.meta_applied.add('shape_match')      # as if shape_match had been used first
+                agent._goal_turn = 'shape_match'            # as if shape_match had been tried first
+            act, both = agent.act, []
+
+            def checked(grid, actions):
+                a = act(grid, actions)
+                both.append(bool(agent.prior_contacts) and agent.prior_shape)
+                return a
+            agent.act = checked
             for _ in range(3):
                 agent.new_episode()
-                result = play(LocalEnv(merge_game()), agent.act, 1000, agent)
-                self.assertEqual(result[0], 1)
-            self.assertLessEqual(len(agent.meta_applied & {'reach', 'shape_match'}), 1)
-            self.assertIn(first, agent.meta_applied)
+                self.assertEqual(play(LocalEnv(merge_game()), agent.act, 1000, agent)[0], 1)
+            self.assertFalse(any(both))                     # never both at once
+            if first == 'reach':
+                self.assertIn('reach', agent.meta_applied)
+            else:
+                self.assertNotIn('reach', agent.meta_applied)   # shape_match holds the turn: not used up
+
+    def test_turn_passes_when_used_up(self):
+        from collections import Counter
+        agent = ObjectAgent(random.Random(0))
+        agent.use_meta({'reach': {'params': []}, 'shape_match': {'params': []}})
+        agent.rules[((8,),)] = Counter({'merge': 1})         # the agent has grown
+        grid = np.zeros((5, 5), dtype=int)
+        agent._goal_turn, agent._reach_used_up = 'reach', False
+        agent._meta_usable(grid, {})
+        self.assertFalse(agent.prior_shape)                  # reach still has objects to try
+        agent._reach_used_up = True
+        out = agent._meta_usable(grid, {})
+        self.assertTrue(agent.prior_shape)                   # reach used up: shape_match's turn
+        self.assertEqual(agent._goal_turn, 'shape_match')
+        self.assertNotIn(('contact_goal', 'unique', 'inside'), out)
+        agent.shape_rejected = True                          # a match reached without a win
+        out = agent._meta_usable(grid, {})
+        self.assertFalse(agent.prior_shape)
+        self.assertEqual(agent._goal_turn, 'reach')
+        self.assertIn(('contact_goal', 'unique', 'inside'), out)
 
 
 if __name__ == '__main__':

@@ -451,6 +451,8 @@ class ObjectAgent:
         self.meta_ops: set = set()                      # geometric operations of the rotation / reflection elements
         self.prior_shape = False                        # "take another object's shape" tried as the goal
         self.shape_rejected = False                     # ... and reached without a win
+        self._goal_turn: Optional[str] = None           # 'reach' or 'shape_match': the element being tried
+        self._reach_used_up = False                     # no object left to try touching (reach)
         self._loss_predicted = False                    # the losing move's outcome was predicted (after_step)
 
     # ------------------------------------------------------------ objects
@@ -1441,6 +1443,11 @@ class ObjectAgent:
                 if any(('unique' if n == 1 else 'repeated') == kind for p, n in counts.items()
                        if p in self.prior_contacts):
                     self.priors_applied.add(('contact_goal', kind) + (('inside',) if inside else ()))
+            if ('contact_goal', 'unique', 'inside') in meta:
+                # (the universal reach element: its turn, or used up when no candidate is left)
+                self._reach_used_up = not self.prior_contacts
+                if self.prior_contacts:
+                    self._goal_turn = 'reach'
         if ('others_like_me',) in usable:
             drops = {m.drop_dir() for m in self.click_models.values() if m.kind() == 'drop'}
             if len(drops) == 1:
@@ -1476,7 +1483,8 @@ class ObjectAgent:
         (lines of any cells across the direction of gravity, full rows if a full row was an instance);
         reach, while the agent is known (the only object of its pattern, not touching the grid's edge). Gravity, rotation and reflection
         act through the click models, _drift_dir and _geometric; shape_match through prior_shape. Reach
-        and shape_match are never both used in one game: once one has been used, the other is not.
+        and shape_match are tried in turn, never at once (_goal_turn): the one tried keeps its turn until
+        it is used up, and then the other may be tried.
         """
         out = {}
         if not self.meta:
@@ -1496,17 +1504,24 @@ class ObjectAgent:
                 # mislead the placement while the length is being found)
                 d = self._drift_dir(1)
                 out[('line_goal', 'any', (abs(d[1]), abs(d[0])))] = dict(el, params={'k': [], 'full': True})
-        # reach and shape_match are not used in the same game: the first one used is kept for the rest of it
-        if 'reach' in self.meta and 'shape_match' not in self.meta_applied and \
-                not any(k[0] == 'contact_goal' for k in usable):
+        # reach and shape_match are tried in turn, never at once: the one tried keeps its turn until it is
+        # used up (reach: no candidate left to touch; shape_match: a match reached without a win), and
+        # then the other may be tried
+        no_goal = not (self.win_contacts or self.shape_goal or self.absent_goals or self.line_events)
+        shape_ok = 'shape_match' in self.meta and not self.shape_rejected and no_goal and \
+            any('merge' in c for c in self.rules.values())
+        reach_ok = 'reach' in self.meta and not any(k[0] == 'contact_goal' for k in usable)
+        if self._goal_turn == 'reach' and self._reach_used_up and shape_ok:
+            self._goal_turn = 'shape_match'
+        elif self._goal_turn == 'shape_match' and self.shape_rejected:
+            self._goal_turn = 'reach' if reach_ok else None
+        if reach_ok and self._goal_turn in (None, 'reach'):
             out[('contact_goal', 'unique', 'inside')] = {'element': 'reach', 'context': [], 'params': {}}
-        self.prior_shape = False
-        if 'shape_match' in self.meta and 'reach' not in self.meta_applied:
-            grew = any('merge' in c for c in self.rules.values())
-            self.prior_shape = grew and not self.shape_rejected and not (
-                self.win_contacts or self.shape_goal or self.absent_goals or self.line_events)
-            if self.prior_shape:
-                self.meta_applied.add('shape_match')
+        self.prior_shape = shape_ok and self._goal_turn in (None, 'shape_match') and \
+            not (self._goal_turn is None and reach_ok and not self._reach_used_up)
+        if self.prior_shape:
+            self._goal_turn = 'shape_match'
+            self.meta_applied.add('shape_match')
         if self.meta_gravity is not None:
             for models in [self.click_models] + self.others:
                 for m in models.values():
