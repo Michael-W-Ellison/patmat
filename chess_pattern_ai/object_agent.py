@@ -1417,6 +1417,7 @@ class ObjectAgent:
                                  and ('no_direction', a) not in usable and a not in self.transform_ops
                                  and not any(k[0] == 'transform' and k[1] == a for k in usable)}
         kinds = {key[1] for key in usable if key[0] == 'contact_goal'}
+        inside = any(key[0] == 'contact_goal' and key[2:] == ('inside',) for key in usable)
         self.prior_contacts = set()
         if kinds and self.agent is not None and not (self.win_contacts or self.shape_goal or self.absent_goals
                                                      or self.line_events):
@@ -1425,12 +1426,14 @@ class ObjectAgent:
                 self._level_first = (grid.copy(), self.agent)
             counts = Counter(p for _, p in objs)
             # (only objects unchanged since then: not, for example, a bar that shrinks as actions are used)
+            edge = lambda o: any(r in (0, grid.shape[0] - 1) or c in (0, grid.shape[1] - 1) for r, c in o)
             self.prior_contacts = {p for o, p in objs if self._unchanged(grid, o) and p not in self.contact_rejected
-                                   and ('unique' if counts[p] == 1 else 'repeated') in kinds}
+                                   and ('unique' if counts[p] == 1 else 'repeated') in kinds
+                                   and not (inside and edge(o))}
             for kind in kinds:
                 if any(('unique' if n == 1 else 'repeated') == kind for p, n in counts.items()
                        if p in self.prior_contacts):
-                    self.priors_applied.add(('contact_goal', kind))
+                    self.priors_applied.add(('contact_goal', kind) + (('inside',) if inside else ()))
         if ('others_like_me',) in usable:
             drops = {m.drop_dir() for m in self.click_models.values() if m.kind() == 'drop'}
             if len(drops) == 1:
@@ -1464,7 +1467,7 @@ class ObjectAgent:
         (see meta_patterns): alignment, in a game where moves place marks on empty cells (lines of the
         agent's marks win, of the other players' lose, sharing their length) or pieces come to rest
         (lines of any cells across the direction of gravity, full rows if a full row was an instance);
-        reach, while the agent is known (the only object of its pattern). Gravity, rotation and reflection
+        reach, while the agent is known (the only object of its pattern, not touching the grid's edge). Gravity, rotation and reflection
         act through the click models, _drift_dir and _geometric; shape_match through prior_shape.
         """
         out = {}
@@ -1479,13 +1482,14 @@ class ObjectAgent:
                 if theirs - mine - {self.bg}:
                     out[('line_loss', 'theirs', None)] = el
                     out[('loss_like_goal',)] = el
-            elif self._drift_dir(1) is not None:
+            elif self._drift_dir(1) is not None and any(p.get('full') and p.get('role') == 'any'
+                                                        for p in self.meta['alignment']['params']):
+                # (only a full row: where every piece forms short lines, lines of an unknown length
+                # mislead the placement while the length is being found)
                 d = self._drift_dir(1)
-                full = any(p.get('full') and p.get('role') == 'any' for p in self.meta['alignment']['params'])
-                across = (abs(d[1]), abs(d[0]))
-                out[('line_goal', 'any', across if full else None)] = dict(el, params={'k': [], 'full': full})
+                out[('line_goal', 'any', (abs(d[1]), abs(d[0])))] = dict(el, params={'k': [], 'full': True})
         if 'reach' in self.meta and not any(k[0] == 'contact_goal' for k in usable):
-            out[('contact_goal', 'unique')] = {'element': 'reach', 'context': [], 'params': {}}
+            out[('contact_goal', 'unique', 'inside')] = {'element': 'reach', 'context': [], 'params': {}}
         if 'shape_match' in self.meta:
             grew = any('merge' in c for c in self.rules.values())
             self.prior_shape = grew and not self.shape_rejected and not (
@@ -1497,6 +1501,7 @@ class ObjectAgent:
                 for m in models.values():
                     if m.like is None:
                         m.like = self.meta_gravity
+                    if m.like == self.meta_gravity and m.kind(narrow=models is not self.click_models) == 'drop':
                         self.meta_applied.add('gravity')
         return out
 
