@@ -466,5 +466,32 @@ class TestMetaPatterns(unittest.TestCase):
         self.assertIn(('contact_goal', 'unique', 'inside'), out)
 
 
+
+@unittest.skipIf(ARCBaseGame is None, 'arcengine is not installed')
+class TestCaptureGo(unittest.TestCase):
+    def test_rules(self):
+        from arc3_games import MINE, THEIRS, CaptureGo
+        g = CaptureGo(seed=0)
+        b = np.zeros((5, 5), dtype=np.int8)
+        b[0, 0], b[0, 1] = THEIRS, MINE
+        self.assertEqual(g._play(b.copy(), (1, 0), MINE), {(0, 0)})          # no liberty left: captured
+        b = np.zeros((5, 5), dtype=np.int8)
+        b[0, 1] = b[1, 0] = THEIRS
+        self.assertIsNone(g._play(b.copy(), (0, 0), MINE))                  # no liberty, no capture: not allowed
+        b[1, 1] = b[0, 2] = b[2, 0] = MINE
+        self.assertEqual(g._play(b.copy(), (0, 0), MINE), {(0, 1), (1, 0)})  # ... unless it captures
+
+    def test_game_ends_at_the_first_capture(self):
+        from arc3_games import GAMES, local_env
+        from evaluate_arc3 import play, random_choice
+        results = set()
+        for seed in range(6):
+            env = local_env(GAMES['capture-go'](seed=seed))
+            play(env, random_choice(random.Random(seed)), 2000, clicks=True, stop_on_loss=True)
+            results.add(env.game.result)
+        self.assertLessEqual(results, {'win', 'loss', 'draw', None})
+        self.assertTrue(results & {'win', 'loss'})
+
+
 if __name__ == '__main__':
     unittest.main()

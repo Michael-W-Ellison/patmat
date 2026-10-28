@@ -58,6 +58,19 @@ the player.
   a level is won by walking into the target while the player has its
   shape; walking into it with another shape does nothing. A shape level
   is lost when every piece has merged and the player has another shape.
+- CaptureGo (capture Go, also called atari Go): an n x n board inside a
+  border of 5 (empty 0, the player's stones 2, the opponent's 1), one game
+  per episode. The player clicks an empty cell to place a stone; the
+  opponent's stone is a second frame. A group of stones with no empty
+  neighbour (no liberty) after a move is captured: its stones are removed.
+  The first capture wins (the player's: WIN; the opponent's: GAME_OVER);
+  a move that would leave its own group without a liberty and capture
+  nothing is not allowed (nothing happens); a full board is a draw.
+  `result` says which. The opponent is 'random' (any allowed move) or
+  'greedy' (captures if it can, else gives a group of its own in atari -
+  one liberty - a second liberty if it can, else random). Who moves first
+  alternates with the seed. Games: 'capture-go' (5 x 5, random), and
+  'capture-go-greedy'.
 - Tetris variants: 'tetris-small' (a 6 x 12 well), 'tetris-wide' (10 x 16,
   the pieces in other colours).
 
@@ -594,6 +607,129 @@ class ShapeGame(ARCBaseGame):
         self.complete_action()
 
 
+class CaptureGo(ARCBaseGame):
+    def __init__(self, seed: int = 0, n: int = 5, opponent: str = 'random'):
+        self.rng = random.Random(seed)
+        self.n, self.opponent = n, opponent
+        self.agent_first = seed % 2 == 0
+        self.result = None
+        self._reply = False
+        px = np.full((n + 2, n + 2), BORDER, dtype=np.int8)
+        px[1:-1, 1:-1] = EMPTY
+        super().__init__(game_id='capturego', levels=[Level(sprites=[Sprite(pixels=px, name='board')],
+                                                            grid_size=(n + 2, n + 2))],
+                         camera=Camera(width=n + 2, height=n + 2, background=EMPTY, letter_box=3))
+
+    def _board(self):
+        return self.current_level.get_sprites_by_name('board')[0]
+
+    def _group(self, b, p):
+        """The group of stones at p and its liberties"""
+        colour, group, libs, stack = b[p], {p}, set(), [p]
+        while stack:
+            r, c = stack.pop()
+            for q in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)):
+                if 0 <= q[0] < self.n and 0 <= q[1] < self.n:
+                    if b[q] == EMPTY:
+                        libs.add(q)
+                    elif b[q] == colour and q not in group:
+                        group.add(q)
+                        stack.append(q)
+        return group, libs
+
+    def _play(self, b, p, colour):
+        """Place a stone (b is changed): the stones captured, or None if the move is not allowed"""
+        if b[p] != EMPTY:
+            return None
+        b[p] = colour
+        other = THEIRS if colour == MINE else MINE
+        captured = set()
+        r, c = p
+        for q in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)):
+            if 0 <= q[0] < self.n and 0 <= q[1] < self.n and b[q] == other:
+                group, libs = self._group(b, q)
+                if not libs:
+                    captured |= group
+        if not captured and not self._group(b, p)[1]:
+            b[p] = EMPTY                        # (no liberty and no capture: not allowed)
+            return None
+        for q in captured:
+            b[q] = EMPTY
+        return captured
+
+    def _allowed(self, b, colour):
+        out = []
+        for p in zip(*np.nonzero(b == EMPTY)):
+            trial = b.copy()
+            if self._play(trial, (int(p[0]), int(p[1])), colour) is not None:
+                out.append((int(p[0]), int(p[1])))
+        return out
+
+    def _opponent_move(self, b):
+        allowed = self._allowed(b, THEIRS)
+        if not allowed:
+            return None
+        if self.opponent == 'greedy':
+            for p in allowed:
+                trial = b.copy()
+                if self._play(trial, p, THEIRS):
+                    return p                    # a capture
+            for p in allowed:                   # give a group in atari a second liberty
+                trial = b.copy()
+                self._play(trial, p, THEIRS)
+                group, libs = self._group(trial, p)
+                if len(libs) >= 2 and any(len(self._group(b, q)[1]) == 1 for q in group if b[q] == THEIRS):
+                    return p
+        return self.rng.choice(allowed)
+
+    def on_set_level(self, level):
+        self.result = None
+        self._reply = False
+        if not self.agent_first:
+            sprite = level.get_sprites_by_name('board')[0]
+            px = sprite.pixels.copy()
+            b = px[1:-1, 1:-1]
+            self._play(b, self._opponent_move(b), THEIRS)
+            sprite.pixels = px
+
+    def step(self):
+        sprite = self._board()
+        px = sprite.pixels.copy()
+        b = px[1:-1, 1:-1]
+        if self._reply:                         # the opponent's move, in a second frame
+            self._reply = False
+            p = self._opponent_move(b)
+            if p is None:
+                self.result = 'draw'
+                self.lose()
+            else:
+                captured = self._play(b, p, THEIRS)
+                sprite.pixels = px
+                if captured:
+                    self.result = 'loss'
+                    self.lose()
+                elif not self._allowed(b, MINE):
+                    self.result = 'draw'
+                    self.lose()
+            self.complete_action()
+            return
+        if self.action.id == GameAction.ACTION6:
+            at = self.camera.display_to_grid(self.action.data.get('x', 0), self.action.data.get('y', 0))
+            if at is not None:
+                c, r = at[0] - 1, at[1] - 1
+                if 0 <= r < self.n and 0 <= c < self.n:
+                    captured = self._play(b, (r, c), MINE)
+                    if captured is not None:
+                        sprite.pixels = px
+                        if captured:
+                            self.result = 'win'
+                            self.win()
+                        else:
+                            self._reply = True  # the action goes on: one more frame, for the opponent
+                            return
+        self.complete_action()
+
+
 def _k_game(**kw):
     def make(seed: int = 0):
         return KInARow(seed=seed, **kw)
@@ -610,8 +746,10 @@ GAMES = {'lights': LightsOut, 'clear': ClearRed, 'tictactoe': TicTacToe, 'tetris
          'tetris-small': lambda seed=0: Tetris(seed, width=6, height=12),
          'maze': Maze, 'maze-b': lambda seed=0: Maze(seed, n=12, colours=(1, 4, 12, 14, 6)),
          'exit-shape': ShapeGame,
-         'shape-touch': lambda seed=0: ShapeGame(seed, kinds=('shape1', 'shape2', 'shape3'), touch=True)}
-BOARD_GAMES = ('connect4', 'connect4-block', 'gomoku', 'gomoku-block', 'tictactoe-block', 'tictactoe-random')
+         'shape-touch': lambda seed=0: ShapeGame(seed, kinds=('shape1', 'shape2', 'shape3'), touch=True),
+         'capture-go': CaptureGo, 'capture-go-greedy': lambda seed=0: CaptureGo(seed, opponent='greedy')}
+BOARD_GAMES = ('connect4', 'connect4-block', 'gomoku', 'gomoku-block', 'tictactoe-block', 'tictactoe-random',
+               'capture-go', 'capture-go-greedy')
 
 
 class _LocalEnv:
