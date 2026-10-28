@@ -350,5 +350,38 @@ class TestPatternStore(unittest.TestCase):
         self.assertEqual(agent.directions.get(1, (-1, 0)), (-1, 0))
 
 
+class TestMetaPatterns(unittest.TestCase):
+    def test_elements_need_two_mechanisms(self):
+        import tempfile
+        from meta_patterns import MetaStore, arc_elements
+        with tempfile.TemporaryDirectory() as d:
+            m = MetaStore(d)
+            m.add_game('tetris', {('drift', 1, (1, 0)): {}, ('transform', 1, 'turn right', (0, 0)): {}})
+            self.assertEqual(m.elements(), {})          # each element seen one way only
+            m.add_game('connect4', {('own_click', 'empty', 'drop', (1, 0)): {}})
+            self.assertEqual(set(m.elements()), {'gravity'})     # a falling piece and a dropped disc
+            m.add_arc('t1', 'C', 'rot90')
+            self.assertIn('rotation', m.elements())     # a turning piece and an ARC rotation
+            self.assertEqual(m.family_order(['A', 'C', 'K', 'N'])[:2], ['C', 'N'])
+            self.assertEqual(MetaStore(d).elements().keys(), m.elements().keys())    # (kept in meta.json)
+        self.assertEqual(arc_elements('K', 'rays from every element S in own colour, at obstacle stop'), {'alignment'})
+        self.assertEqual(arc_elements('N', 'complete rot90 symmetry about the grid centre'), {'rotation', 'reflection'})
+
+    @unittest.skipIf(ARCBaseGame is None, 'arcengine is not installed')
+    def test_universal_elements_in_connect_four(self):
+        from arc3_games import GAMES, local_env
+        from evaluate_arc3 import play
+        # gravity and alignment as seen elsewhere (Tetris, ARC): no Connect Four or board game among them
+        agent = ObjectAgent(random.Random(0))
+        agent.use_meta({'gravity': {'params': [{'d': [1, 0], 'mechanism': 'drift'}, {'mechanism': 'arc:C'}]},
+                        'alignment': {'params': [{'role': 'any', 'k': [16], 'full': True, 'mechanism': 'line_goal:any'},
+                                                 {'mechanism': 'arc:K'}]}})
+        agent.new_episode()
+        play(local_env(GAMES['connect4'](seed=0)), agent.act, 100, agent, stop_on_loss=True)
+        self.assertEqual(agent.meta_applied, {'gravity', 'alignment'})
+        self.assertEqual(agent.click_models[0].kind(), 'drop')                  # the disc falls
+        self.assertEqual(agent.others[0][0].kind(narrow=True), 'drop')         # the opponent's too
+
+
 if __name__ == '__main__':
     unittest.main()

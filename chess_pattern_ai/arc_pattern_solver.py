@@ -2343,9 +2343,13 @@ COMBINATION_SECONDS = 60     # time budget for combinations, used only when no s
 
 
 def find_patterns(task: Dict, families: Sequence[str] = tuple(FAMILIES),
-                  combinations: bool = True) -> Tuple[List[Dict], int]:
+                  combinations: bool = True, stop_at_first: bool = False) -> Tuple[List[Dict], int]:
     """
     Patterns consistent with every training pair, with their test predictions.
+
+    The families are searched in the order given (meta_patterns.MetaStore.family_order puts those
+    that embody the universal elements seen most first); with stop_at_first, the search ends with the
+    first family that gives a consistent pattern.
 
     Exact fits among the partial matches, exceptions (family X) and
     multi-step patterns (family L), together within MULTI_STEP_SECONDS,
@@ -2376,6 +2380,8 @@ def find_patterns(task: Dict, families: Sequence[str] = tuple(FAMILIES),
 
     for fam in families:
         collect(FAMILIES[fam](pairs, bg))
+        if stop_at_first and consistent:
+            break
     if combinations and not consistent:
         deadline = time.time() + MULTI_STEP_SECONDS
         pool = partial_pool(pairs, bg, time.time() + POOL_SECONDS)
@@ -2393,15 +2399,21 @@ def find_patterns(task: Dict, families: Sequence[str] = tuple(FAMILIES),
     return consistent, proposed
 
 
-def rank(consistent: List[Dict], task: Dict, lifts) -> List[Dict]:
-    """Distinct predictions, simplest pattern first, learned game relations breaking ties"""
+def rank(consistent: List[Dict], task: Dict, lifts, weights: Optional[Dict[str, float]] = None) -> List[Dict]:
+    """
+    Distinct predictions, simplest pattern first; ties broken by the weights of the universal elements
+    the pattern shows (meta_patterns.arc_elements; if weights are given), then by the learned game
+    relations
+    """
+    from meta_patterns import arc_elements
     pairs = [(np.array(p['input']), np.array(p['output'])) for p in task['train']]
     tests = [np.array(t['input']) for t in task['test']]
     bg = background([a for a, _ in pairs])
     for e in consistent:
         same_shape = all(p.shape == t.shape for p, t in zip(e['preds'], tests))
         e['game_score'] = game_score(e['preds'], tests, bg, lifts) if same_shape else 0.0
-    ordered = sorted(consistent, key=lambda e: (e['complexity'], -e['game_score']))
+    element = lambda e: sum(weights.get(x, 0.0) for x in arc_elements(e['family'], e['name'])) if weights else 0.0
+    ordered = sorted(consistent, key=lambda e: (e['complexity'], -element(e), -e['game_score']))
     out, seen = [], set()
     for e in ordered:
         key = tuple(p.tobytes() + bytes(str(p.shape), 'ascii') for p in e['preds'])
@@ -2411,8 +2423,13 @@ def rank(consistent: List[Dict], task: Dict, lifts) -> List[Dict]:
     return out
 
 
-def solve(task: Dict, lifts=None, attempts: int = 2) -> List[List[Array]]:
-    """Up to `attempts` predictions (each a list of test outputs)"""
+def solve(task: Dict, lifts=None, attempts: int = 2, meta=None, stop_at_first: bool = False) -> List[List[Array]]:
+    """
+    Up to `attempts` predictions (each a list of test outputs). meta: a meta_patterns.MetaStore whose
+    universal elements order the families and break ties among equally simple patterns
+    """
     lifts = load_relation_lifts() if lifts is None else lifts
-    consistent, _ = find_patterns(task)
-    return [e['preds'] for e in rank(consistent, task, lifts)[:attempts]]
+    families = meta.family_order(list(FAMILIES)) if meta is not None else tuple(FAMILIES)
+    consistent, _ = find_patterns(task, families, stop_at_first=stop_at_first)
+    weights = meta.weights() if meta is not None else None
+    return [e['preds'] for e in rank(consistent, task, lifts, weights)[:attempts]]

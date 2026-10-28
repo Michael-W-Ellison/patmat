@@ -195,6 +195,8 @@ ANY = -100                  # line hypotheses over any non-background value
 MIN_LINE = 3                # the shortest line a line hypothesis is about
 MISS_RATIO = 3              # a line hypothesis is kept while formed MISS_RATIO times as often in wins as elsewhere
 CE_POPULATION, CE_ELITE, CE_MIN_STD, CE_SMOOTH = 8, 3, 0.2, 0.7
+TURNS = ('turn right', 'turn left', 'half turn')
+MIRRORS = ('mirror left-right', 'mirror up-down', 'transpose')
 GEOMETRY = {
     'turn right': lambda a: np.rot90(a, -1), 'turn left': lambda a: np.rot90(a, 1), 'half turn': lambda a: np.rot90(a, 2),
     'mirror left-right': np.fliplr, 'mirror up-down': np.flipud, 'transpose': np.transpose,
@@ -228,7 +230,7 @@ class ClickModel:
         self.off_tables: Dict[Pos, Dict[int, int]] = {}
         self.drops = {d: True for d in SIDES}       # drop along d still fits every click seen
         self.drop_values: Optional[Tuple[int, int]] = None    # (value the cell held, value placed)
-        self.like: Optional[Pos] = None             # a drop direction expected (a generic pattern), if any
+        self.like: Optional[Pos] = None             # a drop direction expected (a generic or universal pattern)
 
     @staticmethod
     def drop_target(grid, cell, d, empty) -> Optional[Pos]:
@@ -300,6 +302,8 @@ class ClickModel:
         if narrow and (len(self.seen) >= 3 or self.like is not None) and self.drop_dir() is not None \
                 and not self.ok['none']:
             return 'drop'
+        if self.like is not None and self.drop_dir() == self.like and not self.ok['none']:
+            return 'drop'                       # a drop expected (generic or universal pattern) that fits
         kind = next((k for k in ('none', 'map', 'offsets') if self.ok[k]), None)
         if kind is None and self.drop_dir() is not None:
             return 'drop'
@@ -438,6 +442,12 @@ class ObjectAgent:
         self._dir_misses: Counter = Counter()           # action -> times it left the agent where it was, with room
         self.prior_contacts: set = set()                # object patterns to try touching (a generic contact goal)
         self._level_first = None                        # (grid, agent cells) when contact goals were first tried in the level
+        self.meta: Dict[str, dict] = {}                 # universal elements to use (meta_patterns)
+        self.meta_applied: set = set()                  # the elements used in this game
+        self.meta_gravity: Optional[Pos] = None
+        self.meta_ops: set = set()                      # geometric operations of the rotation / reflection elements
+        self.prior_shape = False                        # "take another object's shape" tried as the goal
+        self.shape_rejected = False                     # ... and reached without a win
 
     # ------------------------------------------------------------ objects
     def _walls(self) -> set:
@@ -650,6 +660,8 @@ class ObjectAgent:
         (op, offset), n = c.most_common(1)[0]
         if n == 1 and ('transform', action, op, offset) in self.generic:
             self.priors_applied.add(('transform', action, op, offset))
+        elif n == 1 and op in self.meta_ops:
+            self.meta_applied.add('rotation' if op in TURNS else 'reflection')
         elif n < 2:
             return None
         new = GEOMETRY[op](np.array(pat))
@@ -1070,7 +1082,7 @@ class ObjectAgent:
             if any(pattern(grid, o) in self.win_contacts | self.prior_contacts for o in objs):
                 return True
         # (the agent's pattern can only have changed if its number of cells did)
-        return (self.shape_goal and nxt is not None and nxt[1] is not None and len(nxt[1]) != len(agent)
+        return ((self.shape_goal or self.prior_shape) and nxt is not None and nxt[1] is not None and len(nxt[1]) != len(agent)
                 and self._shape_match(*nxt))
 
     def _targets(self, grid, agent) -> List[Dict[Pos, int]]:
@@ -1096,6 +1108,7 @@ class ObjectAgent:
         # a win that a goal known before it explains gives line hypotheses no support
         lines, self.line_goals = self.line_goals, None
         self.prior_contacts = set()
+        self.prior_shape = False
         explained = self.wins_with(grid, self.agent, action, self.predict(grid, self.agent, action))
         self.line_goals = lines
         found = set()
@@ -1330,7 +1343,7 @@ class ObjectAgent:
         - line goals (losses), while no win (loss) has formed lines: a line of the role's values; its
           length k differs between games (the pattern lists those seen), so the shortest, MIN_LINE, is
           tried first, and when a line of k forms without a win (loss), k + 1 (up to the board's size);
-          if k was the grid's extent along the line in every game (a full row), that extent is tried With loss_like_goal, goals and losses share k, and once the
+          if k was the grid's extent along the line in every game (a full row), that extent is tried. With loss_like_goal, goals and losses share k, and once the
           goal is known from wins, losses are taken to be its lines for the other players
         - others_like_me: the other players' moves are taken to drop like the agent's clicks, as soon as
           their moves fit that (rather than after 3 moves)
@@ -1345,10 +1358,12 @@ class ObjectAgent:
         (drift and transforms need one observation instead of two when a generic pattern names them; see
         _drift_dir and _geometric)
         """
-        if not self.generic:
-            return
-        cond = self.conditions()
-        usable = {k: p for k, p in self.generic.items() if p.get('context') and set(p['context']) <= cond}
+        usable = {}
+        if self.generic:
+            cond = self.conditions()
+            usable = {k: p for k, p in self.generic.items() if p.get('context') and set(p['context']) <= cond}
+        meta = self._meta_usable(grid, usable)
+        usable.update(meta)
         if not usable:
             return
         mirror = ('loss_like_goal',) in usable
@@ -1424,6 +1439,66 @@ class ObjectAgent:
                     for m in models.values():
                         m.like = d
                 self.priors_applied.add(('others_like_me',))
+        for key, element in meta.items():
+            if key in self.priors_applied and key not in self.generic:
+                self.priors_applied.discard(key)
+                self.meta_applied.add(element['element'])
+
+    def use_meta(self, elements: Dict[str, dict]):
+        """Universal elements (meta_patterns.MetaStore.elements) to use where nothing more specific applies"""
+        self.meta = elements
+        g = elements.get('gravity')
+        if g:
+            ds = Counter(tuple(p['d']) for p in g['params'] if p.get('d'))
+            self.meta_gravity = ds.most_common(1)[0][0] if ds else (1, 0)
+        ops = set()
+        if 'rotation' in elements:
+            ops |= set(TURNS)
+        if 'reflection' in elements:
+            ops |= set(MIRRORS)
+        self.meta_ops = ops
+
+    def _meta_usable(self, grid, usable) -> Dict[tuple, dict]:
+        """
+        Generic-like patterns made from the universal elements, for what no usable generic pattern covers
+        (see meta_patterns): alignment, in a game where moves place marks on empty cells (lines of the
+        agent's marks win, of the other players' lose, sharing their length) or pieces come to rest
+        (lines of any cells across the direction of gravity, full rows if a full row was an instance);
+        reach, while the agent is known (the only object of its pattern). Gravity, rotation and reflection
+        act through the click models, _drift_dir and _geometric; shape_match through prior_shape.
+        """
+        out = {}
+        if not self.meta:
+            return out
+        if 'alignment' in self.meta and not any(k[0] in ('line_goal', 'line_loss') for k in usable):
+            mine, empty = self._placed([self.click_models])
+            theirs, _ = self._placed(self.others)
+            el = {'element': 'alignment', 'context': [], 'params': {'k': [], 'full': False}}
+            if mine - {self.bg} and empty:
+                out[('line_goal', 'mine', None)] = el
+                if theirs - mine - {self.bg}:
+                    out[('line_loss', 'theirs', None)] = el
+                    out[('loss_like_goal',)] = el
+            elif self._drift_dir(1) is not None:
+                d = self._drift_dir(1)
+                full = any(p.get('full') and p.get('role') == 'any' for p in self.meta['alignment']['params'])
+                across = (abs(d[1]), abs(d[0]))
+                out[('line_goal', 'any', across if full else None)] = dict(el, params={'k': [], 'full': full})
+        if 'reach' in self.meta and not any(k[0] == 'contact_goal' for k in usable):
+            out[('contact_goal', 'unique')] = {'element': 'reach', 'context': [], 'params': {}}
+        if 'shape_match' in self.meta:
+            grew = any('merge' in c for c in self.rules.values())
+            self.prior_shape = grew and not self.shape_rejected and not (
+                self.win_contacts or self.shape_goal or self.absent_goals or self.line_events)
+            if self.prior_shape:
+                self.meta_applied.add('shape_match')
+        if self.meta_gravity is not None:
+            for models in [self.click_models] + self.others:
+                for m in models.values():
+                    if m.like is None:
+                        m.like = self.meta_gravity
+                        self.meta_applied.add('gravity')
+        return out
 
     def _unchanged(self, grid, obj) -> bool:
         """Whether the object's cells and those around it hold what they held when first seen (the agent aside)"""
@@ -1741,7 +1816,7 @@ class ObjectAgent:
         parent = {k0: None}
         queue = deque([start])
         explore = None
-        targets = self._targets(grid, self.agent) if self.shape_goal else None
+        targets = self._targets(grid, self.agent) if self.shape_goal or self.prior_shape else None
         trials = self._goal_trials(grid)
         for v in sorted(self.absent_goals | trials, key=lambda v: int((grid == v).sum())):
             xor = self._xor_plan(grid, v)
@@ -1780,7 +1855,7 @@ class ObjectAgent:
                     if explore is None:
                         explore = path_to(k) + [a]
                         if not self.win_contacts and not self.shape_goal and not self.absent_goals \
-                                and not trials and not self.prior_contacts:
+                                and not trials and not self.prior_contacts and not self.prior_shape:
                             queue.clear()           # no goal known yet: nothing to search further for
                             break
                     continue
@@ -1819,6 +1894,9 @@ class ObjectAgent:
             return None
         if n == 1 and ('drift', i, d) in self.generic:
             self.priors_applied.add(('drift', i, d))
+            return d
+        if n == 1 and d == self.meta_gravity:
+            self.meta_applied.add('gravity')
             return d
         return d if n >= 2 else None
 
@@ -1919,6 +1997,12 @@ class ObjectAgent:
 
     def after_step(self, before, action, after, frames=None, lost=False):
         """lost: the step lost the game (lost() follows); its lines are no evidence against loss hypotheses"""
+        if self.prior_shape and self.agent is not None:
+            nxt = self.predict(before, self.agent, action)
+            if nxt is not None and nxt[1] is not None and len(nxt[1]) != len(self.agent) and \
+                    np.array_equal(nxt[0], after) and self._shape_match(*nxt):
+                self.shape_rejected = True          # the shapes matched and the level did not end
+                self.prior_shape = False
         self._track_base([before] + list(frames or [after]))
         self._falsify(before, frames or [after], lost=lost)
         self._contact_falsify(before, action)

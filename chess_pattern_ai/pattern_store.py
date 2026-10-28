@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Two stores of learned patterns for the object agent (object_agent.ObjectAgent)
+Three levels of learned pattern data for the object agent (object_agent.ObjectAgent)
 
 - specific (<dir>/specific/<game>.json): one entry per game, written when a
   session of that game ends:
@@ -10,8 +10,9 @@ Two stores of learned patterns for the object agent (object_agent.ObjectAgent)
     state   the agent's learned rules, models, goals and weights with the
             game's own values (ObjectAgent.export_state), to go on learning
             the same game in a later session
-- generic (<dir>/generic.json): meta-patterns, the facts found in at least
-  MIN_GAMES games' specific entries. Each holds
+- generic (<dir>/generic.json): shared facts, the facts found in at least
+  MIN_GAMES games' specific entries (in the terms of those games: an
+  action's direction, a drop along a column). Each holds
     games     the games it was found in
     params    the games' parameters merged (line lengths: all those seen,
               and whether each was the grid's extent along the line in all
@@ -27,12 +28,19 @@ Two stores of learned patterns for the object agent (object_agent.ObjectAgent)
   A pattern not confirmed more often than confirmed is no longer offered
   (generic()).
 
+- meta (<dir>/meta.json, meta_patterns.MetaStore): universal elements,
+  the facts of every game (and the ARC tasks added to it) described by the
+  element of play they are an instance of (gravity, alignment, rotation,
+  ...); an element seen through at least two mechanisms is a meta-pattern.
+
 PatternStore.start(game, agent): a game with a specific entry goes on from
-its state; generic patterns are offered in any case (the agent uses them
-only where the game's own evidence is missing). PatternStore.save(game,
-agent, episodes) writes the game's entry, records how the generic patterns
-the agent used turned out, and rebuilds the generic store from all specific
-entries.
+its state; generic patterns and universal elements (other games' and ARC
+tasks') are offered in any case (the agent uses them only where the game's
+own evidence is missing, generic patterns before elements).
+PatternStore.save(game, agent, episodes) writes the game's entry, records
+how the generic patterns and elements the agent used turned out, rebuilds
+the generic store from all specific entries and replaces the game's
+instances in the meta store.
 """
 
 import json
@@ -42,6 +50,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
+from meta_patterns import MetaStore
 from object_agent import ClickModel, ObjectAgent
 
 MIN_GAMES = 2
@@ -142,6 +151,7 @@ class PatternStore:
         self.path = path
         os.makedirs(os.path.join(path, 'specific'), exist_ok=True)
         self._generic_file = os.path.join(path, 'generic.json')
+        self.meta = MetaStore(path)
 
     # ------------------------------------------------------- specific
     def _file(self, game) -> str:
@@ -166,6 +176,7 @@ class PatternStore:
         if entry is not None:
             agent.import_state(entry['state'])
         agent.use_generic(self.generic())
+        agent.use_meta(self.meta.elements(exclude={f'game:{game}'}))
         return 'specific' if entry is not None else 'generic'
 
     @staticmethod
@@ -188,6 +199,8 @@ class PatternStore:
             use = generic['use'].setdefault(_key_json(key), {})
             use[game] = 'confirmed' if key in facts else 'not confirmed' if _tested(key, facts) else 'no evidence'
         self._write_generic(generic['use'])
+        self.meta.add_game(game, facts)
+        self.meta.record_use(game, agent.meta_applied, facts)
 
     # -------------------------------------------------------- generic
     def _read_generic(self) -> dict:
@@ -225,6 +238,7 @@ class PatternStore:
             entry['facts'] = self._facts_json(agent.facts())
             with open(self._file(game), 'w') as f:
                 json.dump(entry, f)
+            self.meta.add_game(game, agent.facts())
         self.rebuild()
 
     def rebuild(self):
