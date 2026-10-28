@@ -383,5 +383,22 @@ class TestMetaPatterns(unittest.TestCase):
         self.assertEqual(agent.others[0][0].kind(narrow=True), 'drop')         # the opponent's too
 
 
+    @unittest.skipIf(ARCBaseGame is None, 'arcengine is not installed')
+    def test_reach_and_shape_match_not_together(self):
+        from evaluate_arc3 import play
+        for first in ('reach', 'shape_match'):
+            agent = ObjectAgent(random.Random(0))
+            agent.use_meta({'reach': {'params': [{'mechanism': 'contact_goal'}, {'mechanism': 'arc:F'}]},
+                            'shape_match': {'params': [{'mechanism': 'shape_goal'}, {'mechanism': 'arc:O'}]}})
+            if first == 'shape_match':
+                agent.meta_applied.add('shape_match')      # as if shape_match had been used first
+            for _ in range(3):
+                agent.new_episode()
+                result = play(LocalEnv(merge_game()), agent.act, 1000, agent)
+                self.assertEqual(result[0], 1)
+            self.assertLessEqual(len(agent.meta_applied & {'reach', 'shape_match'}), 1)
+            self.assertIn(first, agent.meta_applied)
+
+
 if __name__ == '__main__':
     unittest.main()

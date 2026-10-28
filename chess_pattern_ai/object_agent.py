@@ -1475,7 +1475,8 @@ class ObjectAgent:
         agent's marks win, of the other players' lose, sharing their length) or pieces come to rest
         (lines of any cells across the direction of gravity, full rows if a full row was an instance);
         reach, while the agent is known (the only object of its pattern, not touching the grid's edge). Gravity, rotation and reflection
-        act through the click models, _drift_dir and _geometric; shape_match through prior_shape.
+        act through the click models, _drift_dir and _geometric; shape_match through prior_shape. Reach
+        and shape_match are never both used in one game: once one has been used, the other is not.
         """
         out = {}
         if not self.meta:
@@ -1495,9 +1496,12 @@ class ObjectAgent:
                 # mislead the placement while the length is being found)
                 d = self._drift_dir(1)
                 out[('line_goal', 'any', (abs(d[1]), abs(d[0])))] = dict(el, params={'k': [], 'full': True})
-        if 'reach' in self.meta and not any(k[0] == 'contact_goal' for k in usable):
+        # reach and shape_match are not used in the same game: the first one used is kept for the rest of it
+        if 'reach' in self.meta and 'shape_match' not in self.meta_applied and \
+                not any(k[0] == 'contact_goal' for k in usable):
             out[('contact_goal', 'unique', 'inside')] = {'element': 'reach', 'context': [], 'params': {}}
-        if 'shape_match' in self.meta:
+        self.prior_shape = False
+        if 'shape_match' in self.meta and 'reach' not in self.meta_applied:
             grew = any('merge' in c for c in self.rules.values())
             self.prior_shape = grew and not self.shape_rejected and not (
                 self.win_contacts or self.shape_goal or self.absent_goals or self.line_events)
