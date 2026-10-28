@@ -582,5 +582,68 @@ class TestMirroringAboutObjects(unittest.TestCase):
         self.assertTrue(right(e, t))
 
 
+class TestRepetitionAndCellRules(unittest.TestCase):
+    @staticmethod
+    def tiled(h, w, tile, shift=0):
+        from arc_pattern_solver import _lattice
+        t = A(tile).ravel()
+        return t[_lattice((h, w), len(tile), len(tile[0]), shift)]
+
+    def test_tiling_repaired_under_a_colour(self):
+        pairs, tests = [], []
+        for k, (tile, shift) in enumerate((([[1, 2, 3], [4, 5, 6]], 0), ([[7, 8], [2, 3]], 1),
+                                            ([[4, 1, 1], [2, 2, 4]], 1))):
+            full = self.tiled(8, 9, tile, shift)
+            hidden = full.copy()
+            hidden[2 + k:5 + k, 3:6] = 0
+            (tests if k == 2 else pairs).append((hidden, full))
+        t = task(pairs, *tests[0])
+        e = best(t)
+        self.assertTrue(right(e, t))
+        self.assertEqual(e['family'], 'R')
+
+    def test_smallest_tile_dedupe_and_window(self):
+        t = task([(A([[1, 2, 1, 2], [3, 4, 3, 4]]), A([[1, 2], [3, 4]])),
+                  (A([[5, 5, 5], [6, 7, 6], [5, 5, 5], [6, 7, 6]]), A([[5, 5, 5], [6, 7, 6]]))],
+                 A([[8, 9, 8, 9, 8, 9]]), A([[8, 9]]))
+        self.assertTrue(right(best(t), t))
+        t = task([(A([[1, 1, 2], [1, 1, 2], [3, 3, 3]]), A([[1, 2], [3, 3]])),
+                  (A([[4, 5, 5], [6, 7, 7]]), A([[4, 5], [6, 7]]))],
+                 A([[2, 2], [2, 2], [9, 8]]), A([[2, 2], [9, 8]]))
+        e = best(t)
+        self.assertTrue(right(e, t))
+        t = task([(A([[1, 2, 3, 4], [5, 6, 7, 8], [9, 1, 2, 3]]), A([[3, 4], [7, 8]])),
+                  (A([[9, 8, 7, 6, 5], [4, 3, 2, 1, 9], [8, 7, 6, 5, 4]]), A([[6, 5], [1, 9]]))],
+                 A([[1, 1, 2, 2], [3, 3, 4, 4]]), A([[2, 2], [4, 4]]))
+        self.assertTrue(right(best(t), t))
+
+    def test_parts_overlaid_by_priority(self):
+        # the four quarters laid over each other: 3 over 2 over 1 over the background
+        t = task([(A([[1, 0, 0, 2], [0, 0, 0, 0], [0, 3, 0, 0], [0, 0, 2, 1]]), A([[1, 3], [2, 1]])),
+                  (A([[0, 0, 0, 0], [2, 1, 0, 0], [3, 3, 0, 0], [0, 0, 0, 2]]), A([[3, 3], [2, 2]])),
+                  (A([[0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 0], [0, 0, 0, 3]]), A([[0, 1], [1, 3]]))],
+                 A([[2, 0, 0, 0], [0, 0, 1, 1], [0, 0, 3, 0], [1, 0, 0, 0]]), A([[3, 0], [1, 1]]))
+        e = best(t)
+        self.assertTrue(right(e, t))
+        self.assertIn('overlaid', e['name'])
+
+    def test_tiling_continued(self):
+        t = task([(A([[0, 0, 0], [2, 8, 2], [0, 0, 0]]), A([[0] * 6, [2, 8, 2, 8, 2, 8], [0] * 6])),
+                  (A([[3, 1, 3, 1], [0, 0, 0, 0]]), A([[3, 1, 3, 1, 3, 1, 3, 1], [0] * 8]))],
+                 A([[5, 6, 7, 5, 6, 7]]), A([[5, 6, 7] * 4]))
+        self.assertTrue(right(best(t), t))
+
+    def test_cell_rules(self):
+        # cells of 5 take the colour of the first other cell in their row, from the left
+        t = task([(A([[1, 0, 5, 5], [2, 0, 0, 5]]), A([[1, 0, 1, 1], [2, 0, 0, 2]])),
+                  (A([[3, 5, 0], [4, 0, 5]]), A([[3, 3, 0], [4, 0, 4]]))],
+                 A([[6, 0, 5], [7, 5, 5]]), A([[6, 0, 6], [7, 7, 7]]))
+        self.assertTrue(right(best(t), t))
+        # cells of 5 recoloured by column parity (even columns from the left become 3)
+        t = task([(A([[5, 5, 0, 5]]), A([[3, 5, 0, 5]])), (A([[0, 5, 5, 5, 5]]), A([[0, 5, 3, 5, 3]]))],
+                 A([[5, 5, 5]]), A([[3, 5, 3]]))
+        self.assertTrue(right(best(t), t))
+
+
 if __name__ == '__main__':
     unittest.main()

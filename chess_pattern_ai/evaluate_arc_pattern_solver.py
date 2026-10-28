@@ -2,7 +2,8 @@
 """
 Evaluate arc_pattern_solver on an ARC-AGI-1 split.
 
-usage: evaluate_arc_pattern_solver.py <code_dir> <data_dir> <split> <out.json> [limit]
+usage: evaluate_arc_pattern_solver.py <code_dir> <data_dir> <split> <out.json> [limit] [part parts]
+  part parts: only every parts-th task from the part-th (to run a split in parallel processes)
   data_dir: the ARC-AGI repository's data/ directory (training/, evaluation/)
 
 Per task: patterns proposed, consistent patterns, distinct predictions,
@@ -11,7 +12,8 @@ pattern is right, and the families of the right patterns. Prints a summary.
 """
 import sys, os, json, time, signal
 code_dir, data_dir, split, out_path = sys.argv[1:5]
-limit = int(sys.argv[5]) if len(sys.argv) > 5 else None
+limit = int(sys.argv[5]) if len(sys.argv) > 5 and sys.argv[5] != 'all' else None
+part, parts = (int(sys.argv[6]), int(sys.argv[7])) if len(sys.argv) > 7 else (0, 1)
 sys.path.insert(0, code_dir)
 import numpy as np
 from arc_pattern_solver import find_patterns, rank
@@ -20,7 +22,7 @@ class Timeout(Exception): pass
 def alarm(*_): raise Timeout()
 signal.signal(signal.SIGALRM, alarm)
 lifts = load_relation_lifts(os.path.join(code_dir, 'learned_relations.json'))
-files = sorted(f for f in os.listdir(os.path.join(data_dir, split)) if f.endswith('.json'))[:limit]
+files = sorted(f for f in os.listdir(os.path.join(data_dir, split)) if f.endswith('.json'))[:limit][part::parts]
 res = []; t_all = time.time()
 for f in files:
     task = json.load(open(os.path.join(data_dir, split, f)))
