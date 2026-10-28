@@ -448,6 +448,7 @@ class ObjectAgent:
         self.meta_ops: set = set()                      # geometric operations of the rotation / reflection elements
         self.prior_shape = False                        # "take another object's shape" tried as the goal
         self.shape_rejected = False                     # ... and reached without a win
+        self._loss_predicted = False                    # the losing move's outcome was predicted (after_step)
 
     # ------------------------------------------------------------ objects
     def _walls(self) -> set:
@@ -1156,8 +1157,11 @@ class ObjectAgent:
 
     def lost(self, grid=None, action=None, frames=None):
         self.losses += 1
-        if grid is not None:
+        # (a move whose outcome was predicted, as seen, did not lose by what it did: the game was lost for
+        # another reason, such as running out of actions, and the move is not avoided later)
+        if grid is not None and not self._loss_predicted:
             self.losing.add((self._key(grid, self._before_agent), action))
+        self._loss_predicted = False
         found = set()
         for prev, cur in self._transitions(grid, frames)[1:]:      # (frames after the agent's own)
             found |= self._line_hypotheses(prev, cur)
@@ -2002,6 +2006,10 @@ class ObjectAgent:
 
     def after_step(self, before, action, after, frames=None, lost=False):
         """lost: the step lost the game (lost() follows); its lines are no evidence against loss hypotheses"""
+        if lost:
+            own = (frames or [after])[0]
+            seen = self.predict(before, self.agent, action)
+            self._loss_predicted = seen is not None and seen[0].shape == own.shape and np.array_equal(seen[0], own)
         if self.prior_shape and self.agent is not None:
             nxt = self.predict(before, self.agent, action)
             if nxt is not None and nxt[1] is not None and len(nxt[1]) != len(self.agent) and \
