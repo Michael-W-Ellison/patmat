@@ -517,5 +517,66 @@ class TestCaptureGo(unittest.TestCase):
         self.assertTrue(agent.wins_with(g, None, ('click', 5, 3), agent._click(g, None, (5, 3))))
 
 
+class TestFullGo(unittest.TestCase):
+    def test_ko_and_area(self):
+        from arc3_games import MINE, THEIRS, FullGo
+        g = FullGo(seed=0)
+        b = np.zeros((5, 5), dtype=np.int8)
+        for p in ((0, 1), (1, 0), (2, 1)):
+            b[p] = MINE
+        for p in ((0, 2), (1, 1), (2, 2), (1, 3)):
+            b[p] = THEIRS
+        g.history = {b.tobytes()}
+        self.assertEqual(g._play(b, (1, 2), MINE), {(1, 1)})
+        g.history.add(b.tobytes())
+        self.assertTrue(g._ko(b, (1, 1), THEIRS))           # taking back at once repeats the position
+        self.assertNotIn((1, 1), g._allowed(b, THEIRS))
+        b = np.zeros((5, 5), dtype=np.int8)
+        b[0, :], b[1, :2], b[2, :] = MINE, MINE, THEIRS
+        self.assertEqual((g.area(b, MINE), g.area(b, THEIRS)), (7, 15))   # (the region between borders both)
+
+    def test_two_passes_end_the_game(self):
+        from arcengine import GameAction
+        from arc3_games import GAMES, local_env
+        env = local_env(GAMES['go'](seed=0))
+        env.reset()
+        env.step(GameAction.ACTION5)            # the opponent, not behind, passes too: a draw on an empty board
+        self.assertEqual(env.game.result, 'draw')
+
+    def test_passes_and_count_goal(self):
+        def board(stones):
+            g = np.full((7, 7), 5)
+            g[1:-1, 1:-1] = 0
+            for p, v in stones.items():
+                g[p] = v
+            return g
+        agent = ObjectAgent(random.Random(0))
+        agent.observe(board({}), ('click', 3, 3), board({(3, 3): 2}))
+        agent._learn_frames([board({(3, 3): 2}), board({(3, 3): 2, (1, 1): 1})])
+        # a pass the opponent answers with a move: the game goes on
+        g = board({(3, 3): 2, (1, 1): 1})
+        g2 = board({(3, 3): 2, (1, 1): 1, (5, 5): 1})
+        agent.after_step(g, 5, g2, frames=[g, g2])
+        self.assertEqual(agent.pass_actions, {5})
+        self.assertFalse(agent._count_known())
+        # a round of passes that ends the game, won with more cells and more area
+        ahead = board({(3, 3): 2, (3, 4): 2, (1, 1): 1})
+        agent.level_won(ahead, 5, frames=[ahead, ahead])
+        self.assertEqual(agent.count_goals, {'cells', 'area'})
+        # one lost with more cells but less area: the count is by area
+        stones = {(r, 2): 1 for r in range(1, 6)}
+        stones.update({(r, 5): 2 for r in range(1, 6)})
+        stones.update({(1, 3): 2, (1, 4): 2})
+        behind = board(stones)
+        self.assertEqual((agent._tally(behind, 'cells'), agent._tally(behind, 'area')), (2, -3))
+        agent.lost(behind, 5, frames=[behind, behind])
+        self.assertEqual(agent.count_goals, {'area'})
+        self.assertTrue(agent._count_known())
+        # ahead, after the opponent passed: passing wins
+        agent._others_passed = True
+        value, best = agent._search(ahead, [5, 6])
+        self.assertEqual((value, best), (1.0, [5]))
+
+
 if __name__ == '__main__':
     unittest.main()

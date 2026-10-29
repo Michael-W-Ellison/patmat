@@ -64,6 +64,20 @@ goal, and another player's move that removed some of the agent's cells and
 lost makes it a loss; the search counts them as wins and losses, and
 values positions by how few empty cells the groups of those values touch.
 
+Passes and counts: an action other than a click that leaves the grid as
+it was while the game goes on (other players' frames follow) or ends is a
+pass; another player's frame that changes nothing is its pass. A round in
+which every player passes (the agent after the others, or the others after
+the agent) is counted as ending the game or not. The grids of the games
+such rounds ended test the count goals: a measure m (COUNT_MEASURES:
+'cells', the cells of the agent's marks minus the other players'; 'area',
+those and the regions of replaced cells that only one side's marks
+border) is kept while every such game was won exactly when m > 0. Once
+rounds of passes have ended the game more often than not and a count goal
+is left, the search considers passes (the agent's and, if seen, the other
+players'), scores a round of passes by the count goals (won by all: 1, by
+none: -1, else 0) and values other positions by the count as well.
+
 Clicks (ACTION6, actions ('click', row, col)): what clicking a cell does
 is learned per value of the clicked cell, as the first of these that fits
 every click seen on that value:
@@ -214,6 +228,7 @@ MAX_CLICKS = 64
 MAX_DEPTH = 5
 DISCOUNT = 0.9
 SEARCH_NODES = 3000         # positions searched per depth of the iterative deepening
+COUNT_MEASURES = ('cells', 'area')     # see ObjectAgent._tally
 MAX_OPTIONS = 12            # moves considered per player in a position (those near marks, if more)
 LINE_DIRS = ((0, 1), (1, 0), (1, 1), (1, -1))
 ANY = -100                  # line hypotheses over any non-background value
@@ -474,6 +489,12 @@ class ObjectAgent:
         self._goal_turn: Optional[str] = None           # 'reach' or 'shape_match': the element being tried
         self._reach_used_up = False                     # no object left to try touching (reach)
         self._loss_predicted = False                    # the losing move's outcome was predicted (after_step)
+        self.pass_actions: set = set()                  # actions (not clicks) that change nothing, the game going on
+        self.others_pass = False                        # another player's frame has changed nothing (a pass)
+        self.round_end = Counter()                      # rounds in which every player passed: 'ended', 'went on'
+        self.count_ends: List[tuple] = []               # (grid, won) of games a round of passes ended
+        self.count_goals: Optional[set] = None          # measures m consistent with: won iff m(mine) > m(theirs)
+        self._others_passed = False                     # the other players' last frames changed nothing
 
     # ------------------------------------------------------------ objects
     def _walls(self) -> set:
@@ -592,7 +613,7 @@ class ObjectAgent:
         if isinstance(action, tuple):
             return self._click(grid, agent, action[1:])
         u = self.unchanged_in.get(action)
-        if u is not None and len(u) >= NOOP_STATES:
+        if u is not None and (len(u) >= NOOP_STATES or action in self.pass_actions):
             return grid, agent
         return self._by_rules(grid, agent, action)
 
@@ -1235,6 +1256,7 @@ class ObjectAgent:
         return fits_in([(p, int(grid[p])) for p in agent], targets)
 
     def level_won(self, grid, action, frames=None):
+        self._learn_passes(grid, action, frames, ended=True, won=True)
         self.wins += 1
         self.episode['score'] += 1
         self.hidden_walls = set()
@@ -1299,6 +1321,8 @@ class ObjectAgent:
         self._new_level()
 
     def lost(self, grid=None, action=None, frames=None):
+        if grid is not None:
+            self._learn_passes(grid, action, frames, ended=True, won=False)
         self.losses += 1
         # (a move whose outcome was predicted, as seen, did not lose by what it did: the game was lost for
         # another reason, such as running out of actions, and the move is not avoided later)
@@ -1328,11 +1352,80 @@ class ObjectAgent:
         self.level_fresh = True
         self.plan = []
         self._level_first = None
+        self._others_passed = False
 
     def new_episode(self):
         self._ce_next()
         self.base = None
         self._new_level()
+
+    # ------------------------------------------------------- passes and counts
+    def _learn_passes(self, before, action, frames, ended=False, won=False):
+        """
+        A pass: an action other than a click that leaves the grid as it was while the game goes on (other
+        frames follow) or ends. A round of passes: the agent passes after the other players' last frames
+        changed nothing, or they change nothing after its pass. Whether such rounds end the game is counted;
+        the grids of games they ended (won or not) test the count goals.
+        """
+        seq = list(frames or [])
+        if not seq or seq[0].shape != before.shape:
+            self._others_passed = False
+            return
+        later = seq[1:]
+        others_passed = bool(later) and all(f.shape == before.shape and np.array_equal(f, seq[0]) for f in later)
+        if others_passed:
+            self.others_pass = True
+        passed = not isinstance(action, tuple) and np.array_equal(seq[0], before) and (bool(later) or ended)
+        if passed:
+            self.pass_actions.add(action)
+            if self._others_passed or others_passed:
+                self.round_end['ended' if ended else 'went on'] += 1
+                if ended:
+                    self.count_ends.append((before.copy(), won))
+                    self._test_counts()
+        self._others_passed = others_passed
+
+    def _test_counts(self):
+        self.count_goals = {m for m in COUNT_MEASURES
+                            if all((self._tally(g, m) > 0) == won for g, won in self.count_ends)}
+
+    def _count_known(self) -> bool:
+        """Rounds of passes end the game, and a count goal is consistent with how such games ended"""
+        return bool(self.count_goals) and self.round_end['ended'] > self.round_end['went on']
+
+    def _count_values(self) -> Tuple[np.ndarray, np.ndarray]:
+        """(side of each value: 1 the agent's marks, -1 the other players', 0 neither; whether moves replace it)"""
+        mine, _ = self._placed([self.click_models])
+        theirs = self._placed(self.others)[0] - mine
+        _, empties = self._placed()
+        side, empty = np.zeros(256, np.int16), np.zeros(256, bool)
+        side[list(mine)] = 1
+        side[list(theirs)] = -1
+        empty[list(empties)] = True
+        return side, empty
+
+    def _tally(self, grid, measure, values=None) -> int:
+        """
+        The agent's count minus the other players': 'cells', the cells of the values their moves place;
+        'area', those and the regions of cells moves replace that only one side's cells border
+        """
+        side, empty = values or self._count_values()
+        sides = side[grid]
+        out = int(sides.sum())
+        if measure == 'area':
+            for region in components(empty[grid].astype(np.int8), 0):
+                border = {int(sides[q]) for p in region for q in ((p[0] - 1, p[1]), (p[0] + 1, p[1]),
+                                                                  (p[0], p[1] - 1), (p[0], p[1] + 1))
+                          if _inside(grid, q) and q not in region} - {0}
+                if len(border) == 1:
+                    out += len(region) * border.pop()
+        return out
+
+    def _count_verdict(self, grid) -> float:
+        """A game ended by passes in this grid: 1 if every count goal says won, -1 if none does, else 0"""
+        values = self._count_values()
+        won = [self._tally(grid, m, values) > 0 for m in self.count_goals]
+        return 1.0 if all(won) else -1.0 if not any(won) else 0.0
 
     # -------------------------------------------------- stored patterns
     def roles(self) -> Dict[int, str]:
@@ -1389,6 +1482,8 @@ class ObjectAgent:
             ('removal_goal', role)              removing some cells of the role's value wins
             ('removal_loss', role)              another player removing some of them loses
             ('group_rule',)                     groups left touching no empty cell after a placement are removed
+            ('pass_end',)                       a round in which every player passes ends the game
+            ('count_goal', measure)             ... and it is won if the agent's count (_tally) is the larger
             ('drift', i, d)                     at frame i the agent moves along d by itself
             ('transform', action, op, offset)   the action turns or mirrors the agent's pattern
             ('drift_weights',)  {mean, std}     the score weights learned for where a piece comes to rest
@@ -1451,6 +1546,9 @@ class ObjectAgent:
             out[('removal_loss', r(v))] = {}
         if self._group_rule_on():
             out[('group_rule',)] = {'void': self.group_rule['void'] > 0}
+        if self._count_known():
+            out[('pass_end',)] = {}
+            out.update({('count_goal', m): {} for m in self.count_goals})
         for i, c in self.drift.items():
             d, n = c.most_common(1)[0]
             if d in SIDES and n >= 2:
@@ -1698,7 +1796,8 @@ class ObjectAgent:
              'line_events', 'loss_events', 'transforms', 'transform_ops', 'drift', 'agent_patterns',
              'ce_mean', 'ce_std', 'ce_done', 'ce_generations', 'wins', 'losses', 'shape',
              'removal_goals', 'removal_losses', 'group_rule', 'contact_kinds',
-             'contact_rejected', 'directions_rejected')
+             'contact_rejected', 'directions_rejected', 'pass_actions', 'others_pass', 'round_end', 'count_ends',
+             'count_goals')
 
     def export_state(self) -> dict:
         """
@@ -1819,6 +1918,11 @@ class ObjectAgent:
                         free = {q for p in g for q in ((p[0] - 1, p[1]), (p[0] + 1, p[1]), (p[0], p[1] - 1),
                                                        (p[0], p[1] + 1)) if _inside(grid, q) and grid[q] == e}
                         score += sign * 4.0 ** -max(len(free) - 1, 0) / 2
+        if self._count_known():
+            # the count the game would be scored by if it ended now, relative to the cells counted
+            values = self._count_values()
+            n = max(1, int(((values[0] != 0) | values[1])[grid].sum()))
+            score += 4.0 * sum(self._tally(grid, m, values) for m in self.count_goals) / len(self.count_goals) / n
         return 0.5 * float(np.tanh(score))
 
     def _search(self, grid, actions):
@@ -1831,7 +1935,8 @@ class ObjectAgent:
         self._action_cache = {}
         for depth in range(1, MAX_DEPTH + 1):
             self._nodes = SEARCH_NODES
-            value, acts = self._ours(grid, self.agent, depth, -2.0, 2.0, actions, root=True)
+            value, acts = self._ours(grid, self.agent, depth, -2.0, 2.0, actions, root=True,
+                                     passed=self._others_passed)
             if self._nodes < 0 and result is not None:
                 break
             result = (value, acts)
@@ -1839,12 +1944,16 @@ class ObjectAgent:
                 break                           # a forced win or loss is found
         return result
 
-    def _ours(self, g, agent, depth, alpha, beta, actions, root=False):
+    def _ours(self, g, agent, depth, alpha, beta, actions, root=False, passed=False):
+        """passed: the other players' last moves were passes (the agent's pass then ends the game)"""
         options = []
         seen = set()
+        passes = self._count_known()
         for a in self._search_actions(g, actions):
             nxt = self.predict(g, agent, a)
-            if nxt is None or nxt[0].shape != g.shape or np.array_equal(nxt[0], g) or nxt[0].tobytes() in seen:
+            if nxt is None or nxt[0].shape != g.shape or nxt[0].tobytes() in seen:
+                continue
+            if np.array_equal(nxt[0], g) and not (passes and a in self.pass_actions):
                 continue
             seen.add(nxt[0].tobytes())
             options.append((a, nxt))
@@ -1852,7 +1961,10 @@ class ObjectAgent:
             return 0.0, []
         scored = []
         for a, nxt in options:
-            if self.wins_with(g, agent, a, nxt):
+            if np.array_equal(nxt[0], g):       # a pass: the end of the game if the others passed
+                scored.append((self._count_verdict(g), a, nxt, True) if passed else
+                              (self._eval(g), a, nxt, 'pass'))
+            elif self.wins_with(g, agent, a, nxt):
                 scored.append((1.0, a, nxt, True))
             elif self._loses(g, nxt[0]):
                 scored.append((-1.0, a, nxt, True))
@@ -1862,8 +1974,9 @@ class ObjectAgent:
         best, acts = None, []
         for value, a, nxt, final in scored:
             self._nodes -= 1
-            if not final and depth > 1:
-                value = DISCOUNT * self._theirs(nxt[0], nxt[1], 0, depth, alpha, beta, actions)
+            if final is not True and depth > 1:
+                value = DISCOUNT * self._theirs(nxt[0], nxt[1], 0, depth, alpha, beta, actions,
+                                                passing=final == 'pass')
             if best is None or value > best:
                 best, acts = value, [a]
             elif value == best:
@@ -1873,24 +1986,33 @@ class ObjectAgent:
                 break
         return best, acts
 
-    def _theirs(self, g, agent, i, depth, alpha, beta, actions):
+    def _theirs(self, g, agent, i, depth, alpha, beta, actions, passing=False, others_passed=True):
+        """
+        passing: every player since the agent's pass has passed; others_passed: every other player so far
+        in this round has (a pass is considered once the game is known to end in a round of passes)
+        """
         if i == len(self.others):
-            return self._ours(g, agent, depth - 1, alpha, beta, actions)[0]
+            return self._ours(g, agent, depth - 1, alpha, beta, actions, passed=others_passed)[0]
         moves = self._other_moves(i, g, limit=True)[:MAX_OPTIONS]
-        if not moves:
-            return self._theirs(g, agent, i + 1, depth, alpha, beta, actions)
+        can_pass = self.others_pass and self._count_known()
+        if not moves and not can_pass:
+            return self._theirs(g, agent, i + 1, depth, alpha, beta, actions, False, others_passed)
         scored = []
         for m in moves:
             if self._loses(g, m):
                 scored.append((-1.0, m, True))
             else:
                 scored.append((self._eval(m), m, False))
+        if can_pass:
+            last = i == len(self.others) - 1
+            scored.append((self._count_verdict(g), g, True) if passing and last else (self._eval(g), g, 'pass'))
         scored.sort(key=lambda t: t[0])
         worst = None
         for value, m, final in scored:
             self._nodes -= 1
-            if not final:
-                value = self._theirs(m, agent, i + 1, depth, alpha, beta, actions)
+            if final is not True:
+                p = final == 'pass'
+                value = self._theirs(m, agent, i + 1, depth, alpha, beta, actions, passing and p, others_passed and p)
             worst = value if worst is None else min(worst, value)
             beta = min(beta, value)
             if alpha >= beta or self._nodes < 0:
@@ -2229,6 +2351,8 @@ class ObjectAgent:
                     np.array_equal(nxt[0], after) and self._shape_match(*nxt):
                 self.shape_rejected = True          # the shapes matched and the level did not end
                 self.prior_shape = False
+        if not lost:
+            self._learn_passes(before, action, frames or [after])
         self._track_base([before] + list(frames or [after]))
         self._falsify(before, frames or [after], lost=lost)
         self._contact_falsify(before, action)
@@ -2255,6 +2379,8 @@ class ObjectAgent:
                 f'absent goals {sorted(self.absent_goals)}, rejected {sorted(self.absent_rejected)}, '
                 f'removal goals {sorted(self.removal_goals)}, removal losses {sorted(self.removal_losses)}, '
                 f'group rule {self.group_rule if self._group_rule_on() else None}, '
+                f'passes {sorted(self.pass_actions, key=str)}, rounds of passes {dict(self.round_end)}, '
+                f'count goals {sorted(self.count_goals or [])}, '
                 f'other players {len(self.others)}, line goals {sorted(self.line_goals or [], key=str)}, '
                 f'line losses {sorted(self.line_losses or [], key=str)}, '
                 f'drift {({i: dict(c) for i, c in self.drift.items()})}, transforms {len(self.transforms)}, '

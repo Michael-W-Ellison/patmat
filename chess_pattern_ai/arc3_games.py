@@ -71,6 +71,20 @@ the player.
   one liberty - a second liberty if it can, else random). Who moves first
   alternates with the seed. Games: 'capture-go' (5 x 5, random), and
   'capture-go-greedy'.
+- FullGo: Go on an n x n board (the values and frames of CaptureGo):
+  captures remove a group but do not end the game. Action 5 passes (the
+  opponent then moves, or passes, in the second frame). A move that would
+  repeat an earlier position of the game (ko) is not allowed (nothing
+  happens), as are moves that leave their own group without a liberty
+  and capture nothing. The game ends when both players pass in a row, or
+  after MAX_PLIES moves, and is scored by area: each player's stones and
+  the empty regions that only its stones border; more wins (WIN), fewer
+  loses, equal is a draw (both GAME_OVER). The opponent never fills an
+  empty point whose neighbours are all its own stones (an eye); it passes
+  when it has no other move, or when the player has just passed and it is
+  not behind. 'random' plays any other allowed move, 'greedy' captures if
+  it can, else gives a group in atari a second liberty, else random.
+  Games: 'go' (5 x 5, random) and 'go-greedy'.
 - Tetris variants: 'tetris-small' (a 6 x 12 well), 'tetris-wide' (10 x 16,
   the pieces in other colours).
 
@@ -730,6 +744,132 @@ class CaptureGo(ARCBaseGame):
         self.complete_action()
 
 
+class FullGo(CaptureGo):
+    MAX_PLIES = 60
+
+    def __init__(self, seed: int = 0, n: int = 5, opponent: str = 'random'):
+        self.history: set = set()
+        self.passes = 0
+        self.plies = 0
+        super().__init__(seed, n, opponent)
+        self._available_actions = [5, 6]
+
+    def _ko(self, b, p, colour) -> bool:
+        """Whether placing at p repeats an earlier position"""
+        trial = b.copy()
+        return self._play(trial, p, colour) is not None and trial.tobytes() in self.history
+
+    def _allowed(self, b, colour):
+        return [p for p in super()._allowed(b, colour) if not self._ko(b, p, colour)]
+
+    def area(self, b, colour) -> int:
+        """Stones of the colour and the empty regions only its stones border"""
+        out = int((b == colour).sum())
+        seen = set()
+        for r, c in zip(*np.nonzero(b == EMPTY)):
+            if (r, c) in seen:
+                continue
+            region, border, stack = {(r, c)}, set(), [(r, c)]
+            while stack:
+                pr, pc = stack.pop()
+                for q in ((pr - 1, pc), (pr + 1, pc), (pr, pc - 1), (pr, pc + 1)):
+                    if 0 <= q[0] < self.n and 0 <= q[1] < self.n:
+                        if b[q] == EMPTY and q not in region:
+                            region.add(q)
+                            stack.append(q)
+                        elif b[q] != EMPTY:
+                            border.add(int(b[q]))
+            seen |= region
+            if border == {colour}:
+                out += len(region)
+        return out
+
+    def _eye(self, b, p, colour) -> bool:
+        r, c = p
+        return all(not (0 <= q[0] < self.n and 0 <= q[1] < self.n) or b[q] == colour
+                   for q in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)))
+
+    def _opponent_move(self, b):
+        moves = [p for p in self._allowed(b, THEIRS) if not self._eye(b, p, THEIRS)]
+        if not moves or (self.passes == 1 and self.area(b, THEIRS) >= self.area(b, MINE)):
+            return None
+        if self.opponent == 'greedy':
+            for p in moves:
+                trial = b.copy()
+                if self._play(trial, p, THEIRS):
+                    return p
+            for p in moves:
+                trial = b.copy()
+                self._play(trial, p, THEIRS)
+                group, libs = self._group(trial, p)
+                if len(libs) >= 2 and any(len(self._group(b, q)[1]) == 1 for q in group if b[q] == THEIRS):
+                    return p
+        return self.rng.choice(moves)
+
+    def on_set_level(self, level):
+        self.result = None
+        self._reply = False
+        self.passes, self.plies = 0, 0
+        px = level.get_sprites_by_name('board')[0].pixels
+        self.history = {px[1:-1, 1:-1].copy().tobytes()}
+        if not self.agent_first:
+            sprite = level.get_sprites_by_name('board')[0]
+            px = sprite.pixels.copy()
+            b = px[1:-1, 1:-1]
+            self._play(b, self._opponent_move(b), THEIRS)
+            self.history.add(b.tobytes())
+            self.plies = 1
+            sprite.pixels = px
+
+    def _end(self, b):
+        mine, theirs = self.area(b, MINE), self.area(b, THEIRS)
+        self.result = 'win' if mine > theirs else 'loss' if mine < theirs else 'draw'
+        if self.result == 'win':
+            self.win()
+        else:
+            self.lose()
+
+    def _after_ply(self, b, passed: bool) -> bool:
+        """Count the ply; whether the game has ended"""
+        self.passes = self.passes + 1 if passed else 0
+        self.plies += 1
+        if not passed:
+            self.history.add(b.tobytes())
+        if self.passes >= 2 or self.plies >= self.MAX_PLIES:
+            self._end(b)
+            return True
+        return False
+
+    def step(self):
+        sprite = self._board()
+        px = sprite.pixels.copy()
+        b = px[1:-1, 1:-1]
+        if self._reply:                         # the opponent's move (or pass), in a second frame
+            self._reply = False
+            p = self._opponent_move(b)
+            if p is not None:
+                self._play(b, p, THEIRS)
+                sprite.pixels = px
+            self._after_ply(b, p is None)
+            self.complete_action()
+            return
+        if self.action.id == GameAction.ACTION5:            # a pass
+            if not self._after_ply(b, True):
+                self._reply = True
+                return
+        elif self.action.id == GameAction.ACTION6:
+            at = self.camera.display_to_grid(self.action.data.get('x', 0), self.action.data.get('y', 0))
+            if at is not None:
+                c, r = at[0] - 1, at[1] - 1
+                if 0 <= r < self.n and 0 <= c < self.n and not self._ko(b, (r, c), MINE):
+                    if self._play(b, (r, c), MINE) is not None:
+                        sprite.pixels = px
+                        if not self._after_ply(b, False):
+                            self._reply = True  # the action goes on: one more frame, for the opponent
+                            return
+        self.complete_action()
+
+
 def _k_game(**kw):
     def make(seed: int = 0):
         return KInARow(seed=seed, **kw)
@@ -747,9 +887,10 @@ GAMES = {'lights': LightsOut, 'clear': ClearRed, 'tictactoe': TicTacToe, 'tetris
          'maze': Maze, 'maze-b': lambda seed=0: Maze(seed, n=12, colours=(1, 4, 12, 14, 6)),
          'exit-shape': ShapeGame,
          'shape-touch': lambda seed=0: ShapeGame(seed, kinds=('shape1', 'shape2', 'shape3'), touch=True),
-         'capture-go': CaptureGo, 'capture-go-greedy': lambda seed=0: CaptureGo(seed, opponent='greedy')}
+         'capture-go': CaptureGo, 'capture-go-greedy': lambda seed=0: CaptureGo(seed, opponent='greedy'),
+         'go': FullGo, 'go-greedy': lambda seed=0: FullGo(seed, opponent='greedy')}
 BOARD_GAMES = ('connect4', 'connect4-block', 'gomoku', 'gomoku-block', 'tictactoe-block', 'tictactoe-random',
-               'capture-go', 'capture-go-greedy')
+               'capture-go', 'capture-go-greedy', 'go', 'go-greedy')
 
 
 class _LocalEnv:
