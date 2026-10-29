@@ -229,7 +229,7 @@ MAX_DEPTH = 5
 DISCOUNT = 0.9
 SEARCH_NODES = 3000         # positions searched per depth of the iterative deepening
 COUNT_MEASURES = ('cells', 'area')     # see ObjectAgent._tally
-PLAYOUTS = 6000             # simulated games per move of the playout search (_mcts)
+PLAYOUTS = 3000             # simulated games per move of the playout search (_mcts)
 UCT_C = 0.7                 # exploration constant of its tree
 MAX_OPTIONS = 12            # moves considered per player in a position (those near marks, if more)
 LINE_DIRS = ((0, 1), (1, 0), (1, 1), (1, -1))
@@ -2162,7 +2162,9 @@ class ObjectAgent:
             return nb
 
         def tally(b, measure):
+            """(the count, side owning each cell of a region only one side borders: cell -> 1 / -1)"""
             out = sum(side[x] for x in b)
+            owner = {}
             if measure == 'area':
                 seen = set()
                 for i, x in enumerate(b):
@@ -2180,30 +2182,33 @@ class ObjectAgent:
                                 border.add(side[y])
                     seen |= region
                     if len(border) == 1:
-                        out += len(region) * border.pop()
-            return out
+                        s = border.pop()
+                        out += len(region) * s
+                        owner.update(dict.fromkeys(region, s))
+            return out, owner
 
         players = len(placements)
-        t = tally(b, measure)
+        t, owner = tally(b, measure)
         for _ in range(3 * len(b)):
             if passes >= players:
                 break
             table = placements[player]
-            cells = [i for i, x in enumerate(b) if x in table]
+            # (a mark placed in a region only the player's own marks border leaves the count as it is: skipped)
+            cells = [i for i, x in enumerate(b) if x in table and owner.get(i) != side[table[x]]]
             self.rng.shuffle(cells)
             moved = False
             for i in cells:
                 nb = place(b, i, table[b[i]])
                 if nb is None:
                     continue
-                nt = tally(nb, measure)
+                nt, nowner = tally(nb, measure)
                 if nt == t:
                     continue
-                b, t, moved = nb, nt, True
+                b, t, owner, moved = nb, nt, nowner, True
                 break
             passes = 0 if moved else passes + 1
             player = (player + 1) % players
-        won = [tally(b, m) > 0 for m in measures]
+        won = [tally(b, m)[0] > 0 for m in measures]
         return 1.0 if all(won) else 0.0 if not any(won) else 0.5
 
     def _playout(self, g, player, passes, values) -> float:
