@@ -229,6 +229,8 @@ MAX_DEPTH = 5
 DISCOUNT = 0.9
 SEARCH_NODES = 3000         # positions searched per depth of the iterative deepening
 COUNT_MEASURES = ('cells', 'area')     # see ObjectAgent._tally
+PLAYOUTS = 6000             # simulated games per move of the playout search (_mcts)
+UCT_C = 0.7                 # exploration constant of its tree
 MAX_OPTIONS = 12            # moves considered per player in a position (those near marks, if more)
 LINE_DIRS = ((0, 1), (1, 0), (1, 1), (1, -1))
 ANY = -100                  # line hypotheses over any non-background value
@@ -413,6 +415,7 @@ def shifted(cells, d) -> FrozenSet[Pos]:
 class ObjectAgent:
     learns_from_losses = True
     uses_frames = True
+    playout_search = True               # games decided by a count after a round of passes: _mcts
 
     def __init__(self, rng: Optional[random.Random] = None):
         self.rng = rng or random.Random()
@@ -671,6 +674,19 @@ class ObjectAgent:
         r = self.group_rule
         return r['empty'] is not None and bool(r['cleared']) and r['counter'] == 0
 
+    def _cleared(self) -> set:
+        """
+        The values whose groups the rule removes: those seen removed and, when every player's moves place
+        marks on cells of the same values (_placements), every player's marks once any player's were
+        """
+        cleared = set(self.group_rule['cleared'])
+        placements = self._placements()
+        if placements and all(set(t) == set(placements[0]) for t in placements):
+            marks = {w for t in placements for w in t.values()}
+            if cleared & marks:
+                cleared |= marks
+        return cleared
+
     def _learn_groups(self, before, after, cell):
         """
         The grid the click's own model should learn from: the placement only, when the change is one placed
@@ -706,12 +722,36 @@ class ObjectAgent:
             return after
         w = int(after[q])
         out = after.copy()
-        removed = self._bare_groups(after, r['cleared'] - {w}, r['empty'])
+        # (only the groups next to the placed cell can have lost their last empty neighbour)
+        removed, cleared = set(), self._cleared() - {w}
+        for d in SIDES:
+            p = (q[0] + d[0], q[1] + d[1])
+            if _inside(after, p) and int(after[p]) in cleared and p not in removed:
+                group, free = self._group_at(after, p, r['empty'])
+                if not free:
+                    removed |= group
         for p in removed:
             out[p] = r['empty']
-        if not removed and r['void'] > 0 and q in self._bare_groups(out, {w}, r['empty']):
+        if not removed and r['void'] > 0 and not self._group_at(out, q, r['empty'])[1]:
             return grid                         # (a placement that leaves its own group bare does nothing)
         return out
+
+    @staticmethod
+    def _group_at(grid, p, empty) -> Tuple[set, bool]:
+        """(the group of cells of p's value connected to p, whether it touches a cell of `empty`)"""
+        v, group, stack, free = grid[p], {p}, [p], False
+        h, w = grid.shape
+        while stack:
+            r, c = stack.pop()
+            for q in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)):
+                if 0 <= q[0] < h and 0 <= q[1] < w and q not in group:
+                    x = grid[q]
+                    if x == v:
+                        group.add(q)
+                        stack.append(q)
+                    elif x == empty:
+                        free = True
+        return group, free
 
     def _click(self, grid, agent, cell):
         model = self.click_models.get(int(grid[cell]))
@@ -915,7 +955,7 @@ class ObjectAgent:
                 if placed is not None and not np.array_equal(placed, before):
                     q = tuple(np.argwhere(placed != before)[0])
                     w = int(placed[q])
-                    if not self._bare_groups(placed, self.group_rule['cleared'] - {w}, self.group_rule['empty']) \
+                    if not self._bare_groups(placed, self._cleared() - {w}, self.group_rule['empty']) \
                             and q in self._bare_groups(placed, {w}, self.group_rule['empty']):
                         self.group_rule['void'] += 1    # a placement that would leave its group bare: void
                         void = True
@@ -2019,6 +2059,239 @@ class ObjectAgent:
                 break
         return worst
 
+    # ------------------------------------------------------- playout search
+    def _tree_moves(self, g, player, actions) -> List[tuple]:
+        """(label, grid after) of the moves of a player (0: the agent, i: other player i) that change the grid,
+        and its pass (label None for the other players') if it is known to pass"""
+        out, seen = [], set()
+        if player == 0:
+            for a in self._actions(g, actions):
+                nxt = self.predict(g, None, a)
+                if nxt is None or nxt[0].shape != g.shape or np.array_equal(nxt[0], g) or nxt[0].tobytes() in seen:
+                    continue
+                seen.add(nxt[0].tobytes())
+                out.append((a, nxt[0]))
+            passes = [a for a in actions if a in self.pass_actions]
+            if passes:
+                out.append((passes[0], g))
+        else:
+            for nxt in self._other_moves(player - 1, g):
+                out.append(('move', nxt))
+            if self.others_pass:
+                out.append((None, g))
+        return out
+
+    def _playout_cells(self, player):
+        """(values whose cells a player's moves act on, predict(grid, cell) -> grid after or None)"""
+        if player == 0:
+            models = self.click_models
+            values = [v for v, m in models.items() if m.kind() in ('map', 'offsets', 'drop')]
+
+            def after(g, p):
+                nxt = self._click(g, None, p)
+                return None if nxt is None else nxt[0]
+        else:
+            models = self.others[player - 1]
+            values = [v for v, m in models.items() if m.kind(narrow=True) in ('map', 'offsets', 'drop')]
+
+            def after(g, p):
+                return self._with_groups(g, models[int(g[p])].predict(g, p, self._clicked(g, p), narrow=True))
+        return values, after
+
+    def _placements(self) -> Optional[List[Dict[int, int]]]:
+        """
+        Per player (0: the agent), {value e: value w} if every move it is known to make puts w on one cell of
+        value e (a click on the background, or a model of offsets that change only the clicked cell); else None
+        """
+        out = []
+        for i, models in enumerate([self.click_models] + self.others):
+            table = {}
+            for v, m in models.items():
+                kind = m.kind() if i == 0 else m.kind(narrow=True)
+                if kind not in ('map', 'offsets', 'drop'):
+                    continue
+                if kind == 'map' and v == self.bg and m.table.get(v, v) != v:
+                    table[v] = m.table[v]
+                elif kind == 'offsets' and set(m.off_tables) == {(0, 0)} and m.off_tables[(0, 0)].get(v, v) != v:
+                    table[v] = m.off_tables[(0, 0)][v]
+                else:
+                    return None
+            out.append(table)
+        return out
+
+    def _fast_playout(self, g, player, passes, placements) -> float:
+        """_playout for games whose moves place one cell each (_placements), on a flat list of the cells"""
+        h, w = g.shape
+        b = g.ravel().tolist()
+        nbrs = [[j for j in (i - w, i + w, i - 1, i + 1)
+                 if 0 <= j < h * w and (j // w == i // w or j % w == i % w)] for i in range(h * w)]
+        side, empty = self._count_values()
+        side, empty = side.tolist(), empty.tolist()
+        rule = self.group_rule if self._group_rule_on() else None
+        cleared = self._cleared()
+        measures = sorted(self.count_goals)
+        measure = 'area' if 'area' in measures else measures[0]
+
+        def group_at(b, i):
+            v, group, stack, free = b[i], {i}, [i], False
+            while stack:
+                for j in nbrs[stack.pop()]:
+                    x = b[j]
+                    if x == v and j not in group:
+                        group.add(j)
+                        stack.append(j)
+                    elif x == rule['empty']:
+                        free = True
+            return group, free
+
+        def place(b, i, v):
+            nb = b[:]
+            nb[i] = v
+            if rule is None or b[i] != rule['empty']:
+                return nb
+            removed = set()
+            for j in nbrs[i]:
+                if nb[j] in cleared and nb[j] != v and j not in removed:
+                    group, free = group_at(nb, j)
+                    if not free:
+                        removed |= group
+            for j in removed:
+                nb[j] = rule['empty']
+            if not removed and rule['void'] > 0 and not group_at(nb, i)[1]:
+                return None
+            return nb
+
+        def tally(b, measure):
+            out = sum(side[x] for x in b)
+            if measure == 'area':
+                seen = set()
+                for i, x in enumerate(b):
+                    if not empty[x] or i in seen:
+                        continue
+                    region, stack, border = {i}, [i], set()
+                    while stack:
+                        for j in nbrs[stack.pop()]:
+                            y = b[j]
+                            if empty[y]:
+                                if j not in region:
+                                    region.add(j)
+                                    stack.append(j)
+                            elif side[y]:
+                                border.add(side[y])
+                    seen |= region
+                    if len(border) == 1:
+                        out += len(region) * border.pop()
+            return out
+
+        players = len(placements)
+        t = tally(b, measure)
+        for _ in range(3 * len(b)):
+            if passes >= players:
+                break
+            table = placements[player]
+            cells = [i for i, x in enumerate(b) if x in table]
+            self.rng.shuffle(cells)
+            moved = False
+            for i in cells:
+                nb = place(b, i, table[b[i]])
+                if nb is None:
+                    continue
+                nt = tally(nb, measure)
+                if nt == t:
+                    continue
+                b, t, moved = nb, nt, True
+                break
+            passes = 0 if moved else passes + 1
+            player = (player + 1) % players
+        won = [tally(b, m) > 0 for m in measures]
+        return 1.0 if all(won) else 0.0 if not any(won) else 0.5
+
+    def _playout(self, g, player, passes, values) -> float:
+        """
+        A simulated game to its end (a round of passes): each player makes a random move among those that
+        change the count (a move that leaves it as it is, such as filling the player's own territory, is not
+        made), or passes if it has none. The agent's reward: 1 won, 0 lost, 0.5 if the count goals disagree.
+        """
+        placements = self._placements()
+        if placements is not None:
+            return self._fast_playout(g, player, passes, placements)
+        players = 1 + len(self.others)
+        movers = [self._playout_cells(i) for i in range(players)]
+        measure = 'area' if 'area' in self.count_goals else next(iter(self.count_goals))
+        tally = self._tally(g, measure, values)
+        for _ in range(3 * g.size):
+            if passes >= players:
+                break
+            vals, after = movers[player]
+            cells = [(int(r), int(c)) for r, c in np.argwhere(np.isin(g, vals))] if vals else []
+            self.rng.shuffle(cells)
+            moved = False
+            for p in cells:
+                nxt = after(g, p)
+                if nxt is None or np.array_equal(nxt, g):
+                    continue
+                t = self._tally(nxt, measure, values)
+                if t == tally:
+                    continue
+                g, tally, moved = nxt, t, True
+                break
+            passes = 0 if moved else passes + 1
+            player = (player + 1) % players
+        return (self._count_verdict(g) + 1) / 2
+
+    def _mcts(self, grid, actions):
+        """
+        The agent's move by a search tree grown by simulated games (UCT): from each position reached, the
+        players' moves as the models predict them, passes included; a round of passes ends the game and is
+        scored by the count goals; below the tree, _playout. The move whose subtree was visited most.
+        """
+        players = 1 + len(self.others)
+        values = self._count_values()
+        root = (grid.tobytes(), 0, len(self.others) if self._others_passed else 0)
+        nodes = {root: {'grid': grid, 'n': 0, 'children': None}}
+        for _ in range(PLAYOUTS):
+            key, path = root, []
+            while True:
+                node = nodes[key]
+                _, player, passes = key
+                if passes >= players:                       # a round of passes: the end
+                    reward = (self._count_verdict(node['grid']) + 1) / 2
+                    break
+                if node['children'] is None:
+                    node['children'] = []
+                    for label, nxt in self._tree_moves(node['grid'], player, actions):
+                        child = (nxt.tobytes(), (player + 1) % players,
+                                 passes + 1 if np.array_equal(nxt, node['grid']) else 0)
+                        nodes.setdefault(child, {'grid': nxt, 'n': 0, 'children': None})
+                        node['children'].append([label, child, 0, 0.0])
+                    if not node['children']:
+                        reward = 0.5
+                        break
+                fresh = [c for c in node['children'] if c[2] == 0]
+                if fresh:
+                    c = self.rng.choice(fresh)
+                    path.append(c)
+                    _, nplayer, npasses = c[1]
+                    reward = (self._count_verdict(nodes[c[1]]['grid']) + 1) / 2 if npasses >= players else \
+                        self._playout(nodes[c[1]]['grid'], nplayer, npasses, values)
+                    break
+                total = sum(c[2] for c in node['children'])
+                sign = 1.0 if player == 0 else -1.0
+                c = max(node['children'], key=lambda c: (0.5 + sign * (c[3] / c[2] - 0.5))
+                        + UCT_C * np.sqrt(np.log(total) / c[2]))
+                path.append(c)
+                key = c[1]
+            nodes[root]['n'] += 1
+            for c in path:
+                c[2] += 1
+                c[3] += reward
+        children = nodes[root]['children'] or []
+        self.last_tree = children                   # [move, child key, visits, reward sum] (for inspection)
+        if not children:
+            return self.rng.choice(self._actions(grid, actions))
+        best = max(c[2] for c in children)
+        return self.rng.choice([c[0] for c in children if c[2] == best])
+
     # ------------------------------------------------------------ drift
     def _settle(self, grid, agent, action):
         """The agent's action followed by the drift: (grid, agent, locked) or None if not known"""
@@ -2121,6 +2394,10 @@ class ObjectAgent:
         if self._others_known():
             # explore what is not known first (a value not clicked yet), then play the minimax move
             unknown = [a for a in self._actions(grid, actions) if self.predict(grid, self.agent, a) is None]
+            if self.playout_search and self._count_known() and not unknown:
+                # a game decided by a count when every player has passed: simulated games to its end
+                self.exploring = False
+                return [self._mcts(grid, actions)]
             value, best = self._search(grid, actions)
             if best and (value != 0 or not unknown or self.line_goals is not None):
                 self.exploring = False
