@@ -77,14 +77,14 @@ the player.
   repeat an earlier position of the game (ko) is not allowed (nothing
   happens), as are moves that leave their own group without a liberty
   and capture nothing. The game ends when both players pass in a row, or
-  after MAX_PLIES moves, and is scored by area: each player's stones and
+  after PLIES_PER_POINT moves per point, and is scored by area: each player's stones and
   the empty regions that only its stones border; more wins (WIN), fewer
   loses, equal is a draw (both GAME_OVER). The opponent never fills an
   empty point whose neighbours are all its own stones (an eye); it passes
   when it has no other move, or when the player has just passed and it is
   not behind. 'random' plays any other allowed move, 'greedy' captures if
   it can, else gives a group in atari a second liberty, else random.
-  Games: 'go' (5 x 5, random) and 'go-greedy'. Opponent 'gnugo<level>':
+  Games: 'go' (5 x 5, random) and 'go-greedy', 'go9' and 'go9-greedy' (9 x 9). Opponent 'gnugo<level>':
   GNU Go (an established Go program, run through its text protocol GTP;
   `gnugo` must be installed) at that level (0-10), told every move of the
   game and asked for its own, with area scoring, komi 0, the same ko
@@ -754,7 +754,7 @@ class CaptureGo(ARCBaseGame):
 
 
 class FullGo(CaptureGo):
-    MAX_PLIES = 60
+    PLIES_PER_POINT = 2.4                       # the game ends after this many moves per point (60 on 5 x 5)
 
     def __init__(self, seed: int = 0, n: int = 5, opponent: str = 'random'):
         self.history: set = set()
@@ -909,7 +909,7 @@ class FullGo(CaptureGo):
         self.plies += 1
         if not passed:
             self.history.add(b.tobytes())
-        if self.passes >= 2 or self.plies >= self.MAX_PLIES:
+        if self.passes >= 2 or self.plies >= round(self.PLIES_PER_POINT * self.n * self.n):
             self._end(b)
             return True
         return False
@@ -964,10 +964,13 @@ GAMES = {'lights': LightsOut, 'clear': ClearRed, 'tictactoe': TicTacToe, 'tetris
          'capture-go': CaptureGo, 'capture-go-greedy': lambda seed=0: CaptureGo(seed, opponent='greedy'),
          'go': FullGo, 'go-greedy': lambda seed=0: FullGo(seed, opponent='greedy'),
          'go-gnugo': lambda seed=0: FullGo(seed, opponent='gnugo10'),
-         'go-gnugo1': lambda seed=0: FullGo(seed, opponent='gnugo1')}
+         'go-gnugo1': lambda seed=0: FullGo(seed, opponent='gnugo1'),
+         'go9': lambda seed=0: FullGo(seed, n=9), 'go9-greedy': lambda seed=0: FullGo(seed, n=9, opponent='greedy'),
+         'go9-gnugo': lambda seed=0: FullGo(seed, n=9, opponent='gnugo10'),
+         'go9-gnugo1': lambda seed=0: FullGo(seed, n=9, opponent='gnugo1')}
 BOARD_GAMES = ('connect4', 'connect4-block', 'gomoku', 'gomoku-block', 'tictactoe-block', 'tictactoe-random',
                'capture-go', 'capture-go-greedy', 'go', 'go-greedy',
-               'go-gnugo', 'go-gnugo1')
+               'go-gnugo', 'go-gnugo1', 'go9', 'go9-greedy', 'go9-gnugo', 'go9-gnugo1')
 
 
 class _LocalEnv:
