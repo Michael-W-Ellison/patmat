@@ -535,6 +535,17 @@ class TestFullGo(unittest.TestCase):
         b[0, :], b[1, :2], b[2, :] = MINE, MINE, THEIRS
         self.assertEqual((g.area(b, MINE), g.area(b, THEIRS)), (7, 15))   # (the region between borders both)
 
+    def test_any_board_size_by_name(self):
+        from arc3_games import BOARD_GAMES, GAMES
+        for name, n, opponent in (('go7', 7, 'random'), ('go13-gnugo1', 13, 'gnugo1'), ('go11-greedy', 11, 'greedy'),
+                                  ('go9-gnugo', 9, 'gnugo10')):
+            self.assertIn(name, GAMES)
+            self.assertIn(name, BOARD_GAMES)
+            g = GAMES[name](seed=0)
+            self.assertEqual((g.n, g.opponent), (n, opponent))
+        for name in ('go20', 'go9-greedy3', 'go1'):
+            self.assertNotIn(name, GAMES)
+
     def test_two_passes_end_the_game(self):
         from arcengine import GameAction
         from arc3_games import GAMES, local_env

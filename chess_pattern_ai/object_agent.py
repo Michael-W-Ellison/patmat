@@ -210,6 +210,7 @@ have been a blocked move: see _maybe_blocked.
 """
 
 import random
+import time
 from collections import Counter, deque
 from typing import Dict, FrozenSet, List, Optional, Tuple
 
@@ -229,7 +230,8 @@ MAX_DEPTH = 5
 DISCOUNT = 0.9
 SEARCH_NODES = 3000         # positions searched per depth of the iterative deepening
 COUNT_MEASURES = ('cells', 'area')     # see ObjectAgent._tally
-PLAYOUTS = 3000             # simulated games per move of the playout search (_mcts)
+PLAYOUTS_PER_MOVE = 120     # simulated games per move the agent can make, per search of the playout search (_mcts)
+SEARCH_SECONDS = 30.0       # ... but no longer than this per search
 UCT_C = 0.7                 # exploration constant of its tree
 PATTERN_BETA = 6.0          # how strongly simulated games prefer moves of patterns that won (_pattern_weight)
 PATTERN_BATCH = 8           # simulated games order cells by pattern within batches of this many random cells
@@ -794,7 +796,8 @@ class ObjectAgent:
             return agent
         return None
 
-    def _click_actions(self, grid) -> List[tuple]:
+    def _click_actions(self, grid, limit: bool = True) -> List[tuple]:
+        """The clicks worth trying (at most MAX_CLICKS if limit)"""
         out = []
         for v in sorted(set(np.unique(grid).tolist())):
             cells = [(int(r), int(c)) for r, c in np.argwhere(grid == v)]
@@ -818,11 +821,11 @@ class ObjectAgent:
                     if q is not None and q not in targets:
                         targets.add(q)
                         out.append(p)
-        return [('click',) + p for p in out[:MAX_CLICKS]]
+        return [('click',) + p for p in (out[:MAX_CLICKS] if limit else out)]
 
-    def _actions(self, grid, actions) -> List:
+    def _actions(self, grid, actions, limit: bool = True) -> List:
         moves = [a for a in actions if a != CLICK]
-        return moves + (self._click_actions(grid) if CLICK in actions else [])
+        return moves + (self._click_actions(grid, limit) if CLICK in actions else [])
 
     def _xor_plan(self, grid, v) -> Optional[List[tuple]]:
         """Clicks that remove value v when every value present toggles the same offsets between two values"""
@@ -2184,7 +2187,7 @@ class ObjectAgent:
         and its pass (label None for the other players') if it is known to pass"""
         out, seen = [], set()
         if player == 0:
-            for a in self._actions(g, actions):
+            for a in self._actions(g, actions, limit=False):        # (every cell, whatever the board's size)
                 nxt = self.predict(g, None, a)
                 if nxt is None or nxt[0].shape != g.shape or np.array_equal(nxt[0], g) or nxt[0].tobytes() in seen:
                     continue
@@ -2401,9 +2404,10 @@ class ObjectAgent:
 
     def _mcts(self, grid, actions):
         """
-        The agent's move by a search tree grown by simulated games (UCT): from each position reached, the
-        players' moves as the models predict them, passes included; a round of passes ends the game and is
-        scored by the count goals; below the tree, _playout. The move whose subtree was visited most.
+        The agent's move by a search tree grown by simulated games (UCT; PLAYOUTS_PER_MOVE per move the agent can
+        make, within SEARCH_SECONDS): from each position reached, the players' moves as the models predict them,
+        passes included; a round of passes ends the game and is scored by the count goals; below the tree,
+        _playout. The move whose subtree was visited most.
         """
         players = 1 + len(self.others)
         values = self._count_values()
@@ -2425,7 +2429,13 @@ class ObjectAgent:
             return history_cells | {tuple(as_list(k[0])) for k in on_path} if repeat else None
         root = (grid.tobytes(), 0, len(self.others) if self._others_passed else 0)
         nodes = {root: {'grid': grid, 'n': 0, 'children': None}}
-        for _ in range(PLAYOUTS):
+        # the budget: PLAYOUTS_PER_MOVE simulated games per move the agent can make here (so a larger board, with
+        # more moves, is searched as thoroughly per move), within SEARCH_SECONDS
+        deadline, done, budget = time.time() + SEARCH_SECONDS, 0, None
+        while budget is None or (done < budget and time.time() < deadline):
+            if budget is None and nodes[root]['children'] is not None:
+                budget = PLAYOUTS_PER_MOVE * max(1, len(nodes[root]['children']))
+            done += 1
             key, path, on_path = root, [], {root}
             while True:
                 node = nodes[key]

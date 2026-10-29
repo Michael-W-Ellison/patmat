@@ -84,7 +84,8 @@ the player.
   when it has no other move, or when the player has just passed and it is
   not behind. 'random' plays any other allowed move, 'greedy' captures if
   it can, else gives a group in atari a second liberty, else random.
-  Games: 'go' (5 x 5, random) and 'go-greedy', 'go9' and 'go9-greedy' (9 x 9). Opponent 'gnugo<level>':
+  Games: 'go' (5 x 5, random) and 'go-greedy'; any size n by name: 'go<n>', 'go<n>-greedy',
+  'go<n>-gnugo', 'go<n>-gnugo<level>' (such as 'go9', 'go13-gnugo1'). Opponent 'gnugo<level>':
   GNU Go (an established Go program, run through its text protocol GTP;
   `gnugo` must be installed) at that level (0-10), told every move of the
   game and asked for its own, with area scoring, komi 0, the same ko
@@ -100,6 +101,7 @@ interface of the ARC-AGI toolkit's environment wrappers.
 """
 
 import random
+import re
 import shutil
 import subprocess
 
@@ -964,13 +966,46 @@ GAMES = {'lights': LightsOut, 'clear': ClearRed, 'tictactoe': TicTacToe, 'tetris
          'capture-go': CaptureGo, 'capture-go-greedy': lambda seed=0: CaptureGo(seed, opponent='greedy'),
          'go': FullGo, 'go-greedy': lambda seed=0: FullGo(seed, opponent='greedy'),
          'go-gnugo': lambda seed=0: FullGo(seed, opponent='gnugo10'),
-         'go-gnugo1': lambda seed=0: FullGo(seed, opponent='gnugo1'),
-         'go9': lambda seed=0: FullGo(seed, n=9), 'go9-greedy': lambda seed=0: FullGo(seed, n=9, opponent='greedy'),
-         'go9-gnugo': lambda seed=0: FullGo(seed, n=9, opponent='gnugo10'),
-         'go9-gnugo1': lambda seed=0: FullGo(seed, n=9, opponent='gnugo1')}
-BOARD_GAMES = ('connect4', 'connect4-block', 'gomoku', 'gomoku-block', 'tictactoe-block', 'tictactoe-random',
-               'capture-go', 'capture-go-greedy', 'go', 'go-greedy',
-               'go-gnugo', 'go-gnugo1', 'go9', 'go9-greedy', 'go9-gnugo', 'go9-gnugo1')
+         'go-gnugo1': lambda seed=0: FullGo(seed, opponent='gnugo1')}
+
+
+def _sized_go(name: str):
+    """
+    Full Go on a board of any size, by name: 'go<n>' (n x n, 2 <= n <= 19, the random opponent),
+    'go<n>-greedy', 'go<n>-gnugo' (GNU Go, level 10) and 'go<n>-gnugo<level>'; None for other names
+    """
+    m = re.fullmatch(r'go(\d+)(?:-(greedy|gnugo)(\d*))?', name)
+    if m is None or not 2 <= int(m.group(1)) <= 19 or (m.group(2) == 'greedy' and m.group(3)):
+        return None
+    n, kind, level = int(m.group(1)), m.group(2), m.group(3)
+    opponent = 'random' if kind is None else 'greedy' if kind == 'greedy' else 'gnugo' + (level or '10')
+
+    def make(seed: int = 0):
+        return FullGo(seed, n=n, opponent=opponent)
+    return make
+
+
+class _Games(dict):
+    """GAMES: the games listed, and full Go of any board size by name (_sized_go)"""
+    def __missing__(self, name):
+        make = _sized_go(name)
+        if make is None:
+            raise KeyError(name)
+        return make
+
+    def __contains__(self, name):
+        return dict.__contains__(self, name) or _sized_go(name) is not None
+
+
+class _Names(tuple):
+    """BOARD_GAMES: the names listed, and full Go of any board size"""
+    def __contains__(self, name):
+        return tuple.__contains__(self, name) or _sized_go(name) is not None
+
+
+GAMES = _Games(GAMES)
+BOARD_GAMES = _Names(('connect4', 'connect4-block', 'gomoku', 'gomoku-block', 'tictactoe-block', 'tictactoe-random',
+                      'capture-go', 'capture-go-greedy', 'go', 'go-greedy', 'go-gnugo', 'go-gnugo1'))
 
 
 class _LocalEnv:
