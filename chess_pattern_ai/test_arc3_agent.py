@@ -493,5 +493,29 @@ class TestCaptureGo(unittest.TestCase):
         self.assertTrue(results & {'win', 'loss'})
 
 
+    def test_group_effects_and_removal_goal(self):
+        def board(stones):
+            g = np.full((7, 7), 5)
+            g[1:-1, 1:-1] = 0
+            for p, v in stones.items():
+                g[p] = v
+            return g
+        agent = ObjectAgent(random.Random(0))
+        # a placement that removes nothing, then one that leaves a stone of 1 touching no empty cell: removed
+        agent.observe(board({}), ('click', 3, 3), board({(3, 3): 2}))
+        agent.observe(board({(1, 1): 1, (1, 2): 2}), ('click', 2, 1), board({(1, 2): 2, (2, 1): 2}))
+        self.assertEqual(agent.group_rule['empty'], 0)
+        self.assertEqual(agent.group_rule['cleared'], {1})
+        self.assertIn(agent.click_models[0].kind(), ('map', 'offsets'))   # (it learned the placement alone)
+        # a capture predicted elsewhere: the group of two 1s in the other corner
+        g = board({(5, 4): 1, (5, 5): 1, (4, 4): 2, (4, 5): 2})
+        after, _ = agent._click(g, None, (5, 3))
+        self.assertTrue((after == board({(4, 4): 2, (4, 5): 2, (5, 3): 2})).all())
+        # a win that removed cells of 1 makes removing cells of 1 the goal
+        agent.level_won(g, ('click', 5, 3), frames=[after])
+        self.assertEqual(agent.removal_goals, {1})
+        self.assertTrue(agent.wins_with(g, None, ('click', 5, 3), agent._click(g, None, (5, 3))))
+
+
 if __name__ == '__main__':
     unittest.main()

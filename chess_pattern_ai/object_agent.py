@@ -47,6 +47,23 @@ values. What is learned:
   rest of the level; transitions seen are remembered exactly, actions that never change anything are no-ops, and
   moves that lost the game are not planned again.
 
+Group effects: a change of several cells is read, where it can be, as one
+cell placed (e to w) and whole groups removed - the groups (4-connected
+cells of one value) of other values than w that the placement left
+touching no cell of e, every such group and nothing else (_split_groups).
+The click model then learns from the placement alone, and a group rule
+(the values whose groups are removed) is kept and applied after every
+predicted placement, the agent's and the other players'; while no
+placement has contradicted it (left such a group in place). A click that
+changes nothing on a value whose clicks have changed things is blocked
+(as a move into a wall), and when its placement would have left its own
+group touching no cell of e, removing nothing, such placements are taken
+to do nothing. Removal goals: a win that removed cells of a
+value that moves do not replace makes removing cells of that value a
+goal, and another player's move that removed some of the agent's cells and
+lost makes it a loss; the search counts them as wins and losses, and
+values positions by how few empty cells the groups of those values touch.
+
 Clicks (ACTION6, actions ('click', row, col)): what clicking a cell does
 is learned per value of the clicked cell, as the first of these that fits
 every click seen on that value:
@@ -185,7 +202,7 @@ from typing import Dict, FrozenSet, List, Optional, Tuple
 import numpy as np
 
 from action_puzzles import solve_xor
-from shapes import GEOMETRY, MIRRORS, TURNS, fits_in, pattern       # (shared with the ARC solver)
+from shapes import GEOMETRY, MIRRORS, TURNS, components, fits_in, pattern     # (shared with the ARC solver)
 
 Pos = Tuple[int, int]
 SIDES = ((-1, 0), (1, 0), (0, -1), (0, 1))
@@ -233,6 +250,7 @@ class ClickModel:
         self.drops = {d: True for d in SIDES}       # drop along d still fits every click seen
         self.drop_values: Optional[Tuple[int, int]] = None    # (value the cell held, value placed)
         self.like: Optional[Pos] = None             # a drop direction expected (a generic or universal pattern)
+        self.blocked = 0                            # clicks that changed nothing, where others did
 
     @staticmethod
     def drop_target(grid, cell, d, empty) -> Optional[Pos]:
@@ -267,8 +285,18 @@ class ClickModel:
                 self.drops[d] = False
 
     def update(self, grid, cell, obj, after):
-        self.seen.append((grid, cell, obj, after))
         changed = {(int(r), int(c)) for r, c in np.argwhere(grid != after)}
+        # a click that changes nothing, where clicks on this value have changed things, was blocked (as a move
+        # into a wall is): it says nothing about what a click does; earlier clicks that all changed nothing
+        # were blocked too once one changes something
+        if not changed and self.seen and not self.ok['none']:
+            self.blocked += 1
+            return
+        if changed and self.seen and self.ok['none']:
+            blocked, like = self.blocked + len(self.seen), self.like
+            self.__init__()
+            self.blocked, self.like = blocked, like
+        self.seen.append((grid, cell, obj, after))
         self._update_drop(grid, cell, changed, after)
         if changed:
             self.ok['none'] = False
@@ -396,6 +424,9 @@ class ObjectAgent:
         self.clicks = True
         self.click_models: Dict[int, ClickModel] = {}
         self.absent_goals: set = set()              # values whose removal won a level
+        self.removal_goals: set = set()             # values some of whose cells were removed when a level was won
+        self.removal_losses: set = set()            # values some of whose cells another player's move removed, losing
+        self.group_rule = {'empty': None, 'cleared': set(), 'void': 0, 'counter': 0}   # see _split_groups
         self.absent_rejected: set = set()           # values removed without winning
         self.trying: Optional[int] = None           # the value a plan is removing to test it as the goal
         self.others: List[Dict[int, ClickModel]] = []   # per other player (later frames): its move models
@@ -581,11 +612,91 @@ class ObjectAgent:
                     queue.append(q)
         return frozenset(seen)
 
+    # ------------------------------------------------------ group effects
+    @staticmethod
+    def _bare_groups(grid, values, empty) -> set:
+        """Cells of the groups (4-connected cells of one value) of the given values that touch no cell of `empty`"""
+        out = set()
+        for v in values:
+            for g in components((grid == v).astype(int), 0):
+                if not any(_inside(grid, q) and grid[q] == empty
+                           for p in g for q in ((p[0] - 1, p[1]), (p[0] + 1, p[1]), (p[0], p[1] - 1), (p[0], p[1] + 1))):
+                    out |= g
+        return out
+
+    def _split_groups(self, before, after, cell=None):
+        """
+        A change of several cells read as one cell placed (e to w) and whole groups removed (back to e): the
+        groups, of other values than w, that the placed cell left touching no cell of e - every such group,
+        and nothing else. (placed cell, the grid with only the placement, values removed, e) or None.
+        """
+        changed = [(int(r), int(c)) for r, c in np.argwhere(before != after)]
+        if len(changed) < 2:
+            return None
+        order = sorted(changed, key=lambda p: p != cell)
+        for q in order:
+            e, w = int(before[q]), int(after[q])
+            rest = [p for p in changed if p != q]
+            if any(int(after[p]) != e or int(before[p]) in (e, w) for p in rest):
+                continue
+            mid = before.copy()
+            mid[q] = w
+            others = set(np.unique(mid).tolist()) - {e, w}
+            if set(rest) == self._bare_groups(mid, others, e):
+                return q, mid, {int(before[p]) for p in rest}, e
+        return None
+
+    def _group_rule_on(self) -> bool:
+        r = self.group_rule
+        return r['empty'] is not None and bool(r['cleared']) and r['counter'] == 0
+
+    def _learn_groups(self, before, after, cell):
+        """
+        The grid the click's own model should learn from: the placement only, when the change is one placed
+        cell and groups removed (the group rule learns that); a placement that removes nothing must leave no
+        group of a value the rule clears touching no cell of e (else the rule is contradicted)
+        """
+        split = self._split_groups(before, after, cell)
+        r = self.group_rule
+        if split is not None:
+            _, mid, removed, e = split
+            if r['empty'] in (None, e):
+                r['empty'] = e
+                r['cleared'] |= removed
+                return mid
+            return after
+        changed = [(int(x), int(y)) for x, y in np.argwhere(before != after)]
+        if len(changed) == 1 and self._group_rule_on() and int(before[changed[0]]) == r['empty']:
+            w = int(after[changed[0]])
+            if self._bare_groups(after, r['cleared'] - {w}, r['empty']):
+                r['counter'] += 1               # a group was left touching no empty cell, and stayed
+        return after
+
+    def _with_groups(self, grid, after):
+        """The groups the learned rule removes after a placement (or no change, if it would be void)"""
+        if after is None or not self._group_rule_on():
+            return after
+        changed = [(int(x), int(y)) for x, y in np.argwhere(grid != after)]
+        if len(changed) != 1:
+            return after
+        q = changed[0]
+        r = self.group_rule
+        if int(grid[q]) != r['empty']:
+            return after
+        w = int(after[q])
+        out = after.copy()
+        removed = self._bare_groups(after, r['cleared'] - {w}, r['empty'])
+        for p in removed:
+            out[p] = r['empty']
+        if not removed and r['void'] > 0 and q in self._bare_groups(out, {w}, r['empty']):
+            return grid                         # (a placement that leaves its own group bare does nothing)
+        return out
+
     def _click(self, grid, agent, cell):
         model = self.click_models.get(int(grid[cell]))
         if model is None:
             return None
-        after = model.predict(grid, cell, self._clicked(grid, cell))
+        after = self._with_groups(grid, model.predict(grid, cell, self._clicked(grid, cell)))
         if after is None:
             return None
         return after, self._agent_after(grid, agent, after)
@@ -775,8 +886,20 @@ class ObjectAgent:
             if self.bg is None:
                 vals, counts = np.unique(before, return_counts=True)
                 self.bg = int(vals[np.argmax(counts)])
-            self.click_models.setdefault(int(before[cell]), ClickModel()).update(
-                before, cell, self._clicked(before, cell), after)
+            model = self.click_models.setdefault(int(before[cell]), ClickModel())
+            primary = self._learn_groups(before, after, cell)
+            void = False
+            if np.array_equal(before, after) and self._group_rule_on() and int(before[cell]) == self.group_rule['empty']:
+                placed = model.predict(before, cell, self._clicked(before, cell))
+                if placed is not None and not np.array_equal(placed, before):
+                    q = tuple(np.argwhere(placed != before)[0])
+                    w = int(placed[q])
+                    if not self._bare_groups(placed, self.group_rule['cleared'] - {w}, self.group_rule['empty']) \
+                            and q in self._bare_groups(placed, {w}, self.group_rule['empty']):
+                        self.group_rule['void'] += 1    # a placement that would leave its group bare: void
+                        void = True
+            if not void:
+                model.update(before, cell, self._clicked(before, cell), primary)
             agent_after = self._agent_after(before, self.agent, after)
             self.outcomes[(state, action)] = (after, agent_after)
             self.outcomes_by_grid[(before.shape, before.tobytes(), action)] = (after, agent_after)
@@ -976,7 +1099,8 @@ class ObjectAgent:
 
     def _goal_trials(self, grid) -> set:
         """Values to try as "no cell holds v" goals: only while no goal is known and clicks change something"""
-        if self.win_contacts or self.shape_goal or self.shape_contact or self.absent_goals or self.line_goals:
+        if self.win_contacts or self.shape_goal or self.shape_contact or self.absent_goals or self.line_goals \
+                or self.removal_goals:
             return set()
         if self.drift:
             return set()
@@ -1065,9 +1189,27 @@ class ObjectAgent:
                             self.prior_lines[self._prior_hyps[h]]['falsified'] = True
             if self.absent_goals and not lost:
                 self.absent_goals = {v for v in self.absent_goals if not ((prev == v).any() and not (cur == v).any())}
+            # cells of a value removed without a win (a loss) is evidence against removal goals (losses)
+            if self.removal_goals and not lost:
+                self.removal_goals = {v for v in self.removal_goals if not self._reduced(prev, cur, {v})}
+            if self.removal_losses and not lost:
+                self.removal_losses = {v for v in self.removal_losses if not self._reduced(prev, cur, {v})}
+
+    @staticmethod
+    def _reduced(before, after, values) -> bool:
+        """Whether the transition removed cells of any of the values"""
+        return after is not None and before.shape == after.shape and \
+            any(int((after == v).sum()) < int((before == v).sum()) for v in values)
+
+    def _loses(self, grid, after) -> bool:
+        """Whether a transition forms a line that loses or removes cells of a value whose removal lost"""
+        return bool(self.line_losses and self._formed(grid, after, self.line_losses) > 0) or \
+            (bool(self.removal_losses) and self._reduced(grid, after, self.removal_losses))
 
     def wins_with(self, grid, agent, action, nxt) -> bool:
         if self._removes(grid, nxt, self.absent_goals) is not None:
+            return True
+        if self.removal_goals and nxt is not None and self._reduced(grid, nxt[0], self.removal_goals):
             return True
         if self.line_goals and nxt is not None and self._formed(grid, nxt[0], self.line_goals) > 0:
             return True
@@ -1116,6 +1258,14 @@ class ObjectAgent:
             nxt = self._click(grid, self.agent, action[1:])
             if nxt is not None:
                 self.absent_goals |= {v for v in np.unique(grid).tolist() if not (nxt[0] == v).any()}
+            seen = frames[0] if frames and frames[0].shape == grid.shape else None
+            if seen is not None:
+                self._learn_groups(grid, seen, action[1:])     # (the winning move's own effect is seen only here)
+                # cells of a value removed (not a value moves replace when they place a mark): removing cells
+                # of that value wins
+                _, replaced = self._placed(raw=True)
+                self.removal_goals |= {v for v in np.unique(grid).tolist() if v not in replaced and v != self.bg
+                                       and int((seen == v).sum()) < int((grid == v).sum())}
         self.trying = None
         own = frames[0] if frames and frames[0].shape == grid.shape and not np.array_equal(frames[0], grid) \
             else None
@@ -1158,6 +1308,9 @@ class ObjectAgent:
         found = set()
         for prev, cur in self._transitions(grid, frames)[1:]:      # (frames after the agent's own)
             found |= self._line_hypotheses(prev, cur)
+            replaced = self._placed(raw=True)[1]
+            self.removal_losses |= {v for v in np.unique(prev).tolist() if v not in replaced and v != self.bg
+                                    and int((cur == v).sum()) < int((prev == v).sum())}
         self.loss_hits.update(found)
         self.loss_events += bool(found)
         self.line_losses = self._kept(self.loss_hits, self.loss_misses, self.loss_events)
@@ -1233,6 +1386,9 @@ class ObjectAgent:
                                                 pattern was in the level; 'repeated')
             ('shape_goal',)
             ('shape_contact_goal',)             touching an object while having its shape wins
+            ('removal_goal', role)              removing some cells of the role's value wins
+            ('removal_loss', role)              another player removing some of them loses
+            ('group_rule',)                     groups left touching no empty cell after a placement are removed
             ('drift', i, d)                     at frame i the agent moves along d by itself
             ('transform', action, op, offset)   the action turns or mirrors the agent's pattern
             ('drift_weights',)  {mean, std}     the score weights learned for where a piece comes to rest
@@ -1289,6 +1445,12 @@ class ObjectAgent:
             out[('shape_goal',)] = {}
         if self.shape_contact:
             out[('shape_contact_goal',)] = {}
+        for v in self.removal_goals:
+            out[('removal_goal', r(v))] = {}
+        for v in self.removal_losses:
+            out[('removal_loss', r(v))] = {}
+        if self._group_rule_on():
+            out[('group_rule',)] = {'void': self.group_rule['void'] > 0}
         for i, c in self.drift.items():
             d, n = c.most_common(1)[0]
             if d in SIDES and n >= 2:
@@ -1534,7 +1696,8 @@ class ObjectAgent:
              'shape_goal', 'shape_contact', 'seen_patterns', 'click_models', 'absent_goals', 'absent_rejected', 'others',
              'line_goals', 'line_losses', 'line_hits', 'line_misses', 'loss_hits', 'loss_misses',
              'line_events', 'loss_events', 'transforms', 'transform_ops', 'drift', 'agent_patterns',
-             'ce_mean', 'ce_std', 'ce_done', 'ce_generations', 'wins', 'losses', 'shape', 'contact_kinds',
+             'ce_mean', 'ce_std', 'ce_done', 'ce_generations', 'wins', 'losses', 'shape',
+             'removal_goals', 'removal_losses', 'group_rule', 'contact_kinds',
              'contact_rejected', 'directions_rejected')
 
     def export_state(self) -> dict:
@@ -1571,16 +1734,16 @@ class ObjectAgent:
                 obj = self._clicked(grid, p)
                 if kind == 'map':
                     done |= obj
-                g = m.predict(grid, p, obj, narrow=True)
+                g = self._with_groups(grid, m.predict(grid, p, obj, narrow=True))
                 if g is not None and not np.array_equal(g, grid) and g.tobytes() not in seen:
                     seen.add(g.tobytes())
                     out.append(g)
         return out
 
-    def _placed(self, groups=None) -> Tuple[set, set]:
+    def _placed(self, groups=None, raw: bool = False) -> Tuple[set, set]:
         """
         (values moves place, values they replace): from the agent's clicks and the other players' moves
-        (or the groups of click models given)
+        (or the groups of click models given); the values replaced are those no move places, unless raw
         """
         marks, empties = set(), set()
         for models in groups if groups is not None else [self.click_models] + self.others:
@@ -1595,7 +1758,7 @@ class ObjectAgent:
                 elif kind == 'offsets' and m.off_tables.get((0, 0), {}).get(v, v) != v:
                     empties.add(v)
                     marks.add(m.off_tables[(0, 0)][v])
-        return marks, empties - marks
+        return marks, empties if raw else empties - marks
 
     def _closest(self, grid, cells, cell_of=lambda p: p):
         """At most MAX_OPTIONS of the cells: those next to a mark (cells moves have marked), else nearest the centre"""
@@ -1647,6 +1810,15 @@ class ObjectAgent:
                 mine = vals == v
                 open_ = (mine | np.isin(vals, list(empties))).all(axis=1)
                 score += sign * float((4.0 ** mine.sum(axis=1)[open_]).sum()) / 4.0 ** k
+        if self._group_rule_on() and (self.removal_goals or self.removal_losses):
+            # groups the rule removes when they touch no empty cell: the fewer empty cells they touch, the nearer
+            e = self.group_rule['empty']
+            for sign, values in ((1, self.removal_goals), (-1, self.removal_losses)):
+                for v in values:
+                    for g in components((grid == v).astype(int), 0):
+                        free = {q for p in g for q in ((p[0] - 1, p[1]), (p[0] + 1, p[1]), (p[0], p[1] - 1),
+                                                       (p[0], p[1] + 1)) if _inside(grid, q) and grid[q] == e}
+                        score += sign * 4.0 ** -max(len(free) - 1, 0) / 2
         return 0.5 * float(np.tanh(score))
 
     def _search(self, grid, actions):
@@ -1682,7 +1854,7 @@ class ObjectAgent:
         for a, nxt in options:
             if self.wins_with(g, agent, a, nxt):
                 scored.append((1.0, a, nxt, True))
-            elif self.line_losses and self._formed(g, nxt[0], self.line_losses) > 0:
+            elif self._loses(g, nxt[0]):
                 scored.append((-1.0, a, nxt, True))
             else:
                 scored.append((self._eval(nxt[0]), a, nxt, False))
@@ -1709,7 +1881,7 @@ class ObjectAgent:
             return self._theirs(g, agent, i + 1, depth, alpha, beta, actions)
         scored = []
         for m in moves:
-            if self.line_losses and self._formed(g, m, self.line_losses) > 0:
+            if self._loses(g, m):
                 scored.append((-1.0, m, True))
             else:
                 scored.append((self._eval(m), m, False))
@@ -2011,8 +2183,12 @@ class ObjectAgent:
             if not changed:
                 continue
             cell = changed[0]
+            split = self._split_groups(prev, cur)
+            if split is not None:
+                cell = split[0]
+            primary = self._learn_groups(prev, cur, cell)
             self.others[i - 1].setdefault(int(prev[cell]), ClickModel()).update(prev, cell,
-                                                                                self._clicked(prev, cell), cur)
+                                                                                self._clicked(prev, cell), primary)
         self.agent = agent
 
     def _track_base(self, grids):
@@ -2077,6 +2253,8 @@ class ObjectAgent:
                 f'shape goal {self.shape_goal}, start patterns {len(self.start_patterns)}, '
                 f'clicks {({v: m.kind() for v, m in sorted(self.click_models.items())})}, '
                 f'absent goals {sorted(self.absent_goals)}, rejected {sorted(self.absent_rejected)}, '
+                f'removal goals {sorted(self.removal_goals)}, removal losses {sorted(self.removal_losses)}, '
+                f'group rule {self.group_rule if self._group_rule_on() else None}, '
                 f'other players {len(self.others)}, line goals {sorted(self.line_goals or [], key=str)}, '
                 f'line losses {sorted(self.line_losses or [], key=str)}, '
                 f'drift {({i: dict(c) for i, c in self.drift.items()})}, transforms {len(self.transforms)}, '

@@ -23,7 +23,9 @@ play they are an instance of, independent of how it is carried out:
                   player that must take a target's shape, ARC templates
                   stamped or placed around objects)
     removal       cells of a value removed (a level won when no cell holds
-                  a value, ARC objects removed)
+                  a value, or when some of its cells are removed - a capture;
+                  groups removed when they touch no empty cell; ARC objects
+                  removed)
     reach         one object brought to touch another (a level won by
                   touching an object, ARC objects approaching another)
     movement      an object moved step by step in four directions (actions
@@ -139,6 +141,8 @@ def game_elements(facts: Dict[tuple, dict]) -> List[tuple]:
             out.append(('reach', 'shape_contact', {}))
         elif kind == 'absent_goal':
             out.append(('removal', 'absent_goal', {}))
+        elif kind in ('removal_goal', 'removal_loss', 'group_rule'):
+            out.append(('removal', kind, {}))
         elif kind == 'contact_goal':
             out.append(('reach', 'contact_goal', {'kind': key[1]}))
         elif kind == 'direction':
