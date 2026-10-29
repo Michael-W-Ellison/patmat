@@ -2255,12 +2255,15 @@ class ObjectAgent:
         root = (grid.tobytes(), 0, len(self.others) if self._others_passed else 0)
         nodes = {root: {'grid': grid, 'n': 0, 'children': None}}
         for _ in range(PLAYOUTS):
-            key, path = root, []
+            key, path, on_path = root, [], {root}
             while True:
                 node = nodes[key]
                 _, player, passes = key
                 if passes >= players:                       # a round of passes: the end
                     reward = (self._count_verdict(node['grid']) + 1) / 2
+                    break
+                if len(path) > 4 * grid.size:               # (a backstop: the tree is not that deep)
+                    reward = self._playout(node['grid'], player, passes, values)
                     break
                 if node['children'] is None:
                     node['children'] = []
@@ -2286,6 +2289,12 @@ class ObjectAgent:
                         + UCT_C * np.sqrt(np.log(total) / c[2]))
                 path.append(c)
                 key = c[1]
+                if key in on_path:
+                    # a position repeated on the path (positions are shared, so a capture taken back can
+                    # lead round in a cycle): a simulated game from it instead of going round
+                    reward = self._playout(nodes[key]['grid'], key[1], key[2], values)
+                    break
+                on_path.add(key)
             nodes[root]['n'] += 1
             for c in path:
                 c[2] += 1
