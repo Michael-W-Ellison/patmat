@@ -84,7 +84,14 @@ the player.
   when it has no other move, or when the player has just passed and it is
   not behind. 'random' plays any other allowed move, 'greedy' captures if
   it can, else gives a group in atari a second liberty, else random.
-  Games: 'go' (5 x 5, random) and 'go-greedy'.
+  Games: 'go' (5 x 5, random) and 'go-greedy'. Opponent 'gnugo<level>':
+  GNU Go (an established Go program, run through its text protocol GTP;
+  `gnugo` must be installed) at that level (0-10), told every move of the
+  game and asked for its own, with area scoring, komi 0, the same ko
+  rule (positional superko) and dead stones captured before it passes
+  (every stone left on the board counts here); a move it chooses that these rules do not
+  allow, or a resignation, is taken as a pass. Games 'go-gnugo' (level 10)
+  and 'go-gnugo1' (level 1).
 - Tetris variants: 'tetris-small' (a 6 x 12 well), 'tetris-wide' (10 x 16,
   the pieces in other colours).
 
@@ -93,6 +100,8 @@ interface of the ARC-AGI toolkit's environment wrappers.
 """
 
 import random
+import shutil
+import subprocess
 
 import numpy as np
 from arcengine import ARCBaseGame, ActionInput, BlockingMode, Camera, GameAction, Level, Sprite
@@ -751,8 +760,65 @@ class FullGo(CaptureGo):
         self.history: set = set()
         self.passes = 0
         self.plies = 0
+        self.moves: list = []                   # (colour, (row, col) or None for a pass), in order
+        self._gtp = None
+        self.gnugo_refused = 0                  # GNU Go moves these rules did not allow (taken as passes)
         super().__init__(seed, n, opponent)
         self._available_actions = [5, 6]
+
+    # ---------------------------------------------------------- GNU Go
+    def _vertex(self, p) -> str:
+        return 'pass' if p is None else 'ABCDEFGHJKLMNOPQRST'[p[1]] + str(self.n - p[0])
+
+    def _point(self, v: str):
+        v = v.strip().upper()
+        if v in ('PASS', 'RESIGN'):
+            return None
+        return self.n - int(v[1:]), 'ABCDEFGHJKLMNOPQRST'.index(v[0])
+
+    def _ask(self, command: str) -> str:
+        self._gtp.stdin.write(command + '\n')
+        self._gtp.stdin.flush()
+        lines = []
+        while True:
+            line = self._gtp.stdout.readline()
+            if not line:
+                raise RuntimeError('GNU Go stopped')
+            if line.strip() == '' and lines:
+                break
+            if line.strip():
+                lines.append(line.strip())
+        if not lines[0].startswith('='):
+            raise RuntimeError(f'GNU Go: {command}: {lines}')
+        return lines[0][1:].strip()
+
+    def _gnugo_move(self, b):
+        if self._gtp is None:
+            exe = shutil.which('gnugo') or '/usr/games/gnugo'
+            self._gtp = subprocess.Popen([exe, '--mode', 'gtp', '--level', self.opponent[5:] or '10',
+                                          '--chinese-rules', '--positional-superko', '--capture-all-dead', '--komi', '0'],
+                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        mine = 'black' if self.agent_first else 'white'
+        theirs = 'white' if self.agent_first else 'black'
+        self._ask(f'boardsize {self.n}')
+        self._ask('clear_board')
+        self._ask('komi 0')
+        for colour, p in self.moves:
+            self._ask(f'play {mine if colour == MINE else theirs} {self._vertex(p)}')
+        p = self._point(self._ask(f'genmove {theirs}'))
+        if p is not None and p not in self._allowed(b, THEIRS):
+            self.gnugo_refused += 1
+            return None
+        return p
+
+    def __del__(self):
+        if getattr(self, '_gtp', None) is not None:
+            try:
+                self._gtp.stdin.write('quit\n')
+                self._gtp.stdin.flush()
+                self._gtp.wait(timeout=5)
+            except Exception:
+                self._gtp.kill()
 
     def _ko(self, b, p, colour) -> bool:
         """Whether placing at p repeats an earlier position"""
@@ -790,6 +856,8 @@ class FullGo(CaptureGo):
                    for q in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)))
 
     def _opponent_move(self, b):
+        if self.opponent.startswith('gnugo'):
+            return self._gnugo_move(b)
         moves = [p for p in self._allowed(b, THEIRS) if not self._eye(b, p, THEIRS)]
         if not moves or (self.passes == 1 and self.area(b, THEIRS) >= self.area(b, MINE)):
             return None
@@ -810,14 +878,19 @@ class FullGo(CaptureGo):
         self.result = None
         self._reply = False
         self.passes, self.plies = 0, 0
+        self.moves = []
         px = level.get_sprites_by_name('board')[0].pixels
         self.history = {px[1:-1, 1:-1].copy().tobytes()}
         if not self.agent_first:
             sprite = level.get_sprites_by_name('board')[0]
             px = sprite.pixels.copy()
             b = px[1:-1, 1:-1]
-            self._play(b, self._opponent_move(b), THEIRS)
-            self.history.add(b.tobytes())
+            p = self._opponent_move(b)
+            if p is not None:
+                self._play(b, p, THEIRS)
+                self.history.add(b.tobytes())
+            self.moves.append((THEIRS, p))
+            self.passes = int(p is None)
             self.plies = 1
             sprite.pixels = px
 
@@ -829,8 +902,9 @@ class FullGo(CaptureGo):
         else:
             self.lose()
 
-    def _after_ply(self, b, passed: bool) -> bool:
-        """Count the ply; whether the game has ended"""
+    def _after_ply(self, b, passed: bool, colour=None, p=None) -> bool:
+        """Count the ply (colour's move p, None: a pass); whether the game has ended"""
+        self.moves.append((colour, p))
         self.passes = self.passes + 1 if passed else 0
         self.plies += 1
         if not passed:
@@ -850,11 +924,11 @@ class FullGo(CaptureGo):
             if p is not None:
                 self._play(b, p, THEIRS)
                 sprite.pixels = px
-            self._after_ply(b, p is None)
+            self._after_ply(b, p is None, THEIRS, p)
             self.complete_action()
             return
         if self.action.id == GameAction.ACTION5:            # a pass
-            if not self._after_ply(b, True):
+            if not self._after_ply(b, True, MINE):
                 self._reply = True
                 return
         elif self.action.id == GameAction.ACTION6:
@@ -864,7 +938,7 @@ class FullGo(CaptureGo):
                 if 0 <= r < self.n and 0 <= c < self.n and not self._ko(b, (r, c), MINE):
                     if self._play(b, (r, c), MINE) is not None:
                         sprite.pixels = px
-                        if not self._after_ply(b, False):
+                        if not self._after_ply(b, False, MINE, (r, c)):
                             self._reply = True  # the action goes on: one more frame, for the opponent
                             return
         self.complete_action()
@@ -888,9 +962,12 @@ GAMES = {'lights': LightsOut, 'clear': ClearRed, 'tictactoe': TicTacToe, 'tetris
          'exit-shape': ShapeGame,
          'shape-touch': lambda seed=0: ShapeGame(seed, kinds=('shape1', 'shape2', 'shape3'), touch=True),
          'capture-go': CaptureGo, 'capture-go-greedy': lambda seed=0: CaptureGo(seed, opponent='greedy'),
-         'go': FullGo, 'go-greedy': lambda seed=0: FullGo(seed, opponent='greedy')}
+         'go': FullGo, 'go-greedy': lambda seed=0: FullGo(seed, opponent='greedy'),
+         'go-gnugo': lambda seed=0: FullGo(seed, opponent='gnugo10'),
+         'go-gnugo1': lambda seed=0: FullGo(seed, opponent='gnugo1')}
 BOARD_GAMES = ('connect4', 'connect4-block', 'gomoku', 'gomoku-block', 'tictactoe-block', 'tictactoe-random',
-               'capture-go', 'capture-go-greedy', 'go', 'go-greedy')
+               'capture-go', 'capture-go-greedy', 'go', 'go-greedy',
+               'go-gnugo', 'go-gnugo1')
 
 
 class _LocalEnv:
