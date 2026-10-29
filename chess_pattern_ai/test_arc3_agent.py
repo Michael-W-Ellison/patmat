@@ -577,6 +577,34 @@ class TestFullGo(unittest.TestCase):
         value, best = agent._search(ahead, [5, 6])
         self.assertEqual((value, best), (1.0, [5]))
 
+    def test_placement_patterns(self):
+        from shapes import canonical, symmetries
+        def board(stones):
+            g = np.full((7, 7), 5)
+            g[1:-1, 1:-1] = 0
+            for p, v in stones.items():
+                g[p] = v
+            return g
+        p = ((1, 2, 3), (0, -1, 0), (0, 0, 3))
+        self.assertTrue(all(canonical(q) == canonical(p) for q in symmetries(p)))
+        agent = ObjectAgent(random.Random(0))
+        agent.observe(board({}), ('click', 3, 3), board({(3, 3): 2}))
+        agent._learn_frames([board({(3, 3): 2}), board({(3, 3): 2, (1, 1): 1})])
+        # the agent places next to its stone, the opponent in a corner; the agent wins the game
+        before = board({(3, 3): 2, (1, 1): 1})
+        mine = board({(3, 3): 2, (3, 4): 2, (1, 1): 1})
+        theirs = board({(3, 3): 2, (3, 4): 2, (1, 1): 1, (5, 5): 1})
+        agent._record_moves(before, [mine, theirs])
+        self.assertEqual([player for _, player in agent._game_moves], [0, 1])
+        (k_mine, _), (k_theirs, _) = agent._game_moves
+        agent._credit_moves(1.0)
+        self.assertGreater(agent._pattern_value(k_mine), 0.5)        # placed by the winner: pursued
+        self.assertLess(agent._pattern_value(k_theirs), 0.5)         # by the loser: avoided
+        # the same placement turned a quarter: the same pattern
+        self.assertEqual(agent._move_key(board({(3, 3): 2, (1, 1): 1}), (2, 3), agent._roles_for(0)),
+                         agent._move_key(board({(3, 3): 2, (1, 1): 1}), (3, 4), agent._roles_for(0)))
+        self.assertEqual(agent._placed_cell(before, mine, 0, agent._placements()), (3, 4))
+
 
 if __name__ == '__main__':
     unittest.main()

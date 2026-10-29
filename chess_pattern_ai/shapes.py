@@ -19,6 +19,10 @@ Shapes: the representation of objects shared by the game-playing agent
 - images(pattern, operations): the pattern under each operation, as
   (name, pattern) pairs
 - silhouette(pattern), stamp(grid, pattern, top_left), holes(grid, bg)
+- symmetries(pattern), canonical(pattern): a pattern's images under the
+  eight turns and mirrors of the square, and the least of them (the same
+  key for a shape however it is turned or mirrored); the agent keys the
+  neighbourhoods of the cells it places marks on by it
 """
 
 from typing import Dict, FrozenSet, Iterable, List, Optional, Sequence, Tuple
@@ -59,6 +63,21 @@ def images(pat: tuple, operations: Sequence[str] = ()) -> List[Tuple[str, tuple]
             seen.add(img)
             out.append((op, img))
     return out
+
+
+def symmetries(pat: tuple) -> List[tuple]:
+    """The pattern under the eight turns and mirrors of the square (with repeats)"""
+    a = np.array(pat)
+    out = []
+    for b in (a, a.T):
+        for k in range(4):
+            out.append(as_tuple(np.rot90(b, k)))
+    return out
+
+
+def canonical(pat: tuple) -> tuple:
+    """The least of the pattern's images under the turns and mirrors of the square"""
+    return min(symmetries(pat))
 
 
 def silhouette(pat: tuple) -> tuple:

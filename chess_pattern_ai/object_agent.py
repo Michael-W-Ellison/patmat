@@ -216,7 +216,7 @@ from typing import Dict, FrozenSet, List, Optional, Tuple
 import numpy as np
 
 from action_puzzles import solve_xor
-from shapes import GEOMETRY, MIRRORS, TURNS, components, fits_in, pattern     # (shared with the ARC solver)
+from shapes import GEOMETRY, MIRRORS, TURNS, canonical, components, fits_in, pattern     # (shared with the ARC solver)
 
 Pos = Tuple[int, int]
 SIDES = ((-1, 0), (1, 0), (0, -1), (0, 1))
@@ -231,6 +231,10 @@ SEARCH_NODES = 3000         # positions searched per depth of the iterative deep
 COUNT_MEASURES = ('cells', 'area')     # see ObjectAgent._tally
 PLAYOUTS = 3000             # simulated games per move of the playout search (_mcts)
 UCT_C = 0.7                 # exploration constant of its tree
+PATTERN_BETA = 6.0          # how strongly simulated games prefer moves of patterns that won (_pattern_weight)
+PRIOR_VISITS = 10           # the weight, in visits, of a move's pattern value in the playout search's tree
+NEIGHBOURS = ((-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1))
+ROLE_EMPTY, ROLE_OWN, ROLE_OTHER, ROLE_EDGE = 0, 1, 2, 3
 MAX_OPTIONS = 12            # moves considered per player in a position (those near marks, if more)
 LINE_DIRS = ((0, 1), (1, 0), (1, 1), (1, -1))
 ANY = -100                  # line hypotheses over any non-background value
@@ -416,6 +420,7 @@ class ObjectAgent:
     learns_from_losses = True
     uses_frames = True
     playout_search = True               # games decided by a count after a round of passes: _mcts
+    use_patterns = True                 # ... guided by the placement patterns learned (move_patterns)
 
     def __init__(self, rng: Optional[random.Random] = None):
         self.rng = rng or random.Random()
@@ -498,6 +503,9 @@ class ObjectAgent:
         self.count_ends: List[tuple] = []               # (grid, won) of games a round of passes ended
         self.count_goals: Optional[set] = None          # measures m consistent with: won iff m(mine) > m(theirs)
         self._others_passed = False                     # the other players' last frames changed nothing
+        self.move_patterns: Dict[tuple, list] = {}      # placement pattern -> [reward sum, moves] (_move_key)
+        self._game_moves: List[tuple] = []              # (placement pattern, player) of the game being played
+        self._canon: Dict[tuple, tuple] = {}            # 8 neighbour roles -> placement pattern (a cache)
 
     # ------------------------------------------------------------ objects
     def _walls(self) -> set:
@@ -1297,6 +1305,8 @@ class ObjectAgent:
 
     def level_won(self, grid, action, frames=None):
         self._learn_passes(grid, action, frames, ended=True, won=True)
+        self._record_moves(grid, frames)
+        self._credit_moves(1.0)
         self.wins += 1
         self.episode['score'] += 1
         self.hidden_walls = set()
@@ -1363,6 +1373,10 @@ class ObjectAgent:
     def lost(self, grid=None, action=None, frames=None):
         if grid is not None:
             self._learn_passes(grid, action, frames, ended=True, won=False)
+            self._record_moves(grid, frames)
+            # (a game ended by a round of passes with the counts equal is a draw)
+            draw = self._count_known() and all(self._tally(grid, m) == 0 for m in self.count_goals)
+            self._credit_moves(0.5 if draw else 0.0)
         self.losses += 1
         # (a move whose outcome was predicted, as seen, did not lose by what it did: the game was lost for
         # another reason, such as running out of actions, and the move is not avoided later)
@@ -1395,9 +1409,73 @@ class ObjectAgent:
         self._others_passed = False
 
     def new_episode(self):
+        self._game_moves = []
         self._ce_next()
         self.base = None
         self._new_level()
+
+    # ---------------------------------------------------- placement patterns
+    def _roles_for(self, player, side=None, empty=None) -> List[int]:
+        """Each value's role for a player: ROLE_EMPTY (cells moves replace), ROLE_OWN (the player's marks),
+        ROLE_OTHER (other players' marks), ROLE_EDGE (anything else)"""
+        if side is None:
+            side, empty = (x.tolist() for x in self._count_values())
+        own = 1 if player == 0 else -1
+        return [ROLE_EMPTY if empty[v] else ROLE_OWN if side[v] == own else ROLE_OTHER if side[v] else ROLE_EDGE
+                for v in range(len(side))]
+
+    def _key_of(self, around: tuple) -> tuple:
+        """The placement pattern of 8 neighbour roles (in NEIGHBOURS order): the 3 x 3 neighbourhood, the placed
+        cell in the middle, the same however it is turned or mirrored (shapes.canonical)"""
+        key = self._canon.get(around)
+        if key is None:
+            a = around
+            key = canonical(((a[0], a[1], a[2]), (a[3], -1, a[4]), (a[5], a[6], a[7])))
+            self._canon[around] = key
+        return key
+
+    def _move_key(self, grid, cell, roles) -> tuple:
+        h, w = grid.shape
+        return self._key_of(tuple(roles[int(grid[cell[0] + dr, cell[1] + dc])]
+                                  if 0 <= cell[0] + dr < h and 0 <= cell[1] + dc < w else ROLE_EDGE
+                                  for dr, dc in NEIGHBOURS))
+
+    def _placed_cell(self, prev, cur, player, placements) -> Optional[Pos]:
+        """The one cell where the player placed a mark from prev to cur (None if not one)"""
+        if prev.shape != cur.shape or player >= len(placements):
+            return None
+        table = placements[player]
+        cells = [(int(r), int(c)) for r, c in np.argwhere(prev != cur)
+                 if int(prev[r, c]) in table and int(cur[r, c]) == table[int(prev[r, c])]]
+        return cells[0] if len(cells) == 1 else None
+
+    def _record_moves(self, before, frames):
+        """The placements of a step (the agent's, then the other players' in the later frames) with their patterns"""
+        placements = self._placements()
+        if not placements or len(placements) < 2 or not frames:
+            return
+        seq = [before] + list(frames)
+        for player, (prev, cur) in enumerate(zip(seq, seq[1:])):
+            cell = self._placed_cell(prev, cur, player, placements)
+            if cell is not None:
+                self._game_moves.append((self._move_key(prev, cell, self._roles_for(player)), player))
+
+    def _credit_moves(self, outcome: float):
+        """The game ended (outcome for the agent: 1 won, 0 lost, 0.5 drawn): each placement's pattern is credited
+        with the outcome for the player who made it"""
+        for key, player in self._game_moves:
+            stats = self.move_patterns.setdefault(key, [0.0, 0])
+            stats[0] += outcome if player == 0 else 1.0 - outcome
+            stats[1] += 1
+        self._game_moves = []
+
+    def _pattern_value(self, key) -> float:
+        """The share of games won by the players who placed marks in this pattern (smoothed: 0.5 when unseen)"""
+        s, n = self.move_patterns.get(key, (0.0, 0))
+        return (s + 1.0) / (n + 2.0)
+
+    def _pattern_weight(self, key) -> float:
+        return float(np.exp(PATTERN_BETA * (self._pattern_value(key) - 0.5)))
 
     # ------------------------------------------------------- passes and counts
     def _learn_passes(self, before, action, frames, ended=False, won=False):
@@ -1837,7 +1915,7 @@ class ObjectAgent:
              'ce_mean', 'ce_std', 'ce_done', 'ce_generations', 'wins', 'losses', 'shape',
              'removal_goals', 'removal_losses', 'group_rule', 'contact_kinds',
              'contact_rejected', 'directions_rejected', 'pass_actions', 'others_pass', 'round_end', 'count_ends',
-             'count_goals')
+             'count_goals', 'move_patterns')
 
     def export_state(self) -> dict:
         """
@@ -2125,6 +2203,8 @@ class ObjectAgent:
         b = g.ravel().tolist()
         nbrs = [[j for j in (i - w, i + w, i - 1, i + 1)
                  if 0 <= j < h * w and (j // w == i // w or j % w == i % w)] for i in range(h * w)]
+        nbrs8 = [[(i // w + dr) * w + i % w + dc if 0 <= i // w + dr < h and 0 <= i % w + dc < w else -1
+                  for dr, dc in NEIGHBOURS] for i in range(h * w)]
         side, empty = self._count_values()
         side, empty = side.tolist(), empty.tolist()
         rule = self.group_rule if self._group_rule_on() else None
@@ -2188,6 +2268,17 @@ class ObjectAgent:
             return out, owner
 
         players = len(placements)
+        # the roles of the values for each player, and the weight of each neighbourhood seen (patterns learned)
+        roles = [self._roles_for(i, side, empty) for i in range(players)]
+        weights = [{} for _ in range(players)]
+        use_patterns = self.use_patterns and bool(self.move_patterns)
+
+        def weight(i, p):
+            around = tuple(roles[p][b[j]] if j >= 0 else ROLE_EDGE for j in nbrs8[i])
+            wt = weights[p].get(around)
+            if wt is None:
+                wt = weights[p][around] = self._pattern_weight(self._key_of(around))
+            return wt
         t, owner = tally(b, measure)
         for _ in range(3 * len(b)):
             if passes >= players:
@@ -2195,7 +2286,11 @@ class ObjectAgent:
             table = placements[player]
             # (a mark placed in a region only the player's own marks border leaves the count as it is: skipped)
             cells = [i for i, x in enumerate(b) if x in table and owner.get(i) != side[table[x]]]
-            self.rng.shuffle(cells)
+            if use_patterns:
+                # a random order in which cells of patterns that won come early (and those that lost late)
+                cells.sort(key=lambda i: -self.rng.random() ** (1.0 / weight(i, player)))
+            else:
+                self.rng.shuffle(cells)
             moved = False
             for i in cells:
                 nb = place(b, i, table[b[i]])
@@ -2252,6 +2347,14 @@ class ObjectAgent:
         """
         players = 1 + len(self.others)
         values = self._count_values()
+        placements = self._placements()
+        roles = [self._roles_for(i) for i in range(players)]
+
+        def prior(g, nxt, player):
+            """The value of the pattern of the mark a move places (0.5: not a placement, or nothing learned)"""
+            cell = self._placed_cell(g, nxt, player, placements) \
+                if placements and self.use_patterns and self.move_patterns else None
+            return 0.5 if cell is None else self._pattern_value(self._move_key(g, cell, roles[player]))
         root = (grid.tobytes(), 0, len(self.others) if self._others_passed else 0)
         nodes = {root: {'grid': grid, 'n': 0, 'children': None}}
         for _ in range(PLAYOUTS):
@@ -2271,13 +2374,15 @@ class ObjectAgent:
                         child = (nxt.tobytes(), (player + 1) % players,
                                  passes + 1 if np.array_equal(nxt, node['grid']) else 0)
                         nodes.setdefault(child, {'grid': nxt, 'n': 0, 'children': None})
-                        node['children'].append([label, child, 0, 0.0])
+                        node['children'].append([label, child, 0, 0.0, prior(node['grid'], nxt, player)])
                     if not node['children']:
                         reward = 0.5
                         break
                 fresh = [c for c in node['children'] if c[2] == 0]
                 if fresh:
-                    c = self.rng.choice(fresh)
+                    # (the move of the best pattern for the player first)
+                    sign = 1.0 if player == 0 else -1.0
+                    c = max(fresh, key=lambda c: (sign * (c[4] - 0.5), self.rng.random()))
                     path.append(c)
                     _, nplayer, npasses = c[1]
                     reward = (self._count_verdict(nodes[c[1]]['grid']) + 1) / 2 if npasses >= players else \
@@ -2285,7 +2390,9 @@ class ObjectAgent:
                     break
                 total = sum(c[2] for c in node['children'])
                 sign = 1.0 if player == 0 else -1.0
-                c = max(node['children'], key=lambda c: (0.5 + sign * (c[3] / c[2] - 0.5))
+                # (the pattern value counts as PRIOR_VISITS visits of that reward)
+                c = max(node['children'], key=lambda c: (0.5 + sign * ((c[3] + PRIOR_VISITS * c[4]) /
+                                                                     (c[2] + PRIOR_VISITS) - 0.5))
                         + UCT_C * np.sqrt(np.log(total) / c[2]))
                 path.append(c)
                 key = c[1]
@@ -2300,7 +2407,7 @@ class ObjectAgent:
                 c[2] += 1
                 c[3] += reward
         children = nodes[root]['children'] or []
-        self.last_tree = children                   # [move, child key, visits, reward sum] (for inspection)
+        self.last_tree = children       # [move, child key, visits, reward sum, pattern value] (for inspection)
         if not children:
             return self.rng.choice(self._actions(grid, actions))
         best = max(c[2] for c in children)
@@ -2644,6 +2751,7 @@ class ObjectAgent:
                 self.prior_shape = False
         if not lost:
             self._learn_passes(before, action, frames or [after])
+            self._record_moves(before, frames or [after])
         self._track_base([before] + list(frames or [after]))
         self._falsify(before, frames or [after], lost=lost)
         self._contact_falsify(before, action)
