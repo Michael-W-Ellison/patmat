@@ -235,6 +235,7 @@ SEARCH_SECONDS = 30.0       # ... but no longer than this per search
 UCT_C = 0.7                 # exploration constant of its tree
 PATTERN_BETA = 6.0          # how strongly simulated games prefer moves of patterns that won (_pattern_weight)
 PATTERN_BATCH = 8           # simulated games order cells by pattern within batches of this many random cells
+CRIT_WEIGHT = 1.0           # bonus in the playout search for moves on points whose ownership goes with winning
 RAVE_EQUIV = 300            # simulated games at which a move's own results and its shared (RAVE) results weigh equally
 PRIOR_VISITS = 10           # the weight, in visits, of a move's pattern value in the playout search's tree
 NEIGHBOURS = ((-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1))
@@ -425,6 +426,7 @@ class ObjectAgent:
     uses_frames = True
     playout_search = True               # games decided by a count after a round of passes: _mcts
     use_patterns = True                 # ... guided by the placement patterns learned (move_patterns)
+    use_ownership = True                # ... and by who owns each point at the end of games (survival, criticality)
 
     def __init__(self, rng: Optional[random.Random] = None):
         self.rng = rng or random.Random()
@@ -508,7 +510,8 @@ class ObjectAgent:
         self.count_goals: Optional[set] = None          # measures m consistent with: won iff m(mine) > m(theirs)
         self._others_passed = False                     # the other players' last frames changed nothing
         self.move_patterns: Dict[tuple, list] = {}      # placement pattern -> [reward sum, moves] (_move_key)
-        self._game_moves: List[tuple] = []              # (placement pattern, player) of the game being played
+        self._game_moves: List[tuple] = []              # (placement pattern, player, cell) of the game being played
+        self.survival: Dict[tuple, list] = {}           # placement pattern -> [marks still the placer's at the end, marks]
         self._canon: Dict[tuple, tuple] = {}            # 8 neighbour roles -> placement pattern (a cache)
         self.repeat_rule = Counter()                    # clicks predicted to repeat a position: 'refused', 'allowed'
         self._history: set = set()                      # (shape, bytes) of the positions of this level so far
@@ -1339,7 +1342,7 @@ class ObjectAgent:
     def level_won(self, grid, action, frames=None):
         self._learn_passes(grid, action, frames, ended=True, won=True)
         self._record_moves(grid, frames)
-        self._credit_moves(1.0)
+        self._credit_moves(1.0, self._final(grid, frames))
         self.wins += 1
         self.episode['score'] += 1
         self.hidden_walls = set()
@@ -1409,7 +1412,7 @@ class ObjectAgent:
             self._record_moves(grid, frames)
             # (a game ended by a round of passes with the counts equal is a draw)
             draw = self._count_known() and all(self._tally(grid, m) == 0 for m in self.count_goals)
-            self._credit_moves(0.5 if draw else 0.0)
+            self._credit_moves(0.5 if draw else 0.0, self._final(grid, frames))
         self.losses += 1
         # (a move whose outcome was predicted, as seen, did not lose by what it did: the game was lost for
         # another reason, such as running out of actions, and the move is not avoided later)
@@ -1503,24 +1506,66 @@ class ObjectAgent:
         for player, (prev, cur) in enumerate(zip(seq, seq[1:])):
             cell = self._placed_cell(prev, cur, player, placements)
             if cell is not None:
-                self._game_moves.append((self._move_key(prev, cell, self._roles_for(player)), player))
+                self._game_moves.append((self._move_key(prev, cell, self._roles_for(player)), player, cell))
 
-    def _credit_moves(self, outcome: float):
-        """The game ended (outcome for the agent: 1 won, 0 lost, 0.5 drawn): each placement's pattern is credited
-        with the outcome for the player who made it"""
-        for key, player in self._game_moves:
+    @staticmethod
+    def _final(grid, frames):
+        """The last position of a step that ended the game (its last frame of the grid's shape)"""
+        same = [f for f in frames or [] if f.shape == grid.shape]
+        return same[-1] if same else grid
+
+    def _credit_moves(self, outcome: float, final=None):
+        """
+        The game ended (outcome for the agent: 1 won, 0 lost, 0.5 drawn): each placement's pattern is credited
+        with the outcome for the player who made it and, given the final position, with whether its cell was
+        still that player's at the end (its mark or a region only its marks border) or had flipped
+        """
+        owner = self._ownership(final) if final is not None and self._placements() else None
+        for key, player, cell in self._game_moves:
             stats = self.move_patterns.setdefault(key, [0.0, 0])
             stats[0] += outcome if player == 0 else 1.0 - outcome
             stats[1] += 1
+            if owner is not None and owner.shape == final.shape:
+                kept = self.survival.setdefault(key, [0, 0])
+                kept[0] += int(owner[cell] == (1 if player == 0 else -1))
+                kept[1] += 1
         self._game_moves = []
+
+    def _ownership(self, grid) -> np.ndarray:
+        """Who owns each cell: 1 the agent, -1 the other players, 0 neither (a mark is its placer's; a region of
+        cells moves replace is owned by the one side whose marks alone border it)"""
+        side, empty = self._count_values()
+        sides = side[grid].astype(int)
+        out = sides.copy()
+        for region in components(empty[grid].astype(np.int8), 0):
+            border = {int(sides[q]) for p in region for q in ((p[0] - 1, p[1]), (p[0] + 1, p[1]),
+                                                              (p[0], p[1] - 1), (p[0], p[1] + 1))
+                      if _inside(grid, q) and q not in region} - {0}
+            if len(border) == 1:
+                b = border.pop()
+                for p in region:
+                    out[p] = b
+        return out
 
     def _pattern_value(self, key) -> float:
         """The share of games won by the players who placed marks in this pattern (smoothed: 0.5 when unseen)"""
         s, n = self.move_patterns.get(key, (0.0, 0))
         return (s + 1.0) / (n + 2.0)
 
+    def _survival_value(self, key) -> float:
+        """The share of marks placed in this pattern that were still the placer's at the end (smoothed)"""
+        s, n = self.survival.get(key, (0, 0))
+        return (s + 1.0) / (n + 2.0)
+
+    def _placement_value(self, key) -> float:
+        """A placement pattern's value: its share of games won, averaged with its share of marks that survived
+        (when ownership is used)"""
+        if self.use_ownership and key in self.survival:
+            return (self._pattern_value(key) + self._survival_value(key)) / 2
+        return self._pattern_value(key)
+
     def _pattern_weight(self, key) -> float:
-        return float(np.exp(PATTERN_BETA * (self._pattern_value(key) - 0.5)))
+        return float(np.exp(PATTERN_BETA * (self._placement_value(key) - 0.5)))
 
     # ------------------------------------------------------- passes and counts
     def _learn_passes(self, before, action, frames, ended=False, won=False):
@@ -1960,7 +2005,7 @@ class ObjectAgent:
              'ce_mean', 'ce_std', 'ce_done', 'ce_generations', 'wins', 'losses', 'shape',
              'removal_goals', 'removal_losses', 'group_rule', 'contact_kinds',
              'contact_rejected', 'directions_rejected', 'pass_actions', 'others_pass', 'round_end', 'count_ends',
-             'count_goals', 'move_patterns', 'repeat_rule')
+             'count_goals', 'move_patterns', 'repeat_rule', 'survival')
 
     def export_state(self) -> dict:
         """
@@ -2242,7 +2287,7 @@ class ObjectAgent:
             out.append(table)
         return out
 
-    def _fast_playout(self, g, player, passes, placements, seen=None, played=None) -> float:
+    def _fast_playout(self, g, player, passes, placements, seen=None, played=None, finals=None) -> float:
         """
         _playout for games whose moves place one cell each (_placements), on a flat list of the cells. A
         simulated game does not return to a position it has passed through (whatever the game's rules: a game
@@ -2367,21 +2412,25 @@ class ObjectAgent:
                 break
             passes = 0 if moved else passes + 1
             player = (player + 1) % players
+        if finals is not None:
+            _, region_owner = tally(b, 'area')
+            finals.append([side[x] or region_owner.get(i, 0) for i, x in enumerate(b)])
         won = [tally(b, m)[0] > 0 for m in measures]
         return 1.0 if all(won) else 0.0 if not any(won) else 0.5
 
-    def _playout(self, g, player, passes, values, seen=None, played=None) -> float:
+    def _playout(self, g, player, passes, values, seen=None, played=None, finals=None) -> float:
         """
         A simulated game to its end (a round of passes): each player makes a random move among those that
         change the count (a move that leaves it as it is, such as filling the player's own territory, is not
         made), or passes if it has none. The agent's reward: 1 won, 0 lost, 0.5 if the count goals disagree.
         seen: positions (as lists of the cells) a move may not repeat (the game's and the search path's, when
         moves repeating a position are refused); the playout's own positions are added. played: a list the
-        (player, cell) of each mark placed is appended to (games whose moves place marks only).
+        (player, cell) of each mark placed is appended to (games whose moves place marks only); finals: a list
+        the final ownership of the cells (a flat list, as _ownership) is appended to (the same games).
         """
         placements = self._placements()
         if placements is not None:
-            return self._fast_playout(g, player, passes, placements, seen, played)
+            return self._fast_playout(g, player, passes, placements, seen, played, finals)
         players = 1 + len(self.others)
         movers = [self._playout_cells(i) for i in range(players)]
         measure = 'area' if 'area' in self.count_goals else next(iter(self.count_goals))
@@ -2422,7 +2471,7 @@ class ObjectAgent:
             """The value of the pattern of the mark a move places (0.5: not a placement, or nothing learned)"""
             if cell is None or not (self.use_patterns and self.move_patterns):
                 return 0.5
-            return self._pattern_value(self._move_key(g, cell, roles[player]))
+            return self._placement_value(self._move_key(g, cell, roles[player]))
         repeat = self._repeat_rule_on()
         history = {b for shape, b in self._history if shape == grid.shape} if repeat else set()
         as_list = lambda b: np.frombuffer(b, dtype=grid.dtype).tolist()
@@ -2433,6 +2482,24 @@ class ObjectAgent:
             return history_cells | {tuple(as_list(k[0])) for k in on_path} if repeat else None
         root = (grid.tobytes(), 0, len(self.others) if self._others_passed else 0)
         nodes = {root: {'grid': grid, 'n': 0, 'children': None, 'amaf': {}}}
+
+        ownership = self.use_ownership
+        width = grid.shape[1]
+        own_sum = np.zeros(grid.size)               # the agent's ownership of each cell, summed over simulated games
+        own_win = np.zeros(grid.size)               # ... times the agent's reward
+        sims = {'n': 0, 'reward': 0.0}
+        crit = {'map': None, 'at': -1}
+
+        def criticality(cell) -> float:
+            """How much owning the cell at the end goes with winning: the covariance of the agent's ownership and
+            its reward over the simulated games so far (recomputed every 100 games)"""
+            n = sims['n']
+            if n < 50:
+                return 0.0
+            if crit['at'] < 0 or n - crit['at'] >= 100:
+                crit['map'] = own_win / n - (own_sum / n) * (sims['reward'] / n)
+                crit['at'] = n
+            return max(0.0, float(crit['map'][cell[0] * width + cell[1]]))
 
         def score(node, c, player):
             """
@@ -2447,7 +2514,8 @@ class ObjectAgent:
                 beta = np.sqrt(RAVE_EQUIV / (3 * n + RAVE_EQUIV))
                 q = (1 - beta) * q + beta * stats[1] / stats[0]
             sign = 1.0 if player == 0 else -1.0
-            return 0.5 + sign * (q - 0.5) + UCT_C * np.sqrt(np.log(node['n'] + 1) / (n + 1))
+            bonus = CRIT_WEIGHT * criticality(c[5]) if ownership and c[5] is not None else 0.0
+            return 0.5 + sign * (q - 0.5) + bonus + UCT_C * np.sqrt(np.log(node['n'] + 1) / (n + 1))
         # the budget: PLAYOUTS_PER_MOVE simulated games per move the agent can make here (so a larger board, with
         # more moves, is searched as thoroughly per move), within SEARCH_SECONDS
         deadline, done, budget = time.time() + SEARCH_SECONDS, 0, None
@@ -2455,7 +2523,7 @@ class ObjectAgent:
             if budget is None and nodes[root]['children'] is not None:
                 budget = PLAYOUTS_PER_MOVE * max(1, len(nodes[root]['children']))
             done += 1
-            key, path, on_path, visited, played = root, [], {root}, [], []
+            key, path, on_path, visited, played, finals = root, [], {root}, [], [], []
             while True:
                 node = nodes[key]
                 node['key'] = key
@@ -2464,7 +2532,7 @@ class ObjectAgent:
                     reward = (self._count_verdict(node['grid']) + 1) / 2
                     break
                 if len(path) > 4 * grid.size:               # (a backstop: the tree is not that deep)
-                    reward = self._playout(node['grid'], player, passes, values, None, played)
+                    reward = self._playout(node['grid'], player, passes, values, None, played, finals)
                     break
                 if node['children'] is None:
                     node['children'] = []
@@ -2487,15 +2555,22 @@ class ObjectAgent:
                     _, nplayer, npasses = c[1]
                     reward = (self._count_verdict(nodes[c[1]]['grid']) + 1) / 2 if npasses >= players else \
                         self._playout(nodes[c[1]]['grid'], nplayer, npasses, values, seen_on(on_path | {c[1]}),
-                                      played)
+                                      played, finals)
                     break
                 key = c[1]
                 if key in on_path:
                     # a position repeated on the path (positions are shared, so a capture taken back can
                     # lead round in a cycle): a simulated game from it instead of going round
-                    reward = self._playout(nodes[key]['grid'], key[1], key[2], values, seen_on(on_path), played)
+                    reward = self._playout(nodes[key]['grid'], key[1], key[2], values, seen_on(on_path), played,
+                                           finals)
                     break
                 on_path.add(key)
+            if finals:
+                o = np.asarray(finals[0], dtype=float)
+                own_sum += o
+                own_win += o * reward
+                sims['n'] += 1
+                sims['reward'] += reward
             for node in visited:
                 node['n'] += 1
             for c in path:
@@ -2513,6 +2588,7 @@ class ObjectAgent:
                         stats[0] += 1
                         stats[1] += reward
         children = nodes[root]['children'] or []
+        self.last_ownership = (own_sum / sims['n']).reshape(grid.shape) if sims['n'] else None
         self.last_tree = children       # [move, child key, visits, reward sum, pattern value, cell] (for inspection)
         if not children:
             return self.rng.choice(self._actions(grid, actions))

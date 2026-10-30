@@ -606,11 +606,17 @@ class TestFullGo(unittest.TestCase):
         mine = board({(3, 3): 2, (3, 4): 2, (1, 1): 1})
         theirs = board({(3, 3): 2, (3, 4): 2, (1, 1): 1, (5, 5): 1})
         agent._record_moves(before, [mine, theirs])
-        self.assertEqual([player for _, player in agent._game_moves], [0, 1])
-        (k_mine, _), (k_theirs, _) = agent._game_moves
-        agent._credit_moves(1.0)
+        self.assertEqual([player for _, player, _ in agent._game_moves], [0, 1])
+        (k_mine, _, _), (k_theirs, _, _) = agent._game_moves
+        # the final position: the opponent's stone in the corner was captured (its cell is the agent's region)
+        final = board({(3, 3): 2, (3, 4): 2, (4, 5): 2, (5, 4): 2})
+        agent._credit_moves(1.0, final)
         self.assertGreater(agent._pattern_value(k_mine), 0.5)        # placed by the winner: pursued
         self.assertLess(agent._pattern_value(k_theirs), 0.5)         # by the loser: avoided
+        self.assertGreater(agent._survival_value(k_mine), 0.5)       # still the agent's at the end
+        self.assertLess(agent._survival_value(k_theirs), 0.5)        # flipped
+        own = agent._ownership(final)
+        self.assertEqual((own[3, 3], own[5, 5], own[1, 1]), (1, 1, 1))   # (every empty cell borders only 2s)
         # the same placement turned a quarter: the same pattern
         self.assertEqual(agent._move_key(board({(3, 3): 2, (1, 1): 1}), (2, 3), agent._roles_for(0)),
                          agent._move_key(board({(3, 3): 2, (1, 1): 1}), (3, 4), agent._roles_for(0)))
