@@ -235,6 +235,7 @@ SEARCH_SECONDS = 30.0       # ... but no longer than this per search
 UCT_C = 0.7                 # exploration constant of its tree
 PATTERN_BETA = 6.0          # how strongly simulated games prefer moves of patterns that won (_pattern_weight)
 PATTERN_BATCH = 8           # simulated games order cells by pattern within batches of this many random cells
+RAVE_EQUIV = 300            # simulated games at which a move's own results and its shared (RAVE) results weigh equally
 PRIOR_VISITS = 10           # the weight, in visits, of a move's pattern value in the playout search's tree
 NEIGHBOURS = ((-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1))
 ROLE_EMPTY, ROLE_OWN, ROLE_OTHER, ROLE_EDGE = 0, 1, 2, 3
@@ -2241,7 +2242,7 @@ class ObjectAgent:
             out.append(table)
         return out
 
-    def _fast_playout(self, g, player, passes, placements, seen=None) -> float:
+    def _fast_playout(self, g, player, passes, placements, seen=None, played=None) -> float:
         """
         _playout for games whose moves place one cell each (_placements), on a flat list of the cells. A
         simulated game does not return to a position it has passed through (whatever the game's rules: a game
@@ -2361,23 +2362,26 @@ class ObjectAgent:
                     continue
                 b, t, owner, moved = nb, nt, nowner, True
                 seen.add(tb)
+                if played is not None:
+                    played.append((player, (i // w, i % w)))
                 break
             passes = 0 if moved else passes + 1
             player = (player + 1) % players
         won = [tally(b, m)[0] > 0 for m in measures]
         return 1.0 if all(won) else 0.0 if not any(won) else 0.5
 
-    def _playout(self, g, player, passes, values, seen=None) -> float:
+    def _playout(self, g, player, passes, values, seen=None, played=None) -> float:
         """
         A simulated game to its end (a round of passes): each player makes a random move among those that
         change the count (a move that leaves it as it is, such as filling the player's own territory, is not
         made), or passes if it has none. The agent's reward: 1 won, 0 lost, 0.5 if the count goals disagree.
         seen: positions (as lists of the cells) a move may not repeat (the game's and the search path's, when
-        moves repeating a position are refused); the playout's own positions are added.
+        moves repeating a position are refused); the playout's own positions are added. played: a list the
+        (player, cell) of each mark placed is appended to (games whose moves place marks only).
         """
         placements = self._placements()
         if placements is not None:
-            return self._fast_playout(g, player, passes, placements, seen)
+            return self._fast_playout(g, player, passes, placements, seen, played)
         players = 1 + len(self.others)
         movers = [self._playout_cells(i) for i in range(players)]
         measure = 'area' if 'area' in self.count_goals else next(iter(self.count_goals))
@@ -2414,11 +2418,11 @@ class ObjectAgent:
         placements = self._placements()
         roles = [self._roles_for(i) for i in range(players)]
 
-        def prior(g, nxt, player):
+        def prior(g, cell, player):
             """The value of the pattern of the mark a move places (0.5: not a placement, or nothing learned)"""
-            cell = self._placed_cell(g, nxt, player, placements) \
-                if placements and self.use_patterns and self.move_patterns else None
-            return 0.5 if cell is None else self._pattern_value(self._move_key(g, cell, roles[player]))
+            if cell is None or not (self.use_patterns and self.move_patterns):
+                return 0.5
+            return self._pattern_value(self._move_key(g, cell, roles[player]))
         repeat = self._repeat_rule_on()
         history = {b for shape, b in self._history if shape == grid.shape} if repeat else set()
         as_list = lambda b: np.frombuffer(b, dtype=grid.dtype).tolist()
@@ -2428,7 +2432,22 @@ class ObjectAgent:
             """The positions a simulated game from here may not repeat (None: no such rule learned)"""
             return history_cells | {tuple(as_list(k[0])) for k in on_path} if repeat else None
         root = (grid.tobytes(), 0, len(self.others) if self._others_passed else 0)
-        nodes = {root: {'grid': grid, 'n': 0, 'children': None}}
+        nodes = {root: {'grid': grid, 'n': 0, 'children': None, 'amaf': {}}}
+
+        def score(node, c, player):
+            """
+            A move's value for the player to move: its own results (the pattern value counting as PRIOR_VISITS
+            results) blended with the results of the simulated games in which the player placed a mark on the
+            same cell later (RAVE; their weight falls as the move's own results grow), plus UCT exploration
+            """
+            n, w = c[2], c[3]
+            q = (w + PRIOR_VISITS * c[4]) / (n + PRIOR_VISITS)
+            stats = node['amaf'].get(c[5]) if c[5] is not None else None
+            if stats:
+                beta = np.sqrt(RAVE_EQUIV / (3 * n + RAVE_EQUIV))
+                q = (1 - beta) * q + beta * stats[1] / stats[0]
+            sign = 1.0 if player == 0 else -1.0
+            return 0.5 + sign * (q - 0.5) + UCT_C * np.sqrt(np.log(node['n'] + 1) / (n + 1))
         # the budget: PLAYOUTS_PER_MOVE simulated games per move the agent can make here (so a larger board, with
         # more moves, is searched as thoroughly per move), within SEARCH_SECONDS
         deadline, done, budget = time.time() + SEARCH_SECONDS, 0, None
@@ -2436,15 +2455,16 @@ class ObjectAgent:
             if budget is None and nodes[root]['children'] is not None:
                 budget = PLAYOUTS_PER_MOVE * max(1, len(nodes[root]['children']))
             done += 1
-            key, path, on_path = root, [], {root}
+            key, path, on_path, visited, played = root, [], {root}, [], []
             while True:
                 node = nodes[key]
+                node['key'] = key
                 _, player, passes = key
                 if passes >= players:                       # a round of passes: the end
                     reward = (self._count_verdict(node['grid']) + 1) / 2
                     break
                 if len(path) > 4 * grid.size:               # (a backstop: the tree is not that deep)
-                    reward = self._playout(node['grid'], player, passes, values)
+                    reward = self._playout(node['grid'], player, passes, values, None, played)
                     break
                 if node['children'] is None:
                     node['children'] = []
@@ -2454,41 +2474,46 @@ class ObjectAgent:
                             continue                # (a move may not repeat a position)
                         child = (nxt.tobytes(), (player + 1) % players,
                                  passes + 1 if np.array_equal(nxt, node['grid']) else 0)
-                        nodes.setdefault(child, {'grid': nxt, 'n': 0, 'children': None})
-                        node['children'].append([label, child, 0, 0.0, prior(node['grid'], nxt, player)])
+                        nodes.setdefault(child, {'grid': nxt, 'n': 0, 'children': None, 'amaf': {}})
+                        cell = self._placed_cell(node['grid'], nxt, player, placements) if placements else None
+                        node['children'].append([label, child, 0, 0.0, prior(node['grid'], cell, player), cell])
                     if not node['children']:
                         reward = 0.5
                         break
-                fresh = [c for c in node['children'] if c[2] == 0]
-                if fresh:
-                    # (the move of the best pattern for the player first)
-                    sign = 1.0 if player == 0 else -1.0
-                    c = max(fresh, key=lambda c: (sign * (c[4] - 0.5), self.rng.random()))
-                    path.append(c)
+                c = max(node['children'], key=lambda c: score(node, c, player))
+                path.append(c)
+                visited.append(node)
+                if c[2] == 0:                           # a move not tried yet: a simulated game from it
                     _, nplayer, npasses = c[1]
                     reward = (self._count_verdict(nodes[c[1]]['grid']) + 1) / 2 if npasses >= players else \
-                        self._playout(nodes[c[1]]['grid'], nplayer, npasses, values, seen_on(on_path | {c[1]}))
+                        self._playout(nodes[c[1]]['grid'], nplayer, npasses, values, seen_on(on_path | {c[1]}),
+                                      played)
                     break
-                total = sum(c[2] for c in node['children'])
-                sign = 1.0 if player == 0 else -1.0
-                # (the pattern value counts as PRIOR_VISITS visits of that reward)
-                c = max(node['children'], key=lambda c: (0.5 + sign * ((c[3] + PRIOR_VISITS * c[4]) /
-                                                                     (c[2] + PRIOR_VISITS) - 0.5))
-                        + UCT_C * np.sqrt(np.log(total) / c[2]))
-                path.append(c)
                 key = c[1]
                 if key in on_path:
                     # a position repeated on the path (positions are shared, so a capture taken back can
                     # lead round in a cycle): a simulated game from it instead of going round
-                    reward = self._playout(nodes[key]['grid'], key[1], key[2], values, seen_on(on_path))
+                    reward = self._playout(nodes[key]['grid'], key[1], key[2], values, seen_on(on_path), played)
                     break
                 on_path.add(key)
-            nodes[root]['n'] += 1
+            for node in visited:
+                node['n'] += 1
             for c in path:
                 c[2] += 1
                 c[3] += reward
+            # RAVE: each position passed credits the reward to every cell its player placed a mark on later in this
+            # simulated game (the first time only), as if it had been that player's move there
+            moves = [(node['key'][1], c[5]) for node, c in zip(visited, path)] + played
+            for i, node in enumerate(visited):
+                mover, done_cells = node['key'][1], set()
+                for p, cell in moves[i:]:
+                    if p == mover and cell is not None and cell not in done_cells:
+                        done_cells.add(cell)
+                        stats = node['amaf'].setdefault(cell, [0, 0.0])
+                        stats[0] += 1
+                        stats[1] += reward
         children = nodes[root]['children'] or []
-        self.last_tree = children       # [move, child key, visits, reward sum, pattern value] (for inspection)
+        self.last_tree = children       # [move, child key, visits, reward sum, pattern value, cell] (for inspection)
         if not children:
             return self.rng.choice(self._actions(grid, actions))
         best = max(c[2] for c in children)
