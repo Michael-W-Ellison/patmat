@@ -78,6 +78,29 @@ Pattern families:
                      the next pattern is searched from what is left; or a
                      beam search keeping the chains that leave the fewest
                      wrong cells; searched only when no single pattern fits
+  R repetition       the grid's repeating structure: a tiling (any period,
+                     rows of tiles possibly shifted) repaired where one colour
+                     hides it, the whole grid or only the hidden patch output;
+                     the smallest tile the grid repeats; repeated neighbouring
+                     rows and columns removed; equal parts of the grid laid
+                     over each other with a learned priority of colours; a
+                     window of a fixed size at a fixed place from a corner; the
+                     grid's tiling continued to a larger output (a fixed size,
+                     or the input's size times a fixed factor)
+  S cell rules       cells of one colour recoloured by where they are: the
+                     colour of the first other cell in their row (or column)
+                     from one side; by the parity of their row, column or
+                     both counted from a corner; every cell not of the most
+                     common colour (or not of the most common colour of the
+                     foreground) given one colour
+  T templates        shapes copied and fitted, with the object representation
+                     the game-playing agent uses (shapes.py): blank objects of
+                     one colour whose silhouette is a template's (as it is, or
+                     turned or mirrored) take the template's colours; a
+                     template stamped at each single-cell marker (the
+                     template's one cell of the marker's colour on it, or its
+                     centre); pieces moved into the enclosed holes whose shape
+                     they have
   X exceptions       a pattern that is right except near some objects (a
                      transform, rays, a symmetry, or family A / J / O formed
                      by majority, with the exceptions left as they are), made
@@ -101,6 +124,7 @@ import numpy as np
 
 from arc_elements import RULE_PROPERTIES, SEGMENTATIONS, Obj, background, segment
 from arc_relation_solver import GEOMETRIC, game_score, generate_candidates, load_relation_lifts
+import shapes
 
 Array = np.ndarray
 TRANSFORMS = dict({'identity': lambda a: a}, **GEOMETRIC)
@@ -2335,10 +2359,434 @@ def combination_patterns(pairs, bg, deadline: float) -> List[Pattern]:
 
 # --------------------------------------------------------------- solve
 
+# ------------------------------------------------------------- family R
+
+def _lattice(shape, py: int, px: int, shift: int) -> Array:
+    """Each cell's place in a tile of py x px whose rows of tiles are shifted by `shift` rows per tile column"""
+    r, c = np.indices(shape)
+    return ((r - shift * (c // px)) % py) * px + c % px
+
+
+def tiling(a: Array, unknown: Array) -> Optional[Tuple[int, int, int]]:
+    """
+    (py, px, shift): the smallest tile the known cells of the grid repeat (every place in the tile seen
+    at least once), or None if they repeat none smaller than the grid
+    """
+    h, w = a.shape
+    known, values = ~unknown, a[~unknown]
+    best = None
+    for py in range(1, h + 1):
+        for px in range(1, w + 1):
+            if py * px >= h * w or (best and py * px >= best[0] * best[1]):
+                continue
+            for shift in range(py):
+                k = _lattice(a.shape, py, px, shift)[known]
+                tile = np.full(py * px, -1)
+                tile[k] = values
+                if (tile >= 0).all() and np.array_equal(tile[k], values):
+                    best = (py, px, shift)
+                    break
+    return best
+
+
+def repair_tiling(a: Array, unknown: Array) -> Optional[Array]:
+    """The grid with its unknown cells filled from the tiling the other cells repeat"""
+    t = tiling(a, unknown)
+    if t is None:
+        return None
+    k = _lattice(a.shape, *t)
+    tile = np.full(t[0] * t[1], -1)
+    tile[k[~unknown]] = a[~unknown]
+    out = a.copy()
+    out[unknown] = tile[k[unknown]]
+    return out if (out >= 0).all() else None
+
+
+def _smallest_tile(a: Array) -> Array:
+    h, w = a.shape
+    for th in range(1, h + 1):
+        for tw in range(1, w + 1):
+            if h % th == 0 and w % tw == 0 and np.array_equal(np.tile(a[:th, :tw], (h // th, w // tw)), a):
+                return a[:th, :tw]
+    return a
+
+
+def _dedupe(a: Array) -> Array:
+    a = a[[0] + [i for i in range(1, a.shape[0]) if not np.array_equal(a[i], a[i - 1])]]
+    return a[:, [0] + [j for j in range(1, a.shape[1]) if not np.array_equal(a[:, j], a[:, j - 1])]]
+
+
+def _parts(a: Array, k: int, m: int) -> Optional[List[Array]]:
+    h, w = a.shape
+    if h % k or w % m:
+        return None
+    ph, pw = h // k, w // m
+    return [a[i * ph:(i + 1) * ph, j * pw:(j + 1) * pw] for i in range(k) for j in range(m)]
+
+
+def _overlay(parts: List[Array], order: Sequence[int]) -> Array:
+    """The parts laid over each other: a cell takes the first colour in `order` any part has there"""
+    out = np.full(parts[0].shape, order[-1])
+    for c in reversed(order):
+        for p in parts:
+            out[p == c] = c
+    return out
+
+
+def _extend(a: Array, shape) -> Optional[Array]:
+    """The grid's tiling continued over a grid of the given shape (from the same top left corner)"""
+    t = tiling(a, np.zeros(a.shape, bool))
+    if t is None:
+        return None
+    tile = np.full(t[0] * t[1], -1)
+    tile[_lattice(a.shape, *t).ravel()] = a.ravel()
+    return tile[_lattice(shape, *t)]
+
+
+def repetition_patterns(pairs, bg) -> List[Pattern]:
+    found = []
+    a0, b0 = pairs[0]
+    same = all(a.shape == b.shape for a, b in pairs)
+    colors = sorted(set.intersection(*(set(np.unique(a).tolist()) for a, _ in pairs)))
+    # a tiling repaired where one colour hides it (the whole grid, or the hidden patch)
+    for c in colors:
+        hidden = a0 == c
+        rs, cs = np.nonzero(hidden)
+        patch_shape = (rs.max() - rs.min() + 1, cs.max() - cs.min() + 1)
+        if same and tiling(b0, np.zeros(b0.shape, bool)) is not None:
+            found.append(Pattern('R', f'repair the tiling under {c}', 3,
+                                 lambda a, c=c: repair_tiling(a, a == c) if (a == c).any() else None))
+        elif not same and b0.shape == patch_shape:
+            def patch(a, c=c):
+                hide = a == c
+                full = repair_tiling(a, hide) if hide.any() else None
+                if full is None:
+                    return None
+                r, q = np.nonzero(hide)
+                return full[r.min():r.max() + 1, q.min():q.max() + 1]
+            found.append(Pattern('R', f'repair the tiling under {c}, output the patch', 3, patch))
+    if not same:
+        found.append(Pattern('R', 'smallest repeated tile', 2, _smallest_tile))
+        found.append(Pattern('R', 'repeated rows and columns removed', 2, _dedupe))
+        # equal parts laid over each other, colours by a priority that fits every pair
+        for k, m in ((1, 2), (2, 1), (2, 2), (1, 3), (3, 1), (1, 4), (4, 1)):
+            p0 = _parts(a0, k, m)
+            if p0 is None or p0[0].shape != b0.shape:
+                continue
+            values = sorted(set().union(*(set(np.unique(a).tolist()) | set(np.unique(b).tolist())
+                                          for a, b in pairs)))
+            if len(values) > 6:
+                continue
+            ps = [_parts(a, k, m) for a, _ in pairs]
+            if any(p is None or p[0].shape != b.shape for p, (_, b) in zip(ps, pairs)):
+                continue
+            for order in itertools.permutations(values):
+                if all(np.array_equal(_overlay(p, order), b) for p, (_, b) in zip(ps, pairs)):
+                    found.append(Pattern('R', f'{k}x{m} parts overlaid, priority {order}', 3,
+                                         lambda a, k=k, m=m, o=order: None if _parts(a, k, m) is None
+                                         else _overlay(_parts(a, k, m), o)))
+                    break
+        # the tiling continued to a larger output
+        if b0.shape[0] >= a0.shape[0] and b0.shape[1] >= a0.shape[1]:
+            fr, fc = b0.shape[0] / a0.shape[0], b0.shape[1] / a0.shape[1]
+            found.append(Pattern('R', f'tiling continued to {fr:g}x{fc:g} the size', 3,
+                                 lambda a: _extend(a, (round(a.shape[0] * fr), round(a.shape[1] * fc)))))
+            found.append(Pattern('R', f'tiling continued to {b0.shape}', 3, lambda a: _extend(a, b0.shape)))
+        # a window of a fixed size at a fixed place from a corner
+        if len({b.shape for _, b in pairs}) == 1:
+            h, w = b0.shape
+            for corner in ('top left', 'top right', 'bottom left', 'bottom right'):
+                for dr in range(a0.shape[0] - h + 1):
+                    for dc in range(a0.shape[1] - w + 1):
+                        def window(a, dr=dr, dc=dc, corner=corner):
+                            r0 = dr if corner.startswith('top') else a.shape[0] - h - dr
+                            c0 = dc if corner.endswith('left') else a.shape[1] - w - dc
+                            if r0 < 0 or c0 < 0 or r0 + h > a.shape[0] or c0 + w > a.shape[1]:
+                                return None
+                            return a[r0:r0 + h, c0:c0 + w]
+                        if np.array_equal(window(a0), b0):
+                            found.append(Pattern('R', f'window {h}x{w} at {dr},{dc} from the {corner}', 3, window))
+    return found
+
+
+# ------------------------------------------------------------- family S
+
+def _first_in_line(a: Array, x: int, bg: int, side: str) -> Array:
+    """Cells of x take the colour of the first cell of their row (column) from `side` that is neither bg nor x"""
+    rows = side in ('left', 'right')
+    out = a.copy()
+    b, o = (a, out) if rows else (a.T, out.T)
+    for r in range(b.shape[0]):
+        line = b[r] if side in ('left', 'top') else b[r][::-1]
+        others = [v for v in line if v != bg and v != x]
+        if others:
+            o[r][b[r] == x] = others[0]
+    return out
+
+
+def _parity_key(shape, r, c, corner: str, mode: str):
+    rr = r if corner[0] == 't' else shape[0] - 1 - r
+    cc = c if corner[1] == 'l' else shape[1] - 1 - c
+    return {'row': rr % 2, 'column': cc % 2, 'row and column': (rr % 2, cc % 2), 'diagonal': (rr + cc) % 2}[mode]
+
+
+def cell_rule_patterns(pairs, bg) -> List[Pattern]:
+    # (rules by a cell's place cost more than rules about objects: they fit small examples by chance)
+    found = []
+    if not all(a.shape == b.shape for a, b in pairs):
+        return found
+    changed = set().union(*(set(np.unique(a[a != b]).tolist()) for a, b in pairs))
+    for x in sorted(changed):
+        for side in ('left', 'right', 'top', 'bottom'):
+            found.append(Pattern('S', f'cells of {x} take the colour of the first other cell from the {side}', 3.5,
+                                 lambda a, x=x, s=side: _first_in_line(a, x, background([a]), s)))
+        for corner in ('tl', 'tr', 'bl', 'br'):
+            for mode in ('row', 'column', 'row and column', 'diagonal'):
+                table, ok = {}, True
+                for a, b in pairs:
+                    for r, c in zip(*np.nonzero(a == x)):
+                        k = _parity_key(a.shape, r, c, corner, mode)
+                        if table.setdefault(k, int(b[r, c])) != int(b[r, c]):
+                            ok = False
+                            break
+                    if not ok:
+                        break
+                if not ok or len(set(table.values())) < 2:
+                    continue
+
+                def parity(a, x=x, corner=corner, mode=mode, table=dict(table)):
+                    out = a.copy()
+                    for r, c in zip(*np.nonzero(a == x)):
+                        out[r, c] = table[_parity_key(a.shape, r, c, corner, mode)]
+                    return out
+                found.append(Pattern('S', f'cells of {x} recoloured by {mode} parity from the {corner} corner',
+                                     5 + len(table), parity))
+    targets = set().union(*(set(np.unique(b[a != b]).tolist()) for a, b in pairs))
+    for c in sorted(targets):
+        def minority(a, c=c):
+            out = a.copy()
+            out[a != background([a])] = c
+            return out
+        def foreground_minority(a, c=c):
+            fg = a[a != background([a])]
+            if not fg.size:
+                return None
+            out = a.copy()
+            out[(a != background([a])) & (a != Counter(fg.tolist()).most_common(1)[0][0])] = c
+            return out
+        found.append(Pattern('S', f'cells not of the most common colour become {c}', 3.5, minority))
+        found.append(Pattern('S', f'foreground cells not of its most common colour become {c}', 3.5,
+                             foreground_minority))
+    return found
+
+
+# ------------------------------------------------------------- family T
+
+OPERATION_SETS = {'as it is': (), 'turned or mirrored': tuple(shapes.GEOMETRY)}
+
+
+def _paint_blanks(a: Array, bg: int, operations, remove_template: bool) -> Optional[Array]:
+    """Objects of one colour whose silhouette is a template's take the template's colours"""
+    objs = [(o, shapes.pattern(a, o)) for o in shapes.components(a, bg)]
+    templates = [(o, p) for o, p in objs if len({v for row in p for v in row} - {-1}) > 1]
+    if not templates:
+        return None
+    out, painted = a.copy(), False
+    for o, p in objs:
+        if len({v for row in p for v in row} - {-1}) != 1:
+            continue
+        for _, tp in templates:
+            img = next((im for _, im in shapes.images(tp, operations) if shapes.silhouette(im) == shapes.silhouette(p)),
+                       None)
+            if img is not None:
+                out = shapes.stamp(out, img, shapes.box(o))
+                painted = True
+                break
+    if not painted:
+        return None
+    if remove_template:
+        for o, _ in templates:
+            for q in o:
+                out[q] = bg
+    return out
+
+
+def _stamp_at_markers(a: Array, bg: int, centre: bool, ops: Optional[Dict[int, str]] = None) -> Optional[Array]:
+    """
+    Each single-cell object (a marker) gets a copy of the template that has one cell of its colour, on it
+    (turned or mirrored by the operation learned for the marker's colour, if any)
+    """
+    objs = shapes.components(a, bg, diagonal=True)
+    templates = [shapes.pattern(a, o) for o in objs if len(o) > 1]
+    markers = [next(iter(o)) for o in objs if len(o) == 1]
+    if not templates or not markers:
+        return None
+    out, stamped = a.copy(), False
+    for m in markers:
+        colour = int(a[m])
+        for tp in templates:
+            op = (ops or {}).get(colour, 'same')
+            if op != 'same':
+                tp = shapes.as_tuple(shapes.GEOMETRY[op](np.array(tp)))
+            at = [(i, j) for i, row in enumerate(tp) for j, v in enumerate(row) if v == colour]
+            if len(at) == 1 and not centre:
+                anchor = at[0]
+            elif not at and centre and len(tp) % 2 and len(tp[0]) % 2:
+                anchor = (len(tp) // 2, len(tp[0]) // 2)
+            else:
+                continue
+            nxt = shapes.stamp(out, tp, (m[0] - anchor[0], m[1] - anchor[1]))
+            if nxt is not None:
+                out, stamped = nxt, True
+                break
+    return out if stamped else None
+
+
+def _fill_holes(a: Array, bg: int, operations) -> Optional[Array]:
+    """
+    Pieces (objects of one colour) moved into the enclosed holes they fill exactly: each piece once, and it
+    leaves its place; of several that fit, one away from the grid's edge, if only one is
+    """
+    objs = shapes.components(a, bg, one_colour=True)
+    h, w = a.shape
+    edge = lambda o: any(r in (0, h - 1) or c in (0, w - 1) for r, c in o)
+    out, used, filled = a.copy(), set(), False
+    for hole in shapes.holes(a, bg):
+        shape = shapes.silhouette(shapes.pattern(np.ones(a.shape, int), hole))
+        around = {(p[0] + d[0], p[1] + d[1]) for p in hole for d in shapes.SIDES}
+        fits = []
+        for i, o in enumerate(objs):
+            if i in used or o & around:
+                continue                # (not the object the hole is in)
+            img = next((im for _, im in shapes.images(shapes.pattern(a, o), operations)
+                        if shapes.silhouette(im) == shape), None)
+            if img is not None:
+                fits.append((i, o, img))
+        if len(fits) > 1:
+            fits = [f for f in fits if not edge(f[1])]
+        if len(fits) != 1:
+            continue
+        i, o, img = fits[0]
+        for q in o:
+            out[q] = bg
+        out = shapes.stamp(out, img, shapes.box(hole))
+        used.add(i)
+        filled = True
+    return out if filled else None
+
+
+def _scaled(pat: tuple, k: int) -> tuple:
+    return shapes.as_tuple(np.kron(np.array(pat), np.ones((k, k), dtype=int))) if k > 1 else pat
+
+
+def _complete_from_template(a: Array, bg: int, key: Optional[int], operations, scaling: bool) -> Optional[Array]:
+    """
+    Wherever the grid shows a template's key part (its cells of colour `key`) - turned or mirrored by one of
+    the operations, scaled by a whole factor if allowed, covering whole objects of the key colour outside the
+    template - the rest of the template is drawn around it the same way (cut off at the grid's edge); a
+    template colour other than the key is drawn in the colour the target's object has besides the key, if it
+    has one. With no key given, the template (an object of several colours) and the key are the first pair,
+    fewest key cells and then most cells first, for which the grid shows the key part somewhere.
+    """
+    objs = shapes.components(a, bg, diagonal=True)
+    multi = [o for o in objs if len({int(a[p]) for p in o}) > 1]
+    if len(multi) > 8:
+        return None                     # (a noisy grid: too many candidate templates)
+    if key is None:
+        options = sorted(((sum(a[p] == k for p in o), -len(o), i, k) for i, o in enumerate(multi)
+                          for k in sorted({int(a[p]) for p in o})))
+        for _, _, i, k in options:
+            out = _complete_with(a, bg, multi[i], k, objs, operations, scaling)
+            if out is not None:
+                return out
+        return None
+    templates = [o for o in multi if any(a[p] == key for p in o)]
+    if len(templates) != 1:
+        return None
+    return _complete_with(a, bg, templates[0], key, objs, operations, scaling)
+
+
+def _complete_with(a, bg, t, key, objs, operations, scaling) -> Optional[Array]:
+    tpat = shapes.pattern(a, t)
+    t_other = sorted({v for row in tpat for v in row} - {-1, key})
+    key_objs = [o for o in shapes.components(a, bg, one_colour=True) if a[next(iter(o))] == key and not o & t]
+    owner = {p: o for o in key_objs for p in o}
+    whole = {p: o for o in objs for p in o}
+    out, done, used = a.copy(), False, set()
+    h, w = a.shape
+    for _, img in shapes.images(tpat, operations):
+        for k in (range(1, 6) if scaling else (1,)):
+            big = np.array(_scaled(img, k))
+            kc = [tuple(x) for x in np.argwhere(big == key)]
+            dc = [(tuple(x), int(big[tuple(x)])) for x in np.argwhere((big != -1) & (big != key))]
+            if not kc:
+                continue
+            first = kc[0]   # (placements that put the key part's first cell on a cell of the key colour)
+            for r, c in sorted({(p[0] - first[0], p[1] - first[1]) for p in owner}):
+                cells = [(r + i, c + j) for i, j in kc]
+                if any(not (0 <= p[0] < h and 0 <= p[1] < w) or p not in owner or p in used for p in cells):
+                    continue
+                covered = set(cells)
+                if any(not owner[p] <= covered for p in cells):
+                    continue            # (whole objects of the key colour only)
+                others = sorted({int(a[q]) for p in cells for q in whole[p]} - {key})
+                cmap = dict(zip(t_other, others)) if len(others) == 1 and len(t_other) == 1 else {}
+                draw = [((r + i, c + j), cmap.get(v, v)) for (i, j), v in dc
+                        if 0 <= r + i < h and 0 <= c + j < w]
+                if any(a[p] not in (bg, v) for p, v in draw):
+                    continue
+                for p, v in draw:
+                    out[p] = v
+                used |= covered
+                done = True
+    return out if done else None
+
+
+def template_patterns(pairs, bg) -> List[Pattern]:
+    found = []
+    if not all(a.shape == b.shape for a, b in pairs):
+        return found
+    for ops_name, ops in OPERATION_SETS.items():
+        extra = 0 if not ops else 1
+        for remove in (False, True):
+            found.append(Pattern('T', f'blank shapes take the template colours ({ops_name})'
+                                      + (', the template removed' if remove else ''), 3 + extra + remove,
+                                 lambda a, ops=ops, r=remove: _paint_blanks(a, background([a]), ops, r)))
+        found.append(Pattern('T', f'pieces fill the holes of their shape ({ops_name})', 3 + extra,
+                             lambda a, ops=ops: _fill_holes(a, background([a]), ops)))
+    for centre in (False, True):
+        found.append(Pattern('T', 'template stamped at each marker' + (' (centred)' if centre else ''), 3,
+                             lambda a, c=centre: _stamp_at_markers(a, background([a]), c)))
+    # the rest of a template drawn around every object that shows its key part
+    a0, b0 = pairs[0]
+    for key in [None] + sorted(set(np.unique(a0).tolist()) - {bg}):
+        for ops_name, ops in OPERATION_SETS.items():
+            for scaling in (False, True):
+                fn = lambda a, k=key, o=ops, s=scaling: _complete_from_template(a, background([a]), k, o, s)
+                if (lambda o: o is not None and np.array_equal(o, b0))(_safe(fn, a0)):
+                    found.append(Pattern('T', f'template completed around each copy of its '
+                                              f'{"shared colour" if key is None else key} part ({ops_name}'
+                                              + (', scaled)' if scaling else ')'), 3 + bool(ops) + scaling, fn))
+    # the copy at a marker turned or mirrored by an operation learned per marker colour
+    a0 = pairs[0][0]
+    colours = sorted({int(a0[next(iter(o))]) for o in shapes.components(a0, bg, diagonal=True) if len(o) == 1})
+    if 0 < len(colours) <= 3:
+        for choice in itertools.product(['same'] + list(shapes.GEOMETRY), repeat=len(colours)):
+            if all(c == 'same' for c in choice):
+                continue
+            table = dict(zip(colours, choice))
+            fn = lambda a, t=table: _stamp_at_markers(a, background([a]), False, t)
+            if all((lambda o: o is not None and np.array_equal(o, b))(_safe(fn, a)) for a, b in pairs):
+                found.append(Pattern('T', f'template stamped at each marker, turned by its colour {table}', 4, fn))
+                break
+    return found
+
+
 FAMILIES = {'A': object_action_patterns, 'B': select_crop_patterns, 'C': transform_patterns,
             'D': move_patterns, 'E': resize_patterns, 'F': relation_patterns,
             'H': count_patterns, 'I': build_patterns, 'J': role_patterns, 'K': ray_patterns,
-            'M': param_patterns, 'N': symmetry_patterns, 'O': relative_patterns, 'Q': mirror_patterns}
+            'M': param_patterns, 'N': symmetry_patterns, 'O': relative_patterns, 'Q': mirror_patterns,
+            'R': repetition_patterns, 'S': cell_rule_patterns, 'T': template_patterns}
 COMBINATION_SECONDS = 60     # time budget for combinations, used only when no single pattern fits
 
 

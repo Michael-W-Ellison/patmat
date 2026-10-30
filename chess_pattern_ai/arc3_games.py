@@ -49,6 +49,50 @@ the player.
   is always a way to the exit. 'maze' (10 x 10: background 0, walls 5,
   player 8, exit 9, decoys 7) and 'maze-b' (12 x 12, background 1, walls
   4, player 12, exit 14, decoys 6).
+- Shape games (10 x 10, background 0, walls 5): the player (9) moves up,
+  down, left, right; a piece (8) it walks into merges with it (the merged
+  player then moves on, if it can); the target (cells of 9 and 8) does not
+  move or merge. 'exit-shape' (4 levels) alternates level kinds: reach the
+  exit (14), then take the target's shape (the level is won when the
+  player's cells equal the target's), and so on. 'shape-touch' (3 levels):
+  a level is won by walking into the target while the player has its
+  shape; walking into it with another shape does nothing. A shape level
+  is lost when every piece has merged and the player has another shape.
+- CaptureGo (capture Go, also called atari Go): an n x n board inside a
+  border of 5 (empty 0, the player's stones 2, the opponent's 1), one game
+  per episode. The player clicks an empty cell to place a stone; the
+  opponent's stone is a second frame. A group of stones with no empty
+  neighbour (no liberty) after a move is captured: its stones are removed.
+  The first capture wins (the player's: WIN; the opponent's: GAME_OVER);
+  a move that would leave its own group without a liberty and capture
+  nothing is not allowed (nothing happens); a full board is a draw.
+  `result` says which. The opponent is 'random' (any allowed move) or
+  'greedy' (captures if it can, else gives a group of its own in atari -
+  one liberty - a second liberty if it can, else random). Who moves first
+  alternates with the seed. Games: 'capture-go' (5 x 5, random), and
+  'capture-go-greedy'.
+- FullGo: Go on an n x n board (the values and frames of CaptureGo):
+  captures remove a group but do not end the game. Action 5 passes (the
+  opponent then moves, or passes, in the second frame). A move that would
+  repeat an earlier position of the game (ko) is not allowed (nothing
+  happens), as are moves that leave their own group without a liberty
+  and capture nothing. The game ends when both players pass in a row, or
+  after PLIES_PER_POINT moves per point, and is scored by area: each player's stones and
+  the empty regions that only its stones border; more wins (WIN), fewer
+  loses, equal is a draw (both GAME_OVER). The opponent never fills an
+  empty point whose neighbours are all its own stones (an eye); it passes
+  when it has no other move, or when the player has just passed and it is
+  not behind. 'random' plays any other allowed move, 'greedy' captures if
+  it can, else gives a group in atari a second liberty, else random.
+  Games: 'go' (5 x 5, random) and 'go-greedy'; any size n by name: 'go<n>', 'go<n>-greedy',
+  'go<n>-gnugo', 'go<n>-gnugo<level>' (such as 'go9', 'go13-gnugo1'). Opponent 'gnugo<level>':
+  GNU Go (an established Go program, run through its text protocol GTP;
+  `gnugo` must be installed) at that level (0-10), told every move of the
+  game and asked for its own, with area scoring, komi 0, the same ko
+  rule (positional superko) and dead stones captured before it passes
+  (every stone left on the board counts here); a move it chooses that these rules do not
+  allow, or a resignation, is taken as a pass. Games 'go-gnugo' (level 10)
+  and 'go-gnugo1' (level 1).
 - Tetris variants: 'tetris-small' (a 6 x 12 well), 'tetris-wide' (10 x 16,
   the pieces in other colours).
 
@@ -57,6 +101,9 @@ interface of the ARC-AGI toolkit's environment wrappers.
 """
 
 import random
+import re
+import shutil
+import subprocess
 
 import numpy as np
 from arcengine import ARCBaseGame, ActionInput, BlockingMode, Camera, GameAction, Level, Sprite
@@ -503,6 +550,402 @@ class Maze(ARCBaseGame):
         self.complete_action()
 
 
+SHAPE_LEVELS = {
+    # name: (rows of the walls (#) and open cells (.), player, pieces [(cells)], target (cells: value), exit)
+    'exit1': (['##########', '#........#', '#.####...#', '#....#...#', '##.#.#.###', '#..#.....#',
+               '#.##.###.#', '#........#', '#....#...#', '##########'], (1, 1), [], {}, (8, 8)),
+    'exit2': (['##########', '#....#...#', '#.##...#.#', '#..#.###.#', '##.#.....#', '#..####..#',
+               '#.......##', '#.#.##...#', '#.#.....##', '##########'], (8, 1), [], {}, (1, 8)),
+    'shape1': (['##########'] + ['#........#'] * 8 + ['##########'], (7, 2), [[(4, 5), (5, 5)]],
+               {(1, 7): 8, (2, 6): 9, (2, 7): 8}, None),
+    'shape2': (['##########'] + ['#........#'] * 8 + ['##########'], (7, 6), [[(3, 2), (3, 3)]],
+               {(6, 3): 8, (6, 4): 8, (7, 3): 9}, None),
+    'shape3': (['##########'] + ['#........#'] * 8 + ['##########'], (8, 8), [[(6, 2)], [(5, 6), (6, 6)]],
+               {(1, 1): 8, (2, 1): 9, (2, 2): 8, (3, 2): 8}, None),
+}
+
+
+class ShapeGame(ARCBaseGame):
+    """The shape games (see the module notes): `kinds` is the list of level names, `touch` the win rule"""
+
+    def __init__(self, seed: int = 0, kinds=('exit1', 'shape1', 'exit2', 'shape2'), touch: bool = False):
+        self.touch = touch
+        super().__init__(game_id='shapes', levels=[self._level(SHAPE_LEVELS[k]) for k in kinds],
+                         camera=Camera(width=10, height=10, background=0, letter_box=3))
+
+    @staticmethod
+    def _level(spec) -> Level:
+        rows, player, pieces, target, exit_ = spec
+        walls = np.array([[5 if ch == '#' else -1 for ch in row] for row in rows], dtype=np.int8)
+        sprites = [Sprite(pixels=walls, name='walls', blocking=BlockingMode.PIXEL_PERFECT, layer=-1),
+                   Sprite(pixels=[[9]], name='player', blocking=BlockingMode.PIXEL_PERFECT,
+                          tags=['merge']).set_position(player[1], player[0])]
+        for i, cells in enumerate(pieces):
+            r0, c0 = min(r for r, _ in cells), min(c for _, c in cells)
+            px = np.full((max(r for r, _ in cells) - r0 + 1, max(c for _, c in cells) - c0 + 1), -1, dtype=np.int8)
+            for r, c in cells:
+                px[r - r0, c - c0] = 8
+            sprites.append(Sprite(pixels=px, name=f'piece{i}', blocking=BlockingMode.PIXEL_PERFECT,
+                                  tags=['merge']).set_position(c0, r0))
+        if target:
+            r0, c0 = min(r for r, _ in target), min(c for _, c in target)
+            px = np.full((max(r for r, _ in target) - r0 + 1, max(c for _, c in target) - c0 + 1), -1, dtype=np.int8)
+            for (r, c), v in target.items():
+                px[r - r0, c - c0] = v
+            sprites.append(Sprite(pixels=px, name='target', blocking=BlockingMode.PIXEL_PERFECT,
+                                  tags=['target']).set_position(c0, r0))
+        if exit_:
+            sprites.append(Sprite(pixels=[[14]], name='exit', blocking=BlockingMode.PIXEL_PERFECT).set_position(
+                exit_[1], exit_[0]))
+        return Level(sprites=sprites, grid_size=(10, 10))
+
+    def on_set_level(self, level):
+        self._player = level.get_sprites_by_name('player')[0]
+        targets = level.get_sprites_by_tag('target')
+        self._target = targets[0] if targets else None
+
+    def _same_shape(self) -> bool:
+        # (the sprites' own cells: the screen region around the player would also show what is next to it)
+        return self._target is not None and np.array_equal(self._player.render(), self._target.render())
+
+    def step(self):
+        dx, dy = {GameAction.ACTION1: (0, -1), GameAction.ACTION2: (0, 1),
+                  GameAction.ACTION3: (-1, 0), GameAction.ACTION4: (1, 0)}.get(self.action.id, (0, 0))
+        won = False
+        if dx or dy:
+            for other in self.try_move_sprite(self._player, dx, dy) or []:
+                if 'merge' in other.tags:
+                    old, self._player = self._player, self._player.merge(other)
+                    self.current_level.remove_sprite(other)
+                    self.current_level.remove_sprite(old)
+                    self.current_level.add_sprite(self._player)
+                    self.try_move_sprite(self._player, dx, dy)
+                elif other.name == 'exit':
+                    won = True
+                elif other.name == 'target' and self.touch and self._same_shape():
+                    won = True
+        if won or (not self.touch and self._same_shape()):
+            self.next_level()
+        elif self._target is not None and len(self.current_level.get_sprites_by_tag('merge')) <= 1 \
+                and not self._same_shape():
+            self.lose()                         # every piece merged into another shape: no way left to win
+        self.complete_action()
+
+
+class CaptureGo(ARCBaseGame):
+    def __init__(self, seed: int = 0, n: int = 5, opponent: str = 'random'):
+        self.rng = random.Random(seed)
+        self.n, self.opponent = n, opponent
+        self.agent_first = seed % 2 == 0
+        self.result = None
+        self._reply = False
+        px = np.full((n + 2, n + 2), BORDER, dtype=np.int8)
+        px[1:-1, 1:-1] = EMPTY
+        super().__init__(game_id='capturego', levels=[Level(sprites=[Sprite(pixels=px, name='board')],
+                                                            grid_size=(n + 2, n + 2))],
+                         camera=Camera(width=n + 2, height=n + 2, background=EMPTY, letter_box=3))
+
+    def _board(self):
+        return self.current_level.get_sprites_by_name('board')[0]
+
+    def _group(self, b, p):
+        """The group of stones at p and its liberties"""
+        colour, group, libs, stack = b[p], {p}, set(), [p]
+        while stack:
+            r, c = stack.pop()
+            for q in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)):
+                if 0 <= q[0] < self.n and 0 <= q[1] < self.n:
+                    if b[q] == EMPTY:
+                        libs.add(q)
+                    elif b[q] == colour and q not in group:
+                        group.add(q)
+                        stack.append(q)
+        return group, libs
+
+    def _play(self, b, p, colour):
+        """Place a stone (b is changed): the stones captured, or None if the move is not allowed"""
+        if b[p] != EMPTY:
+            return None
+        b[p] = colour
+        other = THEIRS if colour == MINE else MINE
+        captured = set()
+        r, c = p
+        for q in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)):
+            if 0 <= q[0] < self.n and 0 <= q[1] < self.n and b[q] == other:
+                group, libs = self._group(b, q)
+                if not libs:
+                    captured |= group
+        if not captured and not self._group(b, p)[1]:
+            b[p] = EMPTY                        # (no liberty and no capture: not allowed)
+            return None
+        for q in captured:
+            b[q] = EMPTY
+        return captured
+
+    def _allowed(self, b, colour):
+        out = []
+        for p in zip(*np.nonzero(b == EMPTY)):
+            trial = b.copy()
+            if self._play(trial, (int(p[0]), int(p[1])), colour) is not None:
+                out.append((int(p[0]), int(p[1])))
+        return out
+
+    def _opponent_move(self, b):
+        allowed = self._allowed(b, THEIRS)
+        if not allowed:
+            return None
+        if self.opponent == 'greedy':
+            for p in allowed:
+                trial = b.copy()
+                if self._play(trial, p, THEIRS):
+                    return p                    # a capture
+            for p in allowed:                   # give a group in atari a second liberty
+                trial = b.copy()
+                self._play(trial, p, THEIRS)
+                group, libs = self._group(trial, p)
+                if len(libs) >= 2 and any(len(self._group(b, q)[1]) == 1 for q in group if b[q] == THEIRS):
+                    return p
+        return self.rng.choice(allowed)
+
+    def on_set_level(self, level):
+        self.result = None
+        self._reply = False
+        if not self.agent_first:
+            sprite = level.get_sprites_by_name('board')[0]
+            px = sprite.pixels.copy()
+            b = px[1:-1, 1:-1]
+            self._play(b, self._opponent_move(b), THEIRS)
+            sprite.pixels = px
+
+    def step(self):
+        sprite = self._board()
+        px = sprite.pixels.copy()
+        b = px[1:-1, 1:-1]
+        if self._reply:                         # the opponent's move, in a second frame
+            self._reply = False
+            p = self._opponent_move(b)
+            if p is None:
+                self.result = 'draw'
+                self.lose()
+            else:
+                captured = self._play(b, p, THEIRS)
+                sprite.pixels = px
+                if captured:
+                    self.result = 'loss'
+                    self.lose()
+                elif not self._allowed(b, MINE):
+                    self.result = 'draw'
+                    self.lose()
+            self.complete_action()
+            return
+        if self.action.id == GameAction.ACTION6:
+            at = self.camera.display_to_grid(self.action.data.get('x', 0), self.action.data.get('y', 0))
+            if at is not None:
+                c, r = at[0] - 1, at[1] - 1
+                if 0 <= r < self.n and 0 <= c < self.n:
+                    captured = self._play(b, (r, c), MINE)
+                    if captured is not None:
+                        sprite.pixels = px
+                        if captured:
+                            self.result = 'win'
+                            self.win()
+                        else:
+                            self._reply = True  # the action goes on: one more frame, for the opponent
+                            return
+        self.complete_action()
+
+
+class FullGo(CaptureGo):
+    PLIES_PER_POINT = 2.4                       # the game ends after this many moves per point (60 on 5 x 5)
+
+    def __init__(self, seed: int = 0, n: int = 5, opponent: str = 'random'):
+        self.history: set = set()
+        self.passes = 0
+        self.plies = 0
+        self.moves: list = []                   # (colour, (row, col) or None for a pass), in order
+        self._gtp = None
+        self.gnugo_refused = 0                  # GNU Go moves these rules did not allow (taken as passes)
+        super().__init__(seed, n, opponent)
+        self._available_actions = [5, 6]
+
+    # ---------------------------------------------------------- GNU Go
+    def _vertex(self, p) -> str:
+        return 'pass' if p is None else 'ABCDEFGHJKLMNOPQRST'[p[1]] + str(self.n - p[0])
+
+    def _point(self, v: str):
+        v = v.strip().upper()
+        if v in ('PASS', 'RESIGN'):
+            return None
+        return self.n - int(v[1:]), 'ABCDEFGHJKLMNOPQRST'.index(v[0])
+
+    def _ask(self, command: str) -> str:
+        self._gtp.stdin.write(command + '\n')
+        self._gtp.stdin.flush()
+        lines = []
+        while True:
+            line = self._gtp.stdout.readline()
+            if not line:
+                raise RuntimeError('GNU Go stopped')
+            if line.strip() == '' and lines:
+                break
+            if line.strip():
+                lines.append(line.strip())
+        if not lines[0].startswith('='):
+            raise RuntimeError(f'GNU Go: {command}: {lines}')
+        return lines[0][1:].strip()
+
+    def _gnugo_move(self, b):
+        if self._gtp is None:
+            exe = shutil.which('gnugo') or '/usr/games/gnugo'
+            self._gtp = subprocess.Popen([exe, '--mode', 'gtp', '--level', self.opponent[5:] or '10',
+                                          '--chinese-rules', '--positional-superko', '--capture-all-dead', '--komi', '0'],
+                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        mine = 'black' if self.agent_first else 'white'
+        theirs = 'white' if self.agent_first else 'black'
+        self._ask(f'boardsize {self.n}')
+        self._ask('clear_board')
+        self._ask('komi 0')
+        for colour, p in self.moves:
+            self._ask(f'play {mine if colour == MINE else theirs} {self._vertex(p)}')
+        p = self._point(self._ask(f'genmove {theirs}'))
+        if p is not None and p not in self._allowed(b, THEIRS):
+            self.gnugo_refused += 1
+            return None
+        return p
+
+    def __del__(self):
+        if getattr(self, '_gtp', None) is not None:
+            try:
+                self._gtp.stdin.write('quit\n')
+                self._gtp.stdin.flush()
+                self._gtp.wait(timeout=5)
+            except Exception:
+                self._gtp.kill()
+
+    def _ko(self, b, p, colour) -> bool:
+        """Whether placing at p repeats an earlier position"""
+        trial = b.copy()
+        return self._play(trial, p, colour) is not None and trial.tobytes() in self.history
+
+    def _allowed(self, b, colour):
+        return [p for p in super()._allowed(b, colour) if not self._ko(b, p, colour)]
+
+    def area(self, b, colour) -> int:
+        """Stones of the colour and the empty regions only its stones border"""
+        out = int((b == colour).sum())
+        seen = set()
+        for r, c in zip(*np.nonzero(b == EMPTY)):
+            if (r, c) in seen:
+                continue
+            region, border, stack = {(r, c)}, set(), [(r, c)]
+            while stack:
+                pr, pc = stack.pop()
+                for q in ((pr - 1, pc), (pr + 1, pc), (pr, pc - 1), (pr, pc + 1)):
+                    if 0 <= q[0] < self.n and 0 <= q[1] < self.n:
+                        if b[q] == EMPTY and q not in region:
+                            region.add(q)
+                            stack.append(q)
+                        elif b[q] != EMPTY:
+                            border.add(int(b[q]))
+            seen |= region
+            if border == {colour}:
+                out += len(region)
+        return out
+
+    def _eye(self, b, p, colour) -> bool:
+        r, c = p
+        return all(not (0 <= q[0] < self.n and 0 <= q[1] < self.n) or b[q] == colour
+                   for q in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)))
+
+    def _opponent_move(self, b):
+        if self.opponent.startswith('gnugo'):
+            return self._gnugo_move(b)
+        moves = [p for p in self._allowed(b, THEIRS) if not self._eye(b, p, THEIRS)]
+        if not moves or (self.passes == 1 and self.area(b, THEIRS) >= self.area(b, MINE)):
+            return None
+        if self.opponent == 'greedy':
+            for p in moves:
+                trial = b.copy()
+                if self._play(trial, p, THEIRS):
+                    return p
+            for p in moves:
+                trial = b.copy()
+                self._play(trial, p, THEIRS)
+                group, libs = self._group(trial, p)
+                if len(libs) >= 2 and any(len(self._group(b, q)[1]) == 1 for q in group if b[q] == THEIRS):
+                    return p
+        return self.rng.choice(moves)
+
+    def on_set_level(self, level):
+        self.result = None
+        self._reply = False
+        self.passes, self.plies = 0, 0
+        self.moves = []
+        px = level.get_sprites_by_name('board')[0].pixels
+        self.history = {px[1:-1, 1:-1].copy().tobytes()}
+        if not self.agent_first:
+            sprite = level.get_sprites_by_name('board')[0]
+            px = sprite.pixels.copy()
+            b = px[1:-1, 1:-1]
+            p = self._opponent_move(b)
+            if p is not None:
+                self._play(b, p, THEIRS)
+                self.history.add(b.tobytes())
+            self.moves.append((THEIRS, p))
+            self.passes = int(p is None)
+            self.plies = 1
+            sprite.pixels = px
+
+    def _end(self, b):
+        mine, theirs = self.area(b, MINE), self.area(b, THEIRS)
+        self.result = 'win' if mine > theirs else 'loss' if mine < theirs else 'draw'
+        if self.result == 'win':
+            self.win()
+        else:
+            self.lose()
+
+    def _after_ply(self, b, passed: bool, colour=None, p=None) -> bool:
+        """Count the ply (colour's move p, None: a pass); whether the game has ended"""
+        self.moves.append((colour, p))
+        self.passes = self.passes + 1 if passed else 0
+        self.plies += 1
+        if not passed:
+            self.history.add(b.tobytes())
+        if self.passes >= 2 or self.plies >= round(self.PLIES_PER_POINT * self.n * self.n):
+            self._end(b)
+            return True
+        return False
+
+    def step(self):
+        sprite = self._board()
+        px = sprite.pixels.copy()
+        b = px[1:-1, 1:-1]
+        if self._reply:                         # the opponent's move (or pass), in a second frame
+            self._reply = False
+            p = self._opponent_move(b)
+            if p is not None:
+                self._play(b, p, THEIRS)
+                sprite.pixels = px
+            self._after_ply(b, p is None, THEIRS, p)
+            self.complete_action()
+            return
+        if self.action.id == GameAction.ACTION5:            # a pass
+            if not self._after_ply(b, True, MINE):
+                self._reply = True
+                return
+        elif self.action.id == GameAction.ACTION6:
+            at = self.camera.display_to_grid(self.action.data.get('x', 0), self.action.data.get('y', 0))
+            if at is not None:
+                c, r = at[0] - 1, at[1] - 1
+                if 0 <= r < self.n and 0 <= c < self.n and not self._ko(b, (r, c), MINE):
+                    if self._play(b, (r, c), MINE) is not None:
+                        sprite.pixels = px
+                        if not self._after_ply(b, False, MINE, (r, c)):
+                            self._reply = True  # the action goes on: one more frame, for the opponent
+                            return
+        self.complete_action()
+
+
 def _k_game(**kw):
     def make(seed: int = 0):
         return KInARow(seed=seed, **kw)
@@ -517,8 +960,52 @@ GAMES = {'lights': LightsOut, 'clear': ClearRed, 'tictactoe': TicTacToe, 'tetris
          'tictactoe-random': _k_game(rows=3, cols=3, k=3, drop=False, colours=(0, 9, 6, 4)),
          'tetris-wide': lambda seed=0: Tetris(seed, width=10, height=16, colours=[14, 13, 15, 10, 7, 4, 1]),
          'tetris-small': lambda seed=0: Tetris(seed, width=6, height=12),
-         'maze': Maze, 'maze-b': lambda seed=0: Maze(seed, n=12, colours=(1, 4, 12, 14, 6))}
-BOARD_GAMES = ('connect4', 'connect4-block', 'gomoku', 'gomoku-block', 'tictactoe-block', 'tictactoe-random')
+         'maze': Maze, 'maze-b': lambda seed=0: Maze(seed, n=12, colours=(1, 4, 12, 14, 6)),
+         'exit-shape': ShapeGame,
+         'shape-touch': lambda seed=0: ShapeGame(seed, kinds=('shape1', 'shape2', 'shape3'), touch=True),
+         'capture-go': CaptureGo, 'capture-go-greedy': lambda seed=0: CaptureGo(seed, opponent='greedy'),
+         'go': FullGo, 'go-greedy': lambda seed=0: FullGo(seed, opponent='greedy'),
+         'go-gnugo': lambda seed=0: FullGo(seed, opponent='gnugo10'),
+         'go-gnugo1': lambda seed=0: FullGo(seed, opponent='gnugo1')}
+
+
+def _sized_go(name: str):
+    """
+    Full Go on a board of any size, by name: 'go<n>' (n x n, 2 <= n <= 19, the random opponent),
+    'go<n>-greedy', 'go<n>-gnugo' (GNU Go, level 10) and 'go<n>-gnugo<level>'; None for other names
+    """
+    m = re.fullmatch(r'go(\d+)(?:-(greedy|gnugo)(\d*))?', name)
+    if m is None or not 2 <= int(m.group(1)) <= 19 or (m.group(2) == 'greedy' and m.group(3)):
+        return None
+    n, kind, level = int(m.group(1)), m.group(2), m.group(3)
+    opponent = 'random' if kind is None else 'greedy' if kind == 'greedy' else 'gnugo' + (level or '10')
+
+    def make(seed: int = 0):
+        return FullGo(seed, n=n, opponent=opponent)
+    return make
+
+
+class _Games(dict):
+    """GAMES: the games listed, and full Go of any board size by name (_sized_go)"""
+    def __missing__(self, name):
+        make = _sized_go(name)
+        if make is None:
+            raise KeyError(name)
+        return make
+
+    def __contains__(self, name):
+        return dict.__contains__(self, name) or _sized_go(name) is not None
+
+
+class _Names(tuple):
+    """BOARD_GAMES: the names listed, and full Go of any board size"""
+    def __contains__(self, name):
+        return tuple.__contains__(self, name) or _sized_go(name) is not None
+
+
+GAMES = _Games(GAMES)
+BOARD_GAMES = _Names(('connect4', 'connect4-block', 'gomoku', 'gomoku-block', 'tictactoe-block', 'tictactoe-random',
+                      'capture-go', 'capture-go-greedy', 'go', 'go-greedy', 'go-gnugo', 'go-gnugo1'))
 
 
 class _LocalEnv:

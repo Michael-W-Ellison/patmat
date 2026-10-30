@@ -33,7 +33,11 @@ values. What is learned:
   predicts); if the level ends first, the first outcome listed is taken.
 - the goal, from level completions: the winning move either touched an
   object (contact goal, by key), or produced an agent whose pattern equals
-  another object's pattern (shape goal). If the outcome of the winning move
+  another object's pattern (shape goal); a winning touch of an object that
+  had the agent's pattern also makes "touch an object while having its
+  shape" a goal (both conditions at once), kept until such a touch does
+  not win, as a contact goal is kept until its object is touched without
+  a win. If the outcome of the winning move
   was not known, the outcomes that would make it a shape match are tried
   and the one that does is learned.
 - after a transition the rules do not explain, the agent is found again
@@ -42,6 +46,37 @@ values. What is learned:
 - a background cell the agent could not enter is a hidden wall for the
   rest of the level; transitions seen are remembered exactly, actions that never change anything are no-ops, and
   moves that lost the game are not planned again.
+
+Group effects: a change of several cells is read, where it can be, as one
+cell placed (e to w) and whole groups removed - the groups (4-connected
+cells of one value) of other values than w that the placement left
+touching no cell of e, every such group and nothing else (_split_groups).
+The click model then learns from the placement alone, and a group rule
+(the values whose groups are removed) is kept and applied after every
+predicted placement, the agent's and the other players'; while no
+placement has contradicted it (left such a group in place). A click that
+changes nothing on a value whose clicks have changed things is blocked
+(as a move into a wall), and when its placement would have left its own
+group touching no cell of e, removing nothing, such placements are taken
+to do nothing. Removal goals: a win that removed cells of a
+value that moves do not replace makes removing cells of that value a
+goal, and another player's move that removed some of the agent's cells and
+lost makes it a loss; the search counts them as wins and losses, and
+values positions by how few empty cells the groups of those values touch.
+
+Passes and counts: an action other than a click that leaves the grid as
+it was while the game goes on (other players' frames follow) or ends is a
+pass; another player's frame that changes nothing is its pass. A round in
+which every player passes (the agent after the others, or the others after
+the agent) is counted as ending the game or not. The grids of the games
+such rounds ended test the count goals: a measure m (COUNT_MEASURES:
+'cells', the cells of the agent's marks minus the other players'; 'area',
+those and the regions of replaced cells that only one side's marks
+border) is kept while every such game was won exactly when m > 0. Once
+rounds of passes have ended the game more often than not and a count goal
+is left, the search considers passes (the agent's and, if seen, the other
+players'), scores a round of passes by the count goals (won by all: 1, by
+none: -1, else 0) and values other positions by the count as well.
 
 Clicks (ACTION6, actions ('click', row, col)): what clicking a cell does
 is learned per value of the clicked cell, as the first of these that fits
@@ -175,12 +210,14 @@ have been a blocked move: see _maybe_blocked.
 """
 
 import random
+import time
 from collections import Counter, deque
 from typing import Dict, FrozenSet, List, Optional, Tuple
 
 import numpy as np
 
 from action_puzzles import solve_xor
+from shapes import GEOMETRY, MIRRORS, TURNS, canonical, components, fits_in, pattern     # (shared with the ARC solver)
 
 Pos = Tuple[int, int]
 SIDES = ((-1, 0), (1, 0), (0, -1), (0, 1))
@@ -188,22 +225,26 @@ BFS_LIMIT = 30_000
 NOOP_STATES = 3
 OUTCOMES = ('block', 'merge', 'push')
 CLICK = 6
-MAX_CLICKS = 64
+MAX_CLICKS = 128
 MAX_DEPTH = 5
 DISCOUNT = 0.9
 SEARCH_NODES = 3000         # positions searched per depth of the iterative deepening
+COUNT_MEASURES = ('cells', 'area')     # see ObjectAgent._tally
+PLAYOUTS_PER_MOVE = 120     # simulated games per move the agent can make, per search of the playout search (_mcts)
+SEARCH_SECONDS = 30.0       # ... but no longer than this per search
+UCT_C = 0.7                 # exploration constant of its tree
+PATTERN_BETA = 6.0          # how strongly simulated games prefer moves of patterns that won (_pattern_weight)
+PATTERN_BATCH = 8           # simulated games order cells by pattern within batches of this many random cells
+RAVE_EQUIV = 300            # simulated games at which a move's own results and its shared (RAVE) results weigh equally
+PRIOR_VISITS = 10           # the weight, in visits, of a move's pattern value in the playout search's tree
+NEIGHBOURS = ((-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1))
+ROLE_EMPTY, ROLE_OWN, ROLE_OTHER, ROLE_EDGE = 0, 1, 2, 3
 MAX_OPTIONS = 12            # moves considered per player in a position (those near marks, if more)
 LINE_DIRS = ((0, 1), (1, 0), (1, 1), (1, -1))
 ANY = -100                  # line hypotheses over any non-background value
 MIN_LINE = 3                # the shortest line a line hypothesis is about
 MISS_RATIO = 3              # a line hypothesis is kept while formed MISS_RATIO times as often in wins as elsewhere
 CE_POPULATION, CE_ELITE, CE_MIN_STD, CE_SMOOTH = 8, 3, 0.2, 0.7
-TURNS = ('turn right', 'turn left', 'half turn')
-MIRRORS = ('mirror left-right', 'mirror up-down', 'transpose')
-GEOMETRY = {
-    'turn right': lambda a: np.rot90(a, -1), 'turn left': lambda a: np.rot90(a, 1), 'half turn': lambda a: np.rot90(a, 2),
-    'mirror left-right': np.fliplr, 'mirror up-down': np.flipud, 'transpose': np.transpose,
-}
 FEATURES = ('height', 'holes', 'roughness')
 
 
@@ -234,6 +275,7 @@ class ClickModel:
         self.drops = {d: True for d in SIDES}       # drop along d still fits every click seen
         self.drop_values: Optional[Tuple[int, int]] = None    # (value the cell held, value placed)
         self.like: Optional[Pos] = None             # a drop direction expected (a generic or universal pattern)
+        self.blocked = 0                            # clicks that changed nothing, where others did
 
     @staticmethod
     def drop_target(grid, cell, d, empty) -> Optional[Pos]:
@@ -268,8 +310,18 @@ class ClickModel:
                 self.drops[d] = False
 
     def update(self, grid, cell, obj, after):
-        self.seen.append((grid, cell, obj, after))
         changed = {(int(r), int(c)) for r, c in np.argwhere(grid != after)}
+        # a click that changes nothing, where clicks on this value have changed things, was blocked (as a move
+        # into a wall is): it says nothing about what a click does; earlier clicks that all changed nothing
+        # were blocked too once one changes something
+        if not changed and self.seen and not self.ok['none']:
+            self.blocked += 1
+            return
+        if changed and self.seen and self.ok['none']:
+            blocked, like = self.blocked + len(self.seen), self.like
+            self.__init__()
+            self.blocked, self.like = blocked, like
+        self.seen.append((grid, cell, obj, after))
         self._update_drop(grid, cell, changed, after)
         if changed:
             self.ok['none'] = False
@@ -364,17 +416,6 @@ def _inside(grid, p) -> bool:
     return 0 <= p[0] < grid.shape[0] and 0 <= p[1] < grid.shape[1]
 
 
-def pattern(grid, cells) -> tuple:
-    """Values of the cells over their bounding box (-1 off the cells)"""
-    rows = [p[0] for p in cells]
-    cols = [p[1] for p in cells]
-    r0, c0 = min(rows), min(cols)
-    out = [[-1] * (max(cols) - c0 + 1) for _ in range(max(rows) - r0 + 1)]
-    for p in cells:
-        out[p[0] - r0][p[1] - c0] = int(grid[p])
-    return tuple(map(tuple, out))
-
-
 def shifted(cells, d) -> FrozenSet[Pos]:
     return frozenset((p[0] + d[0], p[1] + d[1]) for p in cells)
 
@@ -382,6 +423,8 @@ def shifted(cells, d) -> FrozenSet[Pos]:
 class ObjectAgent:
     learns_from_losses = True
     uses_frames = True
+    playout_search = True               # games decided by a count after a round of passes: _mcts
+    use_patterns = True                 # ... guided by the placement patterns learned (move_patterns)
 
     def __init__(self, rng: Optional[random.Random] = None):
         self.rng = rng or random.Random()
@@ -401,12 +444,16 @@ class ObjectAgent:
         self.contact_kinds: Dict[tuple, str] = {}  # contact goal pattern -> 'unique' / 'repeated' (in its level)
         self.contact_rejected: set = set()          # patterns touched without a win
         self.shape_goal = False
+        self.shape_contact = False                  # goal: touch an object that has the agent's shape
         self.pending = None                         # a contact whose outcome the next move will tell
         self.hidden_walls: set = set()              # cells of this level that block though drawn as background
         self.seen_patterns: set = set()             # patterns the agent has had
         self.clicks = True
         self.click_models: Dict[int, ClickModel] = {}
         self.absent_goals: set = set()              # values whose removal won a level
+        self.removal_goals: set = set()             # values some of whose cells were removed when a level was won
+        self.removal_losses: set = set()            # values some of whose cells another player's move removed, losing
+        self.group_rule = {'empty': None, 'cleared': set(), 'void': 0, 'counter': 0}   # see _split_groups
         self.absent_rejected: set = set()           # values removed without winning
         self.trying: Optional[int] = None           # the value a plan is removing to test it as the goal
         self.others: List[Dict[int, ClickModel]] = []   # per other player (later frames): its move models
@@ -451,11 +498,26 @@ class ObjectAgent:
         self.meta_ops: set = set()                      # geometric operations of the rotation / reflection elements
         self.prior_shape = False                        # "take another object's shape" tried as the goal
         self.shape_rejected = False                     # ... and reached without a win
+        self._goal_turn: Optional[str] = None           # 'reach' or 'shape_match': the element being tried
+        self._reach_used_up = False                     # no object left to try touching (reach)
         self._loss_predicted = False                    # the losing move's outcome was predicted (after_step)
+        self.pass_actions: set = set()                  # actions (not clicks) that change nothing, the game going on
+        self.others_pass = False                        # another player's frame has changed nothing (a pass)
+        self.round_end = Counter()                      # rounds in which every player passed: 'ended', 'went on'
+        self.count_ends: List[tuple] = []               # (grid, won) of games a round of passes ended
+        self.count_goals: Optional[set] = None          # measures m consistent with: won iff m(mine) > m(theirs)
+        self._others_passed = False                     # the other players' last frames changed nothing
+        self.move_patterns: Dict[tuple, list] = {}      # placement pattern -> [reward sum, moves] (_move_key)
+        self._game_moves: List[tuple] = []              # (placement pattern, player) of the game being played
+        self._canon: Dict[tuple, tuple] = {}            # 8 neighbour roles -> placement pattern (a cache)
+        self.repeat_rule = Counter()                    # clicks predicted to repeat a position: 'refused', 'allowed'
+        self._history: set = set()                      # (shape, bytes) of the positions of this level so far
 
     # ------------------------------------------------------------ objects
     def _walls(self) -> set:
-        return {v for v, c in self.value_rules.items() if set(c) == {'block'}}
+        """Values whose contacts only ever block (not values the agent itself has held)"""
+        own = {v for pat in self.agent_patterns | self.start_patterns for row in pat for v in row}
+        return {v for v, c in self.value_rules.items() if set(c) == {'block'} and v not in own}
 
     def _object(self, grid, start: Pos, agent) -> FrozenSet[Pos]:
         walls = self._walls()
@@ -566,9 +628,13 @@ class ObjectAgent:
         if seen is not None:
             return seen
         if isinstance(action, tuple):
-            return self._click(grid, agent, action[1:])
+            nxt = self._click(grid, agent, action[1:])
+            if nxt is not None and self._repeat_rule_on() and not np.array_equal(nxt[0], grid) \
+                    and self._seen_before(nxt[0]):
+                return grid, agent                  # (it would repeat a position: refused)
+            return nxt
         u = self.unchanged_in.get(action)
-        if u is not None and len(u) >= NOOP_STATES:
+        if u is not None and (len(u) >= NOOP_STATES or action in self.pass_actions):
             return grid, agent
         return self._by_rules(grid, agent, action)
 
@@ -588,11 +654,139 @@ class ObjectAgent:
                     queue.append(q)
         return frozenset(seen)
 
+    # ------------------------------------------------------ group effects
+    @staticmethod
+    def _bare_groups(grid, values, empty) -> set:
+        """Cells of the groups (4-connected cells of one value) of the given values that touch no cell of `empty`"""
+        out = set()
+        for v in values:
+            for g in components((grid == v).astype(int), 0):
+                if not any(_inside(grid, q) and grid[q] == empty
+                           for p in g for q in ((p[0] - 1, p[1]), (p[0] + 1, p[1]), (p[0], p[1] - 1), (p[0], p[1] + 1))):
+                    out |= g
+        return out
+
+    def _split_groups(self, before, after, cell=None):
+        """
+        A change of several cells read as one cell placed (e to w) and whole groups removed (back to e): the
+        groups, of other values than w, that the placed cell left touching no cell of e - every such group,
+        and nothing else. (placed cell, the grid with only the placement, values removed, e) or None.
+        """
+        changed = [(int(r), int(c)) for r, c in np.argwhere(before != after)]
+        if len(changed) < 2:
+            return None
+        order = sorted(changed, key=lambda p: p != cell)
+        for q in order:
+            e, w = int(before[q]), int(after[q])
+            rest = [p for p in changed if p != q]
+            if any(int(after[p]) != e or int(before[p]) in (e, w) for p in rest):
+                continue
+            mid = before.copy()
+            mid[q] = w
+            # (only groups next to the placed cell can have lost their last cell of e to it)
+            if set(rest) == self._bare_around(mid, q, set(np.unique(mid).tolist()) - {e, w}, e):
+                return q, mid, {int(before[p]) for p in rest}, e
+        return None
+
+    def _bare_around(self, grid, q, values, empty) -> set:
+        """Cells of the groups of the given values next to q that touch no cell of `empty`"""
+        out = set()
+        for d in SIDES:
+            p = (q[0] + d[0], q[1] + d[1])
+            if _inside(grid, p) and int(grid[p]) in values and p not in out:
+                group, free = self._group_at(grid, p, empty)
+                if not free:
+                    out |= group
+        return out
+
+    def _group_rule_on(self) -> bool:
+        r = self.group_rule
+        return r['empty'] is not None and bool(r['cleared']) and r['counter'] == 0
+
+    def _cleared(self) -> set:
+        """
+        The values whose groups the rule removes: those seen removed and, when every player's moves place
+        marks on cells of the same values (_placements), every player's marks once any player's were
+        """
+        cleared = set(self.group_rule['cleared'])
+        placements = self._placements()
+        if placements and all(set(t) == set(placements[0]) for t in placements):
+            marks = {w for t in placements for w in t.values()}
+            if cleared & marks:
+                cleared |= marks
+        return cleared
+
+    def _learn_groups(self, before, after, cell):
+        """
+        The grid the click's own model should learn from: the placement only, when the change is one placed
+        cell and groups removed (the group rule learns that); a placement that removes nothing must leave no
+        group of a value the rule clears touching no cell of e (else the rule is contradicted)
+        """
+        split = self._split_groups(before, after, cell)
+        r = self.group_rule
+        if split is not None:
+            _, mid, removed, e = split
+            if r['empty'] in (None, e):
+                r['empty'] = e
+                r['cleared'] |= removed
+                return mid
+            return after
+        changed = [(int(x), int(y)) for x, y in np.argwhere(before != after)]
+        if len(changed) == 1 and self._group_rule_on() and int(before[changed[0]]) == r['empty']:
+            w = int(after[changed[0]])
+            if self._bare_around(after, changed[0], r['cleared'] - {w}, r['empty']):
+                r['counter'] += 1               # a group was left touching no empty cell, and stayed
+        return after
+
+    def _with_groups(self, grid, after):
+        """The groups the learned rule removes after a placement (or no change, if it would be void)"""
+        if after is None or not self._group_rule_on():
+            return after
+        changed = [(int(x), int(y)) for x, y in np.argwhere(grid != after)]
+        if len(changed) != 1:
+            return after
+        q = changed[0]
+        r = self.group_rule
+        if int(grid[q]) != r['empty']:
+            return after
+        w = int(after[q])
+        out = after.copy()
+        # (only the groups next to the placed cell can have lost their last empty neighbour)
+        removed, cleared = set(), self._cleared() - {w}
+        for d in SIDES:
+            p = (q[0] + d[0], q[1] + d[1])
+            if _inside(after, p) and int(after[p]) in cleared and p not in removed:
+                group, free = self._group_at(after, p, r['empty'])
+                if not free:
+                    removed |= group
+        for p in removed:
+            out[p] = r['empty']
+        if not removed and r['void'] > 0 and not self._group_at(out, q, r['empty'])[1]:
+            return grid                         # (a placement that leaves its own group bare does nothing)
+        return out
+
+    @staticmethod
+    def _group_at(grid, p, empty) -> Tuple[set, bool]:
+        """(the group of cells of p's value connected to p, whether it touches a cell of `empty`)"""
+        v, group, stack, free = grid[p], {p}, [p], False
+        h, w = grid.shape
+        while stack:
+            r, c = stack.pop()
+            for q in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)):
+                if 0 <= q[0] < h and 0 <= q[1] < w and q not in group:
+                    x = grid[q]
+                    if x == v:
+                        group.add(q)
+                        stack.append(q)
+                    elif x == empty:
+                        free = True
+        return group, free
+
     def _click(self, grid, agent, cell):
         model = self.click_models.get(int(grid[cell]))
         if model is None:
             return None
-        after = model.predict(grid, cell, self._clicked(grid, cell))
+        after = self._with_groups(grid, model.predict(grid, cell, self._clicked(grid, cell)))
         if after is None:
             return None
         return after, self._agent_after(grid, agent, after)
@@ -603,7 +797,8 @@ class ObjectAgent:
             return agent
         return None
 
-    def _click_actions(self, grid) -> List[tuple]:
+    def _click_actions(self, grid, limit: bool = True) -> List[tuple]:
+        """The clicks worth trying (at most MAX_CLICKS if limit)"""
         out = []
         for v in sorted(set(np.unique(grid).tolist())):
             cells = [(int(r), int(c)) for r, c in np.argwhere(grid == v)]
@@ -627,11 +822,11 @@ class ObjectAgent:
                     if q is not None and q not in targets:
                         targets.add(q)
                         out.append(p)
-        return [('click',) + p for p in out[:MAX_CLICKS]]
+        return [('click',) + p for p in (out[:MAX_CLICKS] if limit else out)]
 
-    def _actions(self, grid, actions) -> List:
+    def _actions(self, grid, actions, limit: bool = True) -> List:
         moves = [a for a in actions if a != CLICK]
-        return moves + (self._click_actions(grid) if CLICK in actions else [])
+        return moves + (self._click_actions(grid, limit) if CLICK in actions else [])
 
     def _xor_plan(self, grid, v) -> Optional[List[tuple]]:
         """Clicks that remove value v when every value present toggles the same offsets between two values"""
@@ -782,8 +977,31 @@ class ObjectAgent:
             if self.bg is None:
                 vals, counts = np.unique(before, return_counts=True)
                 self.bg = int(vals[np.argmax(counts)])
-            self.click_models.setdefault(int(before[cell]), ClickModel()).update(
-                before, cell, self._clicked(before, cell), after)
+            expected = self._click(before, self.agent, cell)
+            repeats = expected is not None and expected[0].shape == before.shape and \
+                not np.array_equal(expected[0], before) and self._seen_before(expected[0])
+            model = self.click_models.setdefault(int(before[cell]), ClickModel())
+            primary = self._learn_groups(before, after, cell)
+            void = False
+            if repeats and np.array_equal(before, after):
+                # refused, and what the models predict would have repeated an earlier position: evidence that
+                # moves may not repeat a position (and not that the click does nothing)
+                self.repeat_rule['refused'] += 1
+                void = True
+            elif not np.array_equal(before, after) and self._seen_before(after):
+                self.repeat_rule['allowed'] += 1
+            if not void and np.array_equal(before, after) and self._group_rule_on() and \
+                    int(before[cell]) == self.group_rule['empty']:
+                placed = model.predict(before, cell, self._clicked(before, cell))
+                if placed is not None and not np.array_equal(placed, before):
+                    q = tuple(np.argwhere(placed != before)[0])
+                    w = int(placed[q])
+                    if not self._bare_groups(placed, self._cleared() - {w}, self.group_rule['empty']) \
+                            and q in self._bare_groups(placed, {w}, self.group_rule['empty']):
+                        self.group_rule['void'] += 1    # a placement that would leave its group bare: void
+                        void = True
+            if not void:
+                model.update(before, cell, self._clicked(before, cell), primary)
             agent_after = self._agent_after(before, self.agent, after)
             self.outcomes[(state, action)] = (after, agent_after)
             self.outcomes_by_grid[(before.shape, before.tobytes(), action)] = (after, agent_after)
@@ -983,7 +1201,8 @@ class ObjectAgent:
 
     def _goal_trials(self, grid) -> set:
         """Values to try as "no cell holds v" goals: only while no goal is known and clicks change something"""
-        if self.win_contacts or self.shape_goal or self.absent_goals or self.line_goals:
+        if self.win_contacts or self.shape_goal or self.shape_contact or self.absent_goals or self.line_goals \
+                or self.removal_goals:
             return set()
         if self.drift:
             return set()
@@ -1072,18 +1291,38 @@ class ObjectAgent:
                             self.prior_lines[self._prior_hyps[h]]['falsified'] = True
             if self.absent_goals and not lost:
                 self.absent_goals = {v for v in self.absent_goals if not ((prev == v).any() and not (cur == v).any())}
+            # cells of a value removed without a win (a loss) is evidence against removal goals (losses)
+            if self.removal_goals and not lost:
+                self.removal_goals = {v for v in self.removal_goals if not self._reduced(prev, cur, {v})}
+            if self.removal_losses and not lost:
+                self.removal_losses = {v for v in self.removal_losses if not self._reduced(prev, cur, {v})}
+
+    @staticmethod
+    def _reduced(before, after, values) -> bool:
+        """Whether the transition removed cells of any of the values"""
+        return after is not None and before.shape == after.shape and \
+            any(int((after == v).sum()) < int((before == v).sum()) for v in values)
+
+    def _loses(self, grid, after) -> bool:
+        """Whether a transition forms a line that loses or removes cells of a value whose removal lost"""
+        return bool(self.line_losses and self._formed(grid, after, self.line_losses) > 0) or \
+            (bool(self.removal_losses) and self._reduced(grid, after, self.removal_losses))
 
     def wins_with(self, grid, agent, action, nxt) -> bool:
         if self._removes(grid, nxt, self.absent_goals) is not None:
+            return True
+        if self.removal_goals and nxt is not None and self._reduced(grid, nxt[0], self.removal_goals):
             return True
         if self.line_goals and nxt is not None and self._formed(grid, nxt[0], self.line_goals) > 0:
             return True
         d = self._dir(action)
         if agent is None or d is None:
             return False
-        if self.win_contacts or self.prior_contacts:
+        if self.win_contacts or self.prior_contacts or self.shape_contact:
             objs = self._contacts(grid, agent, d) or []
             if any(pattern(grid, o) in self.win_contacts | self.prior_contacts for o in objs):
+                return True
+            if self.shape_contact and any(pattern(grid, o) == pattern(grid, agent) for o in objs):
                 return True
         # (the agent's pattern can only have changed if its number of cells did)
         return ((self.shape_goal or self.prior_shape) and nxt is not None and nxt[1] is not None and len(nxt[1]) != len(agent)
@@ -1095,17 +1334,12 @@ class ObjectAgent:
     @staticmethod
     def _fits(grid, agent, targets) -> bool:
         """Whether the agent's cells, translated, fall on cells of the same values in one of the targets"""
-        cells = [(p, int(grid[p])) for p in agent]
-        (a0, v0) = cells[0]
-        for t in targets:
-            if len(t) < len(cells):
-                continue
-            for q, v in t.items():
-                if v == v0 and all(t.get((p[0] - a0[0] + q[0], p[1] - a0[1] + q[1])) == w for p, w in cells):
-                    return True
-        return False
+        return fits_in([(p, int(grid[p])) for p in agent], targets)
 
     def level_won(self, grid, action, frames=None):
+        self._learn_passes(grid, action, frames, ended=True, won=True)
+        self._record_moves(grid, frames)
+        self._credit_moves(1.0)
         self.wins += 1
         self.episode['score'] += 1
         self.hidden_walls = set()
@@ -1129,6 +1363,14 @@ class ObjectAgent:
             nxt = self._click(grid, self.agent, action[1:])
             if nxt is not None:
                 self.absent_goals |= {v for v in np.unique(grid).tolist() if not (nxt[0] == v).any()}
+            seen = frames[0] if frames and frames[0].shape == grid.shape else None
+            if seen is not None:
+                self._learn_groups(grid, seen, action[1:])     # (the winning move's own effect is seen only here)
+                # cells of a value removed (not a value moves replace when they place a mark): removing cells
+                # of that value wins
+                _, replaced = self._placed(raw=True)
+                self.removal_goals |= {v for v in np.unique(grid).tolist() if v not in replaced and v != self.bg
+                                       and int((seen == v).sum()) < int((grid == v).sum())}
         self.trying = None
         own = frames[0] if frames and frames[0].shape == grid.shape and not np.array_equal(frames[0], grid) \
             else None
@@ -1156,9 +1398,18 @@ class ObjectAgent:
                     for o in objs:
                         self.win_contacts.add(pattern(grid, o))
                         self.contact_kinds[pattern(grid, o)] = self._contact_kind(grid, o, agent)
+                    if any(pattern(grid, o) == pattern(grid, agent) for o in objs):
+                        # (or the win needed both: touching an object while having its shape)
+                        self.shape_contact = True
         self._new_level()
 
     def lost(self, grid=None, action=None, frames=None):
+        if grid is not None:
+            self._learn_passes(grid, action, frames, ended=True, won=False)
+            self._record_moves(grid, frames)
+            # (a game ended by a round of passes with the counts equal is a draw)
+            draw = self._count_known() and all(self._tally(grid, m) == 0 for m in self.count_goals)
+            self._credit_moves(0.5 if draw else 0.0)
         self.losses += 1
         # (a move whose outcome was predicted, as seen, did not lose by what it did: the game was lost for
         # another reason, such as running out of actions, and the move is not avoided later)
@@ -1168,6 +1419,9 @@ class ObjectAgent:
         found = set()
         for prev, cur in self._transitions(grid, frames)[1:]:      # (frames after the agent's own)
             found |= self._line_hypotheses(prev, cur)
+            replaced = self._placed(raw=True)[1]
+            self.removal_losses |= {v for v in np.unique(prev).tolist() if v not in replaced and v != self.bg
+                                    and int((cur == v).sum()) < int((prev == v).sum())}
         self.loss_hits.update(found)
         self.loss_events += bool(found)
         self.line_losses = self._kept(self.loss_hits, self.loss_misses, self.loss_events)
@@ -1185,11 +1439,156 @@ class ObjectAgent:
         self.level_fresh = True
         self.plan = []
         self._level_first = None
+        self._others_passed = False
+        self._history = set()
 
     def new_episode(self):
+        self._game_moves = []
         self._ce_next()
         self.base = None
         self._new_level()
+
+    # ---------------------------------------------------- placement patterns
+    def _roles_for(self, player, side=None, empty=None) -> List[int]:
+        """Each value's role for a player: ROLE_EMPTY (cells moves replace), ROLE_OWN (the player's marks),
+        ROLE_OTHER (other players' marks), ROLE_EDGE (anything else)"""
+        if side is None:
+            side, empty = (x.tolist() for x in self._count_values())
+        own = 1 if player == 0 else -1
+        return [ROLE_EMPTY if empty[v] else ROLE_OWN if side[v] == own else ROLE_OTHER if side[v] else ROLE_EDGE
+                for v in range(len(side))]
+
+    def _key_of(self, around: tuple) -> tuple:
+        """The placement pattern of 8 neighbour roles (in NEIGHBOURS order): the 3 x 3 neighbourhood, the placed
+        cell in the middle, the same however it is turned or mirrored (shapes.canonical)"""
+        key = self._canon.get(around)
+        if key is None:
+            a = around
+            key = canonical(((a[0], a[1], a[2]), (a[3], -1, a[4]), (a[5], a[6], a[7])))
+            self._canon[around] = key
+        return key
+
+    def _move_key(self, grid, cell, roles) -> tuple:
+        h, w = grid.shape
+        return self._key_of(tuple(roles[int(grid[cell[0] + dr, cell[1] + dc])]
+                                  if 0 <= cell[0] + dr < h and 0 <= cell[1] + dc < w else ROLE_EDGE
+                                  for dr, dc in NEIGHBOURS))
+
+    def _placed_cell(self, prev, cur, player, placements) -> Optional[Pos]:
+        """The one cell where the player placed a mark from prev to cur (None if not one)"""
+        if prev.shape != cur.shape or player >= len(placements):
+            return None
+        table = placements[player]
+        cells = [(int(r), int(c)) for r, c in np.argwhere(prev != cur)
+                 if int(prev[r, c]) in table and int(cur[r, c]) == table[int(prev[r, c])]]
+        return cells[0] if len(cells) == 1 else None
+
+    def _seen_before(self, grid) -> bool:
+        return (grid.shape, grid.tobytes()) in self._history
+
+    def _remember(self, grids):
+        for g in grids:
+            self._history.add((g.shape, g.tobytes()))
+
+    def _repeat_rule_on(self) -> bool:
+        """Moves that would repeat an earlier position of the level have been refused (more often than allowed)"""
+        return self.repeat_rule['refused'] > self.repeat_rule['allowed']
+
+    def _record_moves(self, before, frames):
+        """The placements of a step (the agent's, then the other players' in the later frames) with their patterns"""
+        placements = self._placements()
+        if not placements or len(placements) < 2 or not frames:
+            return
+        seq = [before] + list(frames)
+        for player, (prev, cur) in enumerate(zip(seq, seq[1:])):
+            cell = self._placed_cell(prev, cur, player, placements)
+            if cell is not None:
+                self._game_moves.append((self._move_key(prev, cell, self._roles_for(player)), player))
+
+    def _credit_moves(self, outcome: float):
+        """The game ended (outcome for the agent: 1 won, 0 lost, 0.5 drawn): each placement's pattern is credited
+        with the outcome for the player who made it"""
+        for key, player in self._game_moves:
+            stats = self.move_patterns.setdefault(key, [0.0, 0])
+            stats[0] += outcome if player == 0 else 1.0 - outcome
+            stats[1] += 1
+        self._game_moves = []
+
+    def _pattern_value(self, key) -> float:
+        """The share of games won by the players who placed marks in this pattern (smoothed: 0.5 when unseen)"""
+        s, n = self.move_patterns.get(key, (0.0, 0))
+        return (s + 1.0) / (n + 2.0)
+
+    def _pattern_weight(self, key) -> float:
+        return float(np.exp(PATTERN_BETA * (self._pattern_value(key) - 0.5)))
+
+    # ------------------------------------------------------- passes and counts
+    def _learn_passes(self, before, action, frames, ended=False, won=False):
+        """
+        A pass: an action other than a click that leaves the grid as it was while the game goes on (other
+        frames follow) or ends. A round of passes: the agent passes after the other players' last frames
+        changed nothing, or they change nothing after its pass. Whether such rounds end the game is counted;
+        the grids of games they ended (won or not) test the count goals.
+        """
+        seq = list(frames or [])
+        if not seq or seq[0].shape != before.shape:
+            self._others_passed = False
+            return
+        later = seq[1:]
+        others_passed = bool(later) and all(f.shape == before.shape and np.array_equal(f, seq[0]) for f in later)
+        if others_passed:
+            self.others_pass = True
+        passed = not isinstance(action, tuple) and np.array_equal(seq[0], before) and (bool(later) or ended)
+        if passed:
+            self.pass_actions.add(action)
+            if self._others_passed or others_passed:
+                self.round_end['ended' if ended else 'went on'] += 1
+                if ended:
+                    self.count_ends.append((before.copy(), won))
+                    self._test_counts()
+        self._others_passed = others_passed
+
+    def _test_counts(self):
+        self.count_goals = {m for m in COUNT_MEASURES
+                            if all((self._tally(g, m) > 0) == won for g, won in self.count_ends)}
+
+    def _count_known(self) -> bool:
+        """Rounds of passes end the game, and a count goal is consistent with how such games ended"""
+        return bool(self.count_goals) and self.round_end['ended'] > self.round_end['went on']
+
+    def _count_values(self) -> Tuple[np.ndarray, np.ndarray]:
+        """(side of each value: 1 the agent's marks, -1 the other players', 0 neither; whether moves replace it)"""
+        mine, _ = self._placed([self.click_models])
+        theirs = self._placed(self.others)[0] - mine
+        _, empties = self._placed()
+        side, empty = np.zeros(256, np.int16), np.zeros(256, bool)
+        side[list(mine)] = 1
+        side[list(theirs)] = -1
+        empty[list(empties)] = True
+        return side, empty
+
+    def _tally(self, grid, measure, values=None) -> int:
+        """
+        The agent's count minus the other players': 'cells', the cells of the values their moves place;
+        'area', those and the regions of cells moves replace that only one side's cells border
+        """
+        side, empty = values or self._count_values()
+        sides = side[grid]
+        out = int(sides.sum())
+        if measure == 'area':
+            for region in components(empty[grid].astype(np.int8), 0):
+                border = {int(sides[q]) for p in region for q in ((p[0] - 1, p[1]), (p[0] + 1, p[1]),
+                                                                  (p[0], p[1] - 1), (p[0], p[1] + 1))
+                          if _inside(grid, q) and q not in region} - {0}
+                if len(border) == 1:
+                    out += len(region) * border.pop()
+        return out
+
+    def _count_verdict(self, grid) -> float:
+        """A game ended by passes in this grid: 1 if every count goal says won, -1 if none does, else 0"""
+        values = self._count_values()
+        won = [self._tally(grid, m, values) > 0 for m in self.count_goals]
+        return 1.0 if all(won) else -1.0 if not any(won) else 0.0
 
     # -------------------------------------------------- stored patterns
     def roles(self) -> Dict[int, str]:
@@ -1242,6 +1641,12 @@ class ObjectAgent:
             ('contact_goal', kind)              touching an object wins ('unique': no other object of its
                                                 pattern was in the level; 'repeated')
             ('shape_goal',)
+            ('shape_contact_goal',)             touching an object while having its shape wins
+            ('removal_goal', role)              removing some cells of the role's value wins
+            ('removal_loss', role)              another player removing some of them loses
+            ('group_rule',)                     groups left touching no empty cell after a placement are removed
+            ('pass_end',)                       a round in which every player passes ends the game
+            ('count_goal', measure)             ... and it is won if the agent's count (_tally) is the larger
             ('drift', i, d)                     at frame i the agent moves along d by itself
             ('transform', action, op, offset)   the action turns or mirrors the agent's pattern
             ('drift_weights',)  {mean, std}     the score weights learned for where a piece comes to rest
@@ -1296,6 +1701,17 @@ class ObjectAgent:
             out[('contact_goal', self.contact_kinds.get(pat, 'unique'))] = {}
         if self.shape_goal:
             out[('shape_goal',)] = {}
+        if self.shape_contact:
+            out[('shape_contact_goal',)] = {}
+        for v in self.removal_goals:
+            out[('removal_goal', r(v))] = {}
+        for v in self.removal_losses:
+            out[('removal_loss', r(v))] = {}
+        if self._group_rule_on():
+            out[('group_rule',)] = {'void': self.group_rule['void'] > 0}
+        if self._count_known():
+            out[('pass_end',)] = {}
+            out.update({('count_goal', m): {} for m in self.count_goals})
         for i, c in self.drift.items():
             d, n = c.most_common(1)[0]
             if d in SIDES and n >= 2:
@@ -1426,7 +1842,7 @@ class ObjectAgent:
         kinds = {key[1] for key in usable if key[0] == 'contact_goal'}
         inside = any(key[0] == 'contact_goal' and key[2:] == ('inside',) for key in usable)
         self.prior_contacts = set()
-        if kinds and self.agent is not None and not (self.win_contacts or self.shape_goal or self.absent_goals
+        if kinds and self.agent is not None and not (self.win_contacts or self.shape_goal or self.shape_contact or self.absent_goals
                                                      or self.line_events):
             objs = [(o, pattern(grid, o)) for o in self._components(grid, self.agent)]
             if self._level_first is None or self._level_first[0].shape != grid.shape:
@@ -1441,6 +1857,11 @@ class ObjectAgent:
                 if any(('unique' if n == 1 else 'repeated') == kind for p, n in counts.items()
                        if p in self.prior_contacts):
                     self.priors_applied.add(('contact_goal', kind) + (('inside',) if inside else ()))
+            if ('contact_goal', 'unique', 'inside') in meta:
+                # (the universal reach element: its turn, or used up when no candidate is left)
+                self._reach_used_up = not self.prior_contacts
+                if self.prior_contacts:
+                    self._goal_turn = 'reach'
         if ('others_like_me',) in usable:
             drops = {m.drop_dir() for m in self.click_models.values() if m.kind() == 'drop'}
             if len(drops) == 1:
@@ -1475,7 +1896,9 @@ class ObjectAgent:
         agent's marks win, of the other players' lose, sharing their length) or pieces come to rest
         (lines of any cells across the direction of gravity, full rows if a full row was an instance);
         reach, while the agent is known (the only object of its pattern, not touching the grid's edge). Gravity, rotation and reflection
-        act through the click models, _drift_dir and _geometric; shape_match through prior_shape.
+        act through the click models, _drift_dir and _geometric; shape_match through prior_shape. Reach
+        and shape_match are tried in turn, never at once (_goal_turn): the one tried keeps its turn until
+        it is used up, and then the other may be tried.
         """
         out = {}
         if not self.meta:
@@ -1495,14 +1918,25 @@ class ObjectAgent:
                 # mislead the placement while the length is being found)
                 d = self._drift_dir(1)
                 out[('line_goal', 'any', (abs(d[1]), abs(d[0])))] = dict(el, params={'k': [], 'full': True})
-        if 'reach' in self.meta and not any(k[0] == 'contact_goal' for k in usable):
+        # reach and shape_match are tried in turn, never at once: the one tried keeps its turn until it is
+        # used up (reach: no candidate left to touch; shape_match: a match reached without a win), and
+        # then the other may be tried
+        no_goal = not (self.win_contacts or self.shape_goal or self.shape_contact or self.absent_goals
+                       or self.line_events)
+        shape_ok = 'shape_match' in self.meta and not self.shape_rejected and no_goal and \
+            any('merge' in c for c in self.rules.values())
+        reach_ok = 'reach' in self.meta and not any(k[0] == 'contact_goal' for k in usable)
+        if self._goal_turn == 'reach' and self._reach_used_up and shape_ok:
+            self._goal_turn = 'shape_match'
+        elif self._goal_turn == 'shape_match' and self.shape_rejected:
+            self._goal_turn = 'reach' if reach_ok else None
+        if reach_ok and self._goal_turn in (None, 'reach'):
             out[('contact_goal', 'unique', 'inside')] = {'element': 'reach', 'context': [], 'params': {}}
-        if 'shape_match' in self.meta:
-            grew = any('merge' in c for c in self.rules.values())
-            self.prior_shape = grew and not self.shape_rejected and not (
-                self.win_contacts or self.shape_goal or self.absent_goals or self.line_events)
-            if self.prior_shape:
-                self.meta_applied.add('shape_match')
+        self.prior_shape = shape_ok and self._goal_turn in (None, 'shape_match') and \
+            not (self._goal_turn is None and reach_ok and not self._reach_used_up)
+        if self.prior_shape:
+            self._goal_turn = 'shape_match'
+            self.meta_applied.add('shape_match')
         if self.meta_gravity is not None:
             for models in [self.click_models] + self.others:
                 for m in models.values():
@@ -1520,11 +1954,13 @@ class ObjectAgent:
         return all(first[p] == grid[p] for p in around if _inside(grid, p) and p not in skip)
 
     STATE = ('bg', 'start_patterns', 'directions', 'rules', 'value_rules', 'pair_rules', 'win_contacts',
-             'shape_goal', 'seen_patterns', 'click_models', 'absent_goals', 'absent_rejected', 'others',
+             'shape_goal', 'shape_contact', 'seen_patterns', 'click_models', 'absent_goals', 'absent_rejected', 'others',
              'line_goals', 'line_losses', 'line_hits', 'line_misses', 'loss_hits', 'loss_misses',
              'line_events', 'loss_events', 'transforms', 'transform_ops', 'drift', 'agent_patterns',
-             'ce_mean', 'ce_std', 'ce_done', 'ce_generations', 'wins', 'losses', 'shape', 'contact_kinds',
-             'contact_rejected', 'directions_rejected')
+             'ce_mean', 'ce_std', 'ce_done', 'ce_generations', 'wins', 'losses', 'shape',
+             'removal_goals', 'removal_losses', 'group_rule', 'contact_kinds',
+             'contact_rejected', 'directions_rejected', 'pass_actions', 'others_pass', 'round_end', 'count_ends',
+             'count_goals', 'move_patterns', 'repeat_rule')
 
     def export_state(self) -> dict:
         """
@@ -1560,16 +1996,16 @@ class ObjectAgent:
                 obj = self._clicked(grid, p)
                 if kind == 'map':
                     done |= obj
-                g = m.predict(grid, p, obj, narrow=True)
+                g = self._with_groups(grid, m.predict(grid, p, obj, narrow=True))
                 if g is not None and not np.array_equal(g, grid) and g.tobytes() not in seen:
                     seen.add(g.tobytes())
                     out.append(g)
         return out
 
-    def _placed(self, groups=None) -> Tuple[set, set]:
+    def _placed(self, groups=None, raw: bool = False) -> Tuple[set, set]:
         """
         (values moves place, values they replace): from the agent's clicks and the other players' moves
-        (or the groups of click models given)
+        (or the groups of click models given); the values replaced are those no move places, unless raw
         """
         marks, empties = set(), set()
         for models in groups if groups is not None else [self.click_models] + self.others:
@@ -1584,7 +2020,7 @@ class ObjectAgent:
                 elif kind == 'offsets' and m.off_tables.get((0, 0), {}).get(v, v) != v:
                     empties.add(v)
                     marks.add(m.off_tables[(0, 0)][v])
-        return marks, empties - marks
+        return marks, empties if raw else empties - marks
 
     def _closest(self, grid, cells, cell_of=lambda p: p):
         """At most MAX_OPTIONS of the cells: those next to a mark (cells moves have marked), else nearest the centre"""
@@ -1636,6 +2072,20 @@ class ObjectAgent:
                 mine = vals == v
                 open_ = (mine | np.isin(vals, list(empties))).all(axis=1)
                 score += sign * float((4.0 ** mine.sum(axis=1)[open_]).sum()) / 4.0 ** k
+        if self._group_rule_on() and (self.removal_goals or self.removal_losses):
+            # groups the rule removes when they touch no empty cell: the fewer empty cells they touch, the nearer
+            e = self.group_rule['empty']
+            for sign, values in ((1, self.removal_goals), (-1, self.removal_losses)):
+                for v in values:
+                    for g in components((grid == v).astype(int), 0):
+                        free = {q for p in g for q in ((p[0] - 1, p[1]), (p[0] + 1, p[1]), (p[0], p[1] - 1),
+                                                       (p[0], p[1] + 1)) if _inside(grid, q) and grid[q] == e}
+                        score += sign * 4.0 ** -max(len(free) - 1, 0) / 2
+        if self._count_known():
+            # the count the game would be scored by if it ended now, relative to the cells counted
+            values = self._count_values()
+            n = max(1, int(((values[0] != 0) | values[1])[grid].sum()))
+            score += 4.0 * sum(self._tally(grid, m, values) for m in self.count_goals) / len(self.count_goals) / n
         return 0.5 * float(np.tanh(score))
 
     def _search(self, grid, actions):
@@ -1648,7 +2098,8 @@ class ObjectAgent:
         self._action_cache = {}
         for depth in range(1, MAX_DEPTH + 1):
             self._nodes = SEARCH_NODES
-            value, acts = self._ours(grid, self.agent, depth, -2.0, 2.0, actions, root=True)
+            value, acts = self._ours(grid, self.agent, depth, -2.0, 2.0, actions, root=True,
+                                     passed=self._others_passed)
             if self._nodes < 0 and result is not None:
                 break
             result = (value, acts)
@@ -1656,12 +2107,16 @@ class ObjectAgent:
                 break                           # a forced win or loss is found
         return result
 
-    def _ours(self, g, agent, depth, alpha, beta, actions, root=False):
+    def _ours(self, g, agent, depth, alpha, beta, actions, root=False, passed=False):
+        """passed: the other players' last moves were passes (the agent's pass then ends the game)"""
         options = []
         seen = set()
+        passes = self._count_known()
         for a in self._search_actions(g, actions):
             nxt = self.predict(g, agent, a)
-            if nxt is None or nxt[0].shape != g.shape or np.array_equal(nxt[0], g) or nxt[0].tobytes() in seen:
+            if nxt is None or nxt[0].shape != g.shape or nxt[0].tobytes() in seen:
+                continue
+            if np.array_equal(nxt[0], g) and not (passes and a in self.pass_actions):
                 continue
             seen.add(nxt[0].tobytes())
             options.append((a, nxt))
@@ -1669,9 +2124,12 @@ class ObjectAgent:
             return 0.0, []
         scored = []
         for a, nxt in options:
-            if self.wins_with(g, agent, a, nxt):
+            if np.array_equal(nxt[0], g):       # a pass: the end of the game if the others passed
+                scored.append((self._count_verdict(g), a, nxt, True) if passed else
+                              (self._eval(g), a, nxt, 'pass'))
+            elif self.wins_with(g, agent, a, nxt):
                 scored.append((1.0, a, nxt, True))
-            elif self.line_losses and self._formed(g, nxt[0], self.line_losses) > 0:
+            elif self._loses(g, nxt[0]):
                 scored.append((-1.0, a, nxt, True))
             else:
                 scored.append((self._eval(nxt[0]), a, nxt, False))
@@ -1679,8 +2137,9 @@ class ObjectAgent:
         best, acts = None, []
         for value, a, nxt, final in scored:
             self._nodes -= 1
-            if not final and depth > 1:
-                value = DISCOUNT * self._theirs(nxt[0], nxt[1], 0, depth, alpha, beta, actions)
+            if final is not True and depth > 1:
+                value = DISCOUNT * self._theirs(nxt[0], nxt[1], 0, depth, alpha, beta, actions,
+                                                passing=final == 'pass')
             if best is None or value > best:
                 best, acts = value, [a]
             elif value == best:
@@ -1690,29 +2149,375 @@ class ObjectAgent:
                 break
         return best, acts
 
-    def _theirs(self, g, agent, i, depth, alpha, beta, actions):
+    def _theirs(self, g, agent, i, depth, alpha, beta, actions, passing=False, others_passed=True):
+        """
+        passing: every player since the agent's pass has passed; others_passed: every other player so far
+        in this round has (a pass is considered once the game is known to end in a round of passes)
+        """
         if i == len(self.others):
-            return self._ours(g, agent, depth - 1, alpha, beta, actions)[0]
+            return self._ours(g, agent, depth - 1, alpha, beta, actions, passed=others_passed)[0]
         moves = self._other_moves(i, g, limit=True)[:MAX_OPTIONS]
-        if not moves:
-            return self._theirs(g, agent, i + 1, depth, alpha, beta, actions)
+        can_pass = self.others_pass and self._count_known()
+        if not moves and not can_pass:
+            return self._theirs(g, agent, i + 1, depth, alpha, beta, actions, False, others_passed)
         scored = []
         for m in moves:
-            if self.line_losses and self._formed(g, m, self.line_losses) > 0:
+            if self._loses(g, m):
                 scored.append((-1.0, m, True))
             else:
                 scored.append((self._eval(m), m, False))
+        if can_pass:
+            last = i == len(self.others) - 1
+            scored.append((self._count_verdict(g), g, True) if passing and last else (self._eval(g), g, 'pass'))
         scored.sort(key=lambda t: t[0])
         worst = None
         for value, m, final in scored:
             self._nodes -= 1
-            if not final:
-                value = self._theirs(m, agent, i + 1, depth, alpha, beta, actions)
+            if final is not True:
+                p = final == 'pass'
+                value = self._theirs(m, agent, i + 1, depth, alpha, beta, actions, passing and p, others_passed and p)
             worst = value if worst is None else min(worst, value)
             beta = min(beta, value)
             if alpha >= beta or self._nodes < 0:
                 break
         return worst
+
+    # ------------------------------------------------------- playout search
+    def _tree_moves(self, g, player, actions) -> List[tuple]:
+        """(label, grid after) of the moves of a player (0: the agent, i: other player i) that change the grid,
+        and its pass (label None for the other players') if it is known to pass"""
+        out, seen = [], set()
+        if player == 0:
+            for a in self._actions(g, actions, limit=False):        # (every cell, whatever the board's size)
+                nxt = self.predict(g, None, a)
+                if nxt is None or nxt[0].shape != g.shape or np.array_equal(nxt[0], g) or nxt[0].tobytes() in seen:
+                    continue
+                seen.add(nxt[0].tobytes())
+                out.append((a, nxt[0]))
+            passes = [a for a in actions if a in self.pass_actions]
+            if passes:
+                out.append((passes[0], g))
+        else:
+            for nxt in self._other_moves(player - 1, g):
+                out.append(('move', nxt))
+            if self.others_pass:
+                out.append((None, g))
+        return out
+
+    def _playout_cells(self, player):
+        """(values whose cells a player's moves act on, predict(grid, cell) -> grid after or None)"""
+        if player == 0:
+            models = self.click_models
+            values = [v for v, m in models.items() if m.kind() in ('map', 'offsets', 'drop')]
+
+            def after(g, p):
+                nxt = self._click(g, None, p)
+                return None if nxt is None else nxt[0]
+        else:
+            models = self.others[player - 1]
+            values = [v for v, m in models.items() if m.kind(narrow=True) in ('map', 'offsets', 'drop')]
+
+            def after(g, p):
+                return self._with_groups(g, models[int(g[p])].predict(g, p, self._clicked(g, p), narrow=True))
+        return values, after
+
+    def _placements(self) -> Optional[List[Dict[int, int]]]:
+        """
+        Per player (0: the agent), {value e: value w} if every move it is known to make puts w on one cell of
+        value e (a click on the background, or a model of offsets that change only the clicked cell); else None
+        """
+        out = []
+        for i, models in enumerate([self.click_models] + self.others):
+            table = {}
+            for v, m in models.items():
+                kind = m.kind() if i == 0 else m.kind(narrow=True)
+                if kind not in ('map', 'offsets', 'drop'):
+                    continue
+                if kind == 'map' and v == self.bg and m.table.get(v, v) != v:
+                    table[v] = m.table[v]
+                elif kind == 'offsets' and set(m.off_tables) == {(0, 0)} and m.off_tables[(0, 0)].get(v, v) != v:
+                    table[v] = m.off_tables[(0, 0)][v]
+                else:
+                    return None
+            out.append(table)
+        return out
+
+    def _fast_playout(self, g, player, passes, placements, seen=None, played=None) -> float:
+        """
+        _playout for games whose moves place one cell each (_placements), on a flat list of the cells. A
+        simulated game does not return to a position it has passed through (whatever the game's rules: a game
+        that went round a cycle, such as a capture taken back again and again, would not end)
+        """
+        h, w = g.shape
+        b = g.ravel().tolist()
+        seen = set(seen) if seen is not None else set()
+        seen.add(tuple(b))
+        nbrs = [[j for j in (i - w, i + w, i - 1, i + 1)
+                 if 0 <= j < h * w and (j // w == i // w or j % w == i % w)] for i in range(h * w)]
+        nbrs8 = [[(i // w + dr) * w + i % w + dc if 0 <= i // w + dr < h and 0 <= i % w + dc < w else -1
+                  for dr, dc in NEIGHBOURS] for i in range(h * w)]
+        side, empty = self._count_values()
+        side, empty = side.tolist(), empty.tolist()
+        rule = self.group_rule if self._group_rule_on() else None
+        cleared = self._cleared()
+        measures = sorted(self.count_goals)
+        measure = 'area' if 'area' in measures else measures[0]
+
+        def bare_group(b, i):
+            """The group of i if it touches no empty cell, else None (as soon as one is found)"""
+            v, group, stack, e = b[i], {i}, [i], rule['empty']
+            while stack:
+                for j in nbrs[stack.pop()]:
+                    x = b[j]
+                    if x == e:
+                        return None
+                    if x == v and j not in group:
+                        group.add(j)
+                        stack.append(j)
+            return group
+
+        def place(b, i, v):
+            nb = b[:]
+            nb[i] = v
+            if rule is None or b[i] != rule['empty']:
+                return nb
+            removed = set()
+            for j in nbrs[i]:
+                if nb[j] in cleared and nb[j] != v and j not in removed:
+                    group = bare_group(nb, j)
+                    if group:
+                        removed |= group
+            for j in removed:
+                nb[j] = rule['empty']
+            if not removed and rule['void'] > 0 and bare_group(nb, i):
+                return None
+            return nb
+
+        def tally(b, measure):
+            """(the count, side owning each cell of a region only one side borders: cell -> 1 / -1)"""
+            out = sum(map(side.__getitem__, b))
+            owner = {}
+            if measure == 'area':
+                seen = set()
+                for i, x in enumerate(b):
+                    if not empty[x] or i in seen:
+                        continue
+                    region, stack, border = {i}, [i], set()
+                    while stack:
+                        for j in nbrs[stack.pop()]:
+                            y = b[j]
+                            if empty[y]:
+                                if j not in region:
+                                    region.add(j)
+                                    stack.append(j)
+                            elif side[y]:
+                                border.add(side[y])
+                    seen |= region
+                    if len(border) == 1:
+                        s = border.pop()
+                        out += len(region) * s
+                        owner.update(dict.fromkeys(region, s))
+            return out, owner
+
+        players = len(placements)
+        # the roles of the values for each player, and the weight of each neighbourhood seen (patterns learned)
+        roles = [self._roles_for(i, side, empty) for i in range(players)]
+        weights = [{} for _ in range(players)]
+        use_patterns = self.use_patterns and bool(self.move_patterns)
+
+        def weight(i, p):
+            around = tuple(roles[p][b[j]] if j >= 0 else ROLE_EDGE for j in nbrs8[i])
+            wt = weights[p].get(around)
+            if wt is None:
+                wt = weights[p][around] = self._pattern_weight(self._key_of(around))
+            return wt
+
+        def ordered(cells, player):
+            """The cells (in a random order) by batches of PATTERN_BATCH, in each batch those of patterns that won
+            first and those that lost last (a weighted random order); a batch is ordered only when reached"""
+            if not use_patterns:
+                yield from cells
+                return
+            for k in range(0, len(cells), PATTERN_BATCH):
+                yield from sorted(cells[k:k + PATTERN_BATCH],
+                                  key=lambda i: -self.rng.random() ** (1.0 / weight(i, player)))
+        t, owner = tally(b, measure)
+        for _ in range(3 * len(b)):
+            if passes >= players:
+                break
+            table = placements[player]
+            # (a mark placed in a region only the player's own marks border leaves the count as it is: skipped)
+            cells = [i for i, x in enumerate(b) if x in table and owner.get(i) != side[table[x]]]
+            self.rng.shuffle(cells)
+            moved = False
+            for i in ordered(cells, player):
+                nb = place(b, i, table[b[i]])
+                if nb is None:
+                    continue
+                tb = tuple(nb)
+                if tb in seen:
+                    continue                        # (it would repeat a position)
+                nt, nowner = tally(nb, measure)
+                if nt == t:
+                    continue
+                b, t, owner, moved = nb, nt, nowner, True
+                seen.add(tb)
+                if played is not None:
+                    played.append((player, (i // w, i % w)))
+                break
+            passes = 0 if moved else passes + 1
+            player = (player + 1) % players
+        won = [tally(b, m)[0] > 0 for m in measures]
+        return 1.0 if all(won) else 0.0 if not any(won) else 0.5
+
+    def _playout(self, g, player, passes, values, seen=None, played=None) -> float:
+        """
+        A simulated game to its end (a round of passes): each player makes a random move among those that
+        change the count (a move that leaves it as it is, such as filling the player's own territory, is not
+        made), or passes if it has none. The agent's reward: 1 won, 0 lost, 0.5 if the count goals disagree.
+        seen: positions (as lists of the cells) a move may not repeat (the game's and the search path's, when
+        moves repeating a position are refused); the playout's own positions are added. played: a list the
+        (player, cell) of each mark placed is appended to (games whose moves place marks only).
+        """
+        placements = self._placements()
+        if placements is not None:
+            return self._fast_playout(g, player, passes, placements, seen, played)
+        players = 1 + len(self.others)
+        movers = [self._playout_cells(i) for i in range(players)]
+        measure = 'area' if 'area' in self.count_goals else next(iter(self.count_goals))
+        tally = self._tally(g, measure, values)
+        for _ in range(3 * g.size):
+            if passes >= players:
+                break
+            vals, after = movers[player]
+            cells = [(int(r), int(c)) for r, c in np.argwhere(np.isin(g, vals))] if vals else []
+            self.rng.shuffle(cells)
+            moved = False
+            for p in cells:
+                nxt = after(g, p)
+                if nxt is None or np.array_equal(nxt, g):
+                    continue
+                t = self._tally(nxt, measure, values)
+                if t == tally:
+                    continue
+                g, tally, moved = nxt, t, True
+                break
+            passes = 0 if moved else passes + 1
+            player = (player + 1) % players
+        return (self._count_verdict(g) + 1) / 2
+
+    def _mcts(self, grid, actions):
+        """
+        The agent's move by a search tree grown by simulated games (UCT; PLAYOUTS_PER_MOVE per move the agent can
+        make, within SEARCH_SECONDS): from each position reached, the players' moves as the models predict them,
+        passes included; a round of passes ends the game and is scored by the count goals; below the tree,
+        _playout. The move whose subtree was visited most.
+        """
+        players = 1 + len(self.others)
+        values = self._count_values()
+        placements = self._placements()
+        roles = [self._roles_for(i) for i in range(players)]
+
+        def prior(g, cell, player):
+            """The value of the pattern of the mark a move places (0.5: not a placement, or nothing learned)"""
+            if cell is None or not (self.use_patterns and self.move_patterns):
+                return 0.5
+            return self._pattern_value(self._move_key(g, cell, roles[player]))
+        repeat = self._repeat_rule_on()
+        history = {b for shape, b in self._history if shape == grid.shape} if repeat else set()
+        as_list = lambda b: np.frombuffer(b, dtype=grid.dtype).tolist()
+        history_cells = {tuple(as_list(b)) for b in history}
+
+        def seen_on(on_path):
+            """The positions a simulated game from here may not repeat (None: no such rule learned)"""
+            return history_cells | {tuple(as_list(k[0])) for k in on_path} if repeat else None
+        root = (grid.tobytes(), 0, len(self.others) if self._others_passed else 0)
+        nodes = {root: {'grid': grid, 'n': 0, 'children': None, 'amaf': {}}}
+
+        def score(node, c, player):
+            """
+            A move's value for the player to move: its own results (the pattern value counting as PRIOR_VISITS
+            results) blended with the results of the simulated games in which the player placed a mark on the
+            same cell later (RAVE; their weight falls as the move's own results grow), plus UCT exploration
+            """
+            n, w = c[2], c[3]
+            q = (w + PRIOR_VISITS * c[4]) / (n + PRIOR_VISITS)
+            stats = node['amaf'].get(c[5]) if c[5] is not None else None
+            if stats:
+                beta = np.sqrt(RAVE_EQUIV / (3 * n + RAVE_EQUIV))
+                q = (1 - beta) * q + beta * stats[1] / stats[0]
+            sign = 1.0 if player == 0 else -1.0
+            return 0.5 + sign * (q - 0.5) + UCT_C * np.sqrt(np.log(node['n'] + 1) / (n + 1))
+        # the budget: PLAYOUTS_PER_MOVE simulated games per move the agent can make here (so a larger board, with
+        # more moves, is searched as thoroughly per move), within SEARCH_SECONDS
+        deadline, done, budget = time.time() + SEARCH_SECONDS, 0, None
+        while budget is None or (done < budget and time.time() < deadline):
+            if budget is None and nodes[root]['children'] is not None:
+                budget = PLAYOUTS_PER_MOVE * max(1, len(nodes[root]['children']))
+            done += 1
+            key, path, on_path, visited, played = root, [], {root}, [], []
+            while True:
+                node = nodes[key]
+                node['key'] = key
+                _, player, passes = key
+                if passes >= players:                       # a round of passes: the end
+                    reward = (self._count_verdict(node['grid']) + 1) / 2
+                    break
+                if len(path) > 4 * grid.size:               # (a backstop: the tree is not that deep)
+                    reward = self._playout(node['grid'], player, passes, values, None, played)
+                    break
+                if node['children'] is None:
+                    node['children'] = []
+                    for label, nxt in self._tree_moves(node['grid'], player, actions):
+                        if repeat and not np.array_equal(nxt, node['grid']) and \
+                                (nxt.tobytes() in history or any(nxt.tobytes() == k[0] for k in on_path)):
+                            continue                # (a move may not repeat a position)
+                        child = (nxt.tobytes(), (player + 1) % players,
+                                 passes + 1 if np.array_equal(nxt, node['grid']) else 0)
+                        nodes.setdefault(child, {'grid': nxt, 'n': 0, 'children': None, 'amaf': {}})
+                        cell = self._placed_cell(node['grid'], nxt, player, placements) if placements else None
+                        node['children'].append([label, child, 0, 0.0, prior(node['grid'], cell, player), cell])
+                    if not node['children']:
+                        reward = 0.5
+                        break
+                c = max(node['children'], key=lambda c: score(node, c, player))
+                path.append(c)
+                visited.append(node)
+                if c[2] == 0:                           # a move not tried yet: a simulated game from it
+                    _, nplayer, npasses = c[1]
+                    reward = (self._count_verdict(nodes[c[1]]['grid']) + 1) / 2 if npasses >= players else \
+                        self._playout(nodes[c[1]]['grid'], nplayer, npasses, values, seen_on(on_path | {c[1]}),
+                                      played)
+                    break
+                key = c[1]
+                if key in on_path:
+                    # a position repeated on the path (positions are shared, so a capture taken back can
+                    # lead round in a cycle): a simulated game from it instead of going round
+                    reward = self._playout(nodes[key]['grid'], key[1], key[2], values, seen_on(on_path), played)
+                    break
+                on_path.add(key)
+            for node in visited:
+                node['n'] += 1
+            for c in path:
+                c[2] += 1
+                c[3] += reward
+            # RAVE: each position passed credits the reward to every cell its player placed a mark on later in this
+            # simulated game (the first time only), as if it had been that player's move there
+            moves = [(node['key'][1], c[5]) for node, c in zip(visited, path)] + played
+            for i, node in enumerate(visited):
+                mover, done_cells = node['key'][1], set()
+                for p, cell in moves[i:]:
+                    if p == mover and cell is not None and cell not in done_cells:
+                        done_cells.add(cell)
+                        stats = node['amaf'].setdefault(cell, [0, 0.0])
+                        stats[0] += 1
+                        stats[1] += reward
+        children = nodes[root]['children'] or []
+        self.last_tree = children       # [move, child key, visits, reward sum, pattern value, cell] (for inspection)
+        if not children:
+            return self.rng.choice(self._actions(grid, actions))
+        best = max(c[2] for c in children)
+        return self.rng.choice([c[0] for c in children if c[2] == best])
 
     # ------------------------------------------------------------ drift
     def _settle(self, grid, agent, action):
@@ -1816,6 +2621,11 @@ class ObjectAgent:
         if self._others_known():
             # explore what is not known first (a value not clicked yet), then play the minimax move
             unknown = [a for a in self._actions(grid, actions) if self.predict(grid, self.agent, a) is None]
+            if self.playout_search and self._count_known():
+                # a game decided by a count when every player has passed: simulated games to its end (clicks
+                # whose effect is not known yet are left out: the goal and how moves reach it are known)
+                self.exploring = False
+                return [self._mcts(grid, actions)]
             value, best = self._search(grid, actions)
             if best and (value != 0 or not unknown or self.line_goals is not None):
                 self.exploring = False
@@ -1828,7 +2638,8 @@ class ObjectAgent:
         parent = {k0: None}
         queue = deque([start])
         explore = risky = None
-        targets = self._targets(grid, self.agent) if self.shape_goal or self.prior_shape else None
+        targets = self._targets(grid, self.agent) if self.shape_goal or self.prior_shape or self.shape_contact \
+            else None
         trials = self._goal_trials(grid)
         for v in sorted(self.absent_goals | trials, key=lambda v: int((grid == v).sum())):
             xor = self._xor_plan(grid, v)
@@ -1871,7 +2682,8 @@ class ObjectAgent:
                     if explore is None:
                         explore = path_to(k) + [a]
                         if not self.win_contacts and not self.shape_goal and not self.absent_goals \
-                                and not trials and not self.prior_contacts and not self.prior_shape:
+                                and not trials and not self.prior_contacts and not self.prior_shape \
+                                and not self.shape_contact:
                             queue.clear()           # no goal known yet: nothing to search further for
                             break
                     continue
@@ -1998,8 +2810,12 @@ class ObjectAgent:
             if not changed:
                 continue
             cell = changed[0]
+            split = self._split_groups(prev, cur)
+            if split is not None:
+                cell = split[0]
+            primary = self._learn_groups(prev, cur, cell)
             self.others[i - 1].setdefault(int(prev[cell]), ClickModel()).update(prev, cell,
-                                                                                self._clicked(prev, cell), cur)
+                                                                                self._clicked(prev, cell), primary)
         self.agent = agent
 
     def _track_base(self, grids):
@@ -2022,6 +2838,8 @@ class ObjectAgent:
         d = self._dir(action)
         if self.agent is not None and d is not None:
             touched = {pattern(before, o) for o in self._contacts(before, self.agent, d) or []}
+            if self.shape_contact and pattern(before, self.agent) in touched:
+                self.shape_contact = False      # touched an object of the agent's shape without a win
             self.win_contacts -= touched
             self.contact_rejected |= touched
             self.prior_contacts -= touched
@@ -2038,17 +2856,23 @@ class ObjectAgent:
                     np.array_equal(nxt[0], after) and self._shape_match(*nxt):
                 self.shape_rejected = True          # the shapes matched and the level did not end
                 self.prior_shape = False
+        if not lost:
+            self._learn_passes(before, action, frames or [after])
+            self._record_moves(before, frames or [after])
         self._track_base([before] + list(frames or [after]))
         self._falsify(before, frames or [after], lost=lost)
         self._contact_falsify(before, action)
+        self._remember([before])
         if frames and len(frames) > 1:
             own = frames[0]
             self.observe(before, action, own)
             self._learn_frames(frames)
+            self._remember(frames)
             self.plan = []                      # (other frames followed: plan again from what they show)
             return
         predicted = self.predict(before, self.agent, action)
         self.observe(before, action, after)
+        self._remember([after])
         if self.trying is not None and before.shape == after.shape and not (after == self.trying).any():
             self.absent_rejected.add(self.trying)        # removed, and the level did not end
             self.trying = None
@@ -2062,6 +2886,10 @@ class ObjectAgent:
                 f'shape goal {self.shape_goal}, start patterns {len(self.start_patterns)}, '
                 f'clicks {({v: m.kind() for v, m in sorted(self.click_models.items())})}, '
                 f'absent goals {sorted(self.absent_goals)}, rejected {sorted(self.absent_rejected)}, '
+                f'removal goals {sorted(self.removal_goals)}, removal losses {sorted(self.removal_losses)}, '
+                f'group rule {self.group_rule if self._group_rule_on() else None}, '
+                f'passes {sorted(self.pass_actions, key=str)}, rounds of passes {dict(self.round_end)}, '
+                f'count goals {sorted(self.count_goals or [])}, '
                 f'other players {len(self.others)}, line goals {sorted(self.line_goals or [], key=str)}, '
                 f'line losses {sorted(self.line_losses or [], key=str)}, '
                 f'drift {({i: dict(c) for i, c in self.drift.items()})}, transforms {len(self.transforms)}, '
