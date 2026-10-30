@@ -209,6 +209,7 @@ pattern, toward an action that leaves it as it is) only where it could not
 have been a blocked move: see _maybe_blocked.
 """
 
+import itertools
 import random
 import time
 from collections import Counter, deque
@@ -427,6 +428,7 @@ class ObjectAgent:
     playout_search = True               # games decided by a count after a round of passes: _mcts
     use_patterns = True                 # ... guided by the placement patterns learned (move_patterns)
     use_ownership = True                # ... and by who owns each point at the end of games (survival, criticality)
+    use_threats = True                # ... and in simulated games, the group rule's threats next to the last move
 
     def __init__(self, rng: Optional[random.Random] = None):
         self.rng = rng or random.Random()
@@ -2386,7 +2388,50 @@ class ObjectAgent:
             for k in range(0, len(cells), PATTERN_BATCH):
                 yield from sorted(cells[k:k + PATTERN_BATCH],
                                   key=lambda i: -self.rng.random() ** (1.0 / weight(i, player)))
+        def free_cells(b, i):
+            """(the group of i, the set of its empty cells, up to 2)"""
+            v, group, stack, free, e = b[i], {i}, [i], set(), rule['empty']
+            while stack:
+                for j in nbrs[stack.pop()]:
+                    x = b[j]
+                    if x == e:
+                        free.add(j)
+                        if len(free) > 1:
+                            return group, free
+                    elif x == v and j not in group:
+                        group.add(j)
+                        stack.append(j)
+            return group, free
+
+        def urgent(b, last, table):
+            """
+            The moves the group rule makes pressing after a mark placed at `last`: the empty cell left to a group
+            of a value the rule clears, next to it (or its own) - placing there removes another value's group
+            (first), or gives a group of the player's own mark a second empty cell
+            """
+            if rule is None or last is None:
+                return []
+            takes, saves, done = [], [], set()
+            for j in [last] + nbrs[last]:
+                if b[j] not in cleared or j in done:
+                    continue
+                group, free = free_cells(b, j)
+                done |= group
+                if len(free) != 1:
+                    continue
+                q = next(iter(free))
+                if b[q] not in table:
+                    continue
+                if b[j] != table[b[q]]:
+                    takes.append(q)
+                else:
+                    nb = place(b, q, b[j])
+                    if nb is not None and len(free_cells(nb, q)[1]) > 1:
+                        saves.append(q)
+            return takes + saves
+
         t, owner = tally(b, measure)
+        last = None
         for _ in range(3 * len(b)):
             if passes >= players:
                 break
@@ -2395,7 +2440,8 @@ class ObjectAgent:
             cells = [i for i, x in enumerate(b) if x in table and owner.get(i) != side[table[x]]]
             self.rng.shuffle(cells)
             moved = False
-            for i in ordered(cells, player):
+            pressing = urgent(b, last, table) if self.use_threats else []
+            for i in itertools.chain(pressing, ordered(cells, player)):
                 nb = place(b, i, table[b[i]])
                 if nb is None:
                     continue
@@ -2405,7 +2451,7 @@ class ObjectAgent:
                 nt, nowner = tally(nb, measure)
                 if nt == t:
                     continue
-                b, t, owner, moved = nb, nt, nowner, True
+                b, t, owner, moved, last = nb, nt, nowner, True, i
                 seen.add(tb)
                 if played is not None:
                     played.append((player, (i // w, i % w)))
