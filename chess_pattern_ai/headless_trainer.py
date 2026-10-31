@@ -19,14 +19,29 @@ from game_scorer import GameScorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
 from general_move_patterns import GeneralPatternLearner, analyze_candidates, evaluate, universal_db_path
 from chess_adapter import ChessAdapter
+from sequence_patterns import SequencePatternLearner
 
 
 class HeadlessTrainer:
     """Command-line chess AI trainer"""
 
-    def __init__(self, db_path='headless_training.db'):
+    use_sequences = True        # multi-move patterns (sequence_patterns) in move choice
+    SEQUENCE_WEIGHT = 20        # score per material unit a move's sequence patterns expect (a pawn is 10)
+    SEQUENCE_EXTRA = 5          # moves the sequence patterns rate best, considered beyond the 15 by priority
+
+    def __init__(self, db_path='headless_training.db', opponent='random', stockfish_level=0,
+                 stockfish_path='/usr/games/stockfish', stockfish_time=0.1):
         self.scorer = GameScorer()
         self.prioritizer = LearnableMovePrioritizer(db_path)
+        # Multi-move patterns, learned from both players' moves
+        self.sequences = SequencePatternLearner(db_path)
+        # Opponent: 'random' (capture-biased) or 'stockfish' at a skill level (0-20)
+        self.engine = None
+        self.stockfish_time = stockfish_time
+        if opponent == 'stockfish':
+            import chess.engine
+            self.engine = chess.engine.SimpleEngine.popen_uci(stockfish_path)
+            self.engine.configure({'Skill Level': stockfish_level})
         # Game-independent patterns, shared with the other games' trainers
         self.general = GeneralPatternLearner(universal_db_path(db_path), 'chess')
         self.adapter = ChessAdapter()
@@ -62,6 +77,12 @@ class HeadlessTrainer:
         best_score = float('-inf')
 
         candidates = legal_moves[:15]
+        sequence_values = {}
+        if self.use_sequences:
+            context = self.sequences.context(board)
+            sequence_values = {m: self.sequences.value(board, m, context) for m in legal_moves}
+            extra = sorted(legal_moves[15:], key=lambda m: -sequence_values[m])[:self.SEQUENCE_EXTRA]
+            candidates = candidates + extra
         # One-ply lookahead over every opponent reply: material, progress toward
         # checkmate, and finished games valued by their result (see ChessAdapter)
         analysis = analyze_candidates(self.adapter, board, ai_color, candidates,
@@ -88,6 +109,9 @@ class HeadlessTrainer:
             # Priority scaled by 20 means a priority-72 move gets +1440 bonus
             score = position_score + (priority * 20)
 
+            # Multi-move patterns: the material this move has been followed by, over the next plies
+            score += self.SEQUENCE_WEIGHT * sequence_values.get(move, 0.0)
+
             if score > best_score:
                 best_score = score
                 best_move = move
@@ -96,9 +120,13 @@ class HeadlessTrainer:
         return best_move
 
     def play_opponent_move(self, board):
-        """Random opponent with 30% capture bias"""
+        """Stockfish if configured, else a random opponent with 30% capture bias"""
         if board.is_game_over():
             return None
+
+        if self.engine is not None:
+            import chess.engine
+            return self.engine.play(board, chess.engine.Limit(time=self.stockfish_time)).move
 
         legal_moves = list(board.legal_moves)
         captures = [m for m in legal_moves if board.is_capture(m)]
@@ -193,6 +221,7 @@ class HeadlessTrainer:
         # Record for learning
         self.prioritizer.record_game_moves(game_moves, ai_color, result, final_score)
         self.general.record_game(general_features, result, 'chess')
+        self.sequences.record_game(board.move_stack, ai_color, result)
 
         # Store result details
         self.game_results.append({
@@ -314,12 +343,20 @@ class HeadlessTrainer:
             piece, category, dist, seen, win_rate, conf, priority = row
             print(f"{piece:<10} {category:<14} {dist:<10} {seen:<6} {win_rate:<7.1%} {conf:<6.2f} {priority:<8.1f}")
 
+        for title, avoid in (('PURSUE', False), ('AVOID', True)):
+            print(f"\nMULTI-MOVE PATTERNS TO {title} (value: expected material gain, a pawn = 10)")
+            for pattern, value, seen in self.sequences.top_patterns(limit, avoid=avoid):
+                print(f"  {value:+7.1f}  seen {seen:6.1f}  {pattern}")
+
         print("=" * 70)
 
     def close(self):
         """Clean up resources"""
         self.prioritizer.close()
         self.general.close()
+        self.sequences.close()
+        if self.engine is not None:
+            self.engine.quit()
 
 
 def main():
@@ -333,10 +370,15 @@ def main():
     parser.add_argument('--export-json', action='store_true', help='Export results to JSON')
     parser.add_argument('--export-csv', action='store_true', help='Export results to CSV')
     parser.add_argument('--show-patterns', type=int, default=0, metavar='N', help='Show top N patterns after training')
+    parser.add_argument('--opponent', choices=['random', 'stockfish'], default='random', help='Opponent (default: random)')
+    parser.add_argument('--level', type=int, default=0, help='Stockfish skill level 0-20 (default: 0)')
+    parser.add_argument('--stockfish-path', default='/usr/games/stockfish', help='Stockfish binary')
+    parser.add_argument('--db', default='headless_training.db', help='Training database (default: headless_training.db)')
 
     args = parser.parse_args()
 
-    trainer = HeadlessTrainer()
+    trainer = HeadlessTrainer(args.db, opponent=args.opponent, stockfish_level=args.level,
+                              stockfish_path=args.stockfish_path)
 
     try:
         trainer.train(args.num_games, verbose=args.verbose, progress_interval=args.progress)
