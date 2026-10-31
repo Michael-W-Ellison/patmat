@@ -22,6 +22,7 @@ if CHESS_AVAILABLE:
     from piece_knowledge import PieceKnowledge
     from sequence_patterns import SequencePatternLearner, MATE_VALUE
     from pattern_search import PatternSearch
+    from position_patterns import PositionPatternLearner
 
 
 def moves_of(sans):
@@ -105,6 +106,48 @@ class TestSequencePatterns(unittest.TestCase):
         self.assertEqual(len(self.learner.stats), count)
         self.assertIn('ai', self.learner.baseline)
         self.assertEqual(self.learner.pieces.category(chess.KNIGHT), 'jS')
+
+
+@unittest.skipUnless(CHESS_AVAILABLE, 'python-chess not installed')
+class TestPositionPatterns(unittest.TestCase):
+
+    def setUp(self):
+        self.pieces = PieceKnowledge(':memory:')
+        watch_random_games(self.pieces)
+        self.positions = PositionPatternLearner(':memory:', self.pieces)
+
+    def tearDown(self):
+        self.positions.close()
+        self.pieces.close()
+
+    def test_features_describe_each_piece_from_the_side_to_move(self):
+        # Black to move: White's queen on g4 is attacked by the cheaper c8 bishop
+        board = moves_of(['e4', 'd5', 'Qg4'])
+        feats = self.positions.features(board)
+        self.assertEqual(feats['t doL c a2'], 1)        # their queen, attacked by a cheaper piece, attacks d7 and g7
+        self.assertEqual(feats['m o:dSf s a0'], 1)      # six of Black's pawns: counted once,
+        self.assertEqual(feats['m o:dSf s a0 2+'], 1)   # and once more for being shown by two or more
+
+    def test_learns_from_the_opponents_moves(self):
+        # The agent (White) leaves its queen where the bishop takes it: the opponent's capture is learned
+        before_capture = moves_of(['e4', 'd5', 'Qg4'])
+        queen_safe = moves_of(['e4', 'd5', 'Qf3'])              # never played
+        self.assertEqual(self.positions.value(before_capture), 0.0)
+        for _ in range(30):
+            game = moves_of(['e4', 'd5', 'Qg4', 'Bxg4'])
+            self.positions.record_game(list(game.move_stack), chess.WHITE, 'loss')
+        # Black, to move, is expected to gain more where a cheaper piece attacks White's queen
+        self.assertGreater(self.positions.value(before_capture), self.positions.value(queen_safe) + 10.0)
+        self.assertGreater(self.positions.weights['t doL c a2'][0], 0.0)
+
+    def test_search_adds_the_learned_value_to_material(self):
+        sequences = SequencePatternLearner(':memory:')
+        board = moves_of(['e4', 'd5', 'Qg4'])
+        self.positions.weights['t doL c a2'] = [25.0, 1.0]
+        search = PatternSearch(sequences, positions=self.positions)
+        self.assertEqual(search.evaluate(board), 25.0)
+        self.assertEqual(PatternSearch(sequences).evaluate(board), 0.0)
+        sequences.close()
 
 
 @unittest.skipUnless(CHESS_AVAILABLE, 'python-chess not installed')

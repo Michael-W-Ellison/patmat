@@ -19,6 +19,7 @@ from game_scorer import GameScorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
 from general_move_patterns import GeneralPatternLearner, analyze_candidates, evaluate, universal_db_path
 from chess_adapter import ChessAdapter
+from position_patterns import PositionPatternLearner
 from sequence_patterns import SequencePatternLearner
 from pattern_search import PatternSearch
 
@@ -31,6 +32,7 @@ class HeadlessTrainer:
     SEQUENCE_EXTRA = 5          # moves the sequence patterns rate best, considered beyond the 15 by priority
     use_search = True           # choose moves by a look-ahead guided by the sequence patterns (pattern_search)
     SEARCH_SECONDS = 0.5        # time for that look-ahead per move
+    use_position_values = True  # the look-ahead values positions by learned position patterns (position_patterns)
 
     def __init__(self, db_path='headless_training.db', opponent='random', stockfish_level=0,
                  stockfish_path='/usr/games/stockfish', stockfish_time=0.1):
@@ -38,7 +40,10 @@ class HeadlessTrainer:
         self.prioritizer = LearnableMovePrioritizer(db_path)
         # Multi-move patterns, learned from both players' moves
         self.sequences = SequencePatternLearner(db_path)
-        self.search = PatternSearch(self.sequences, self.SEARCH_SECONDS)
+        # Position values, learned from every position of every game, whichever player is to move
+        self.positions = PositionPatternLearner(db_path, self.sequences.pieces)
+        self.search = PatternSearch(self.sequences, self.SEARCH_SECONDS,
+                                    positions=self.positions if self.use_position_values else None)
         # Opponent: 'random' (capture-biased) or 'stockfish' at a skill level (0-20)
         self.engine = None
         self.stockfish_time = stockfish_time
@@ -233,6 +238,7 @@ class HeadlessTrainer:
         self.prioritizer.record_game_moves(game_moves, ai_color, result, final_score)
         self.general.record_game(general_features, result, 'chess')
         self.sequences.record_game(board.move_stack, ai_color, result)
+        self.positions.record_game(board.move_stack, ai_color, result)
 
         # Store result details
         self.game_results.append({
@@ -359,12 +365,18 @@ class HeadlessTrainer:
             for pattern, value, seen in self.sequences.top_patterns(limit, avoid=avoid):
                 print(f"  {value:+7.1f}  seen {seen:6.1f}  {pattern}")
 
+        for title, worst in (('BEST', False), ('WORST', True)):
+            print(f"\nPOSITION PATTERNS, {title} FOR THE SIDE TO MOVE (m: its piece, t: the other side's)")
+            for pattern, weight, seen in self.positions.top_patterns(limit, worst=worst):
+                print(f"  {weight:+7.1f}  seen {seen:7.0f}  {pattern}")
+
         print("=" * 70)
 
     def close(self):
         """Clean up resources"""
         self.prioritizer.close()
         self.general.close()
+        self.positions.close()
         self.sequences.close()
         if self.engine is not None:
             self.engine.quit()

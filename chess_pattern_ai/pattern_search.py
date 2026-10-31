@@ -7,8 +7,10 @@ only until the position is quiet) whose move order comes from the learned
 sequence patterns (sequence_patterns): at every position the side to move's
 moves are tried best pattern value first, and below the root only the
 BREADTH best are searched, so the patterns decide which lines are read. The
-value of a line is the material at its end (the game's scorer's piece worth;
-checkmate is decisive); among the agent's own moves, the pattern value is
+value of a line is the value of the position at its end: its material (the
+game's scorer's piece worth; checkmate is decisive) plus, if position patterns
+are given, the material its learned position patterns (position_patterns)
+expect the side to move to gain; among the agent's own moves, the pattern value is
 added (PATTERN_WEIGHT), so the patterns choose between moves the search
 finds equal.
 """
@@ -18,6 +20,7 @@ from typing import List, Optional, Tuple
 
 import chess
 
+from position_patterns import PositionPatternLearner
 from sequence_patterns import SequencePatternLearner, material, worth
 
 MATE = 100_000.0
@@ -33,8 +36,10 @@ class OutOfTime(Exception):
 
 class PatternSearch:
 
-    def __init__(self, sequences: SequencePatternLearner, seconds: float = 0.5, use_patterns: bool = True):
+    def __init__(self, sequences: SequencePatternLearner, seconds: float = 0.5, use_patterns: bool = True,
+                 positions: Optional[PositionPatternLearner] = None):
         self.sequences = sequences
+        self.positions = positions          # None: positions are valued by material only
         self.seconds = seconds
         self.use_patterns = use_patterns    # False: order by capture value only (for comparison)
         self.nodes = 0
@@ -55,6 +60,13 @@ class PatternSearch:
                 out.append((m, worth(target.piece_type) if target else 0.0, None))
         out.sort(key=lambda e: -e[1])
         return out
+
+    def evaluate(self, board: chess.Board) -> float:
+        """Value of a (non-final) position for the side to move"""
+        value = material(board, board.turn)
+        if self.positions is not None:
+            value += self.positions.value(board)
+        return value
 
     # --------------------------------------------------------------- search
 
@@ -126,7 +138,7 @@ class PatternSearch:
             raise OutOfTime
         if board.is_checkmate():
             return -(MATE - ply)
-        stand = material(board, board.turn)
+        stand = self.evaluate(board)
         if stand >= beta or left == 0:
             return stand
         alpha = max(alpha, stand)
