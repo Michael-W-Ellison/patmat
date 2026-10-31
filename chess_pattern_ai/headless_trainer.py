@@ -20,6 +20,7 @@ from learnable_move_prioritizer import LearnableMovePrioritizer
 from general_move_patterns import GeneralPatternLearner, analyze_candidates, evaluate, universal_db_path
 from chess_adapter import ChessAdapter
 from sequence_patterns import SequencePatternLearner
+from pattern_search import PatternSearch
 
 
 class HeadlessTrainer:
@@ -28,6 +29,8 @@ class HeadlessTrainer:
     use_sequences = True        # multi-move patterns (sequence_patterns) in move choice
     SEQUENCE_WEIGHT = 20        # score per material unit a move's sequence patterns expect (a pawn is 10)
     SEQUENCE_EXTRA = 5          # moves the sequence patterns rate best, considered beyond the 15 by priority
+    use_search = True           # choose moves by a look-ahead guided by the sequence patterns (pattern_search)
+    SEARCH_SECONDS = 0.5        # time for that look-ahead per move
 
     def __init__(self, db_path='headless_training.db', opponent='random', stockfish_level=0,
                  stockfish_path='/usr/games/stockfish', stockfish_time=0.1):
@@ -35,6 +38,7 @@ class HeadlessTrainer:
         self.prioritizer = LearnableMovePrioritizer(db_path)
         # Multi-move patterns, learned from both players' moves
         self.sequences = SequencePatternLearner(db_path)
+        self.search = PatternSearch(self.sequences, self.SEARCH_SECONDS)
         # Opponent: 'random' (capture-biased) or 'stockfish' at a skill level (0-20)
         self.engine = None
         self.stockfish_time = stockfish_time
@@ -68,6 +72,13 @@ class HeadlessTrainer:
         """AI move selection using learned patterns + position evaluation"""
         if board.is_game_over():
             return None
+
+        if self.use_search:
+            move = self.search.choose(board)
+            # (the game-independent patterns still learn from the move chosen)
+            self.last_general_features = analyze_candidates(self.adapter, board, ai_color, [move],
+                                                            max_replies=float('inf'))[0]['features']
+            return move
 
         legal_moves = list(board.legal_moves)
         legal_moves = self.prioritizer.sort_moves_by_priority(board, legal_moves)

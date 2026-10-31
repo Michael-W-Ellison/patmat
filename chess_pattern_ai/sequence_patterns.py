@@ -21,9 +21,11 @@ Both players' moves are recorded, so patterns the opponent uses to win
 material are learned too (and avoided or used by the agent).
 
 A ply is described only by observable relations on the board after it, from
-the mover's side (see token()): the piece moved, what it captured, whether it
-gives check, how many opponent pieces it then attacks, and whether it stands
-attacked and undefended. No square or opening knowledge.
+the mover's side (see token()): the category of the piece moved and of the
+piece it captured, as learned by watching moves (piece_knowledge), whether it
+gives check, how many opponent pieces it then attacks and whether one of them
+is worth more than it, and whether it can be taken. No square or opening
+knowledge; piece worth is the game's own scorer's (GameScorer).
 
 Evidence decays as in win_lift: after each recorded game all statistics are
 multiplied by DECAY.
@@ -39,6 +41,7 @@ except ImportError:
     CHESS_AVAILABLE = False
 
 from game_scorer import GameScorer
+from piece_knowledge import PieceKnowledge
 import win_lift
 
 MAX_LENGTH = 3          # plies in the longest pattern
@@ -48,38 +51,46 @@ LIFT_WEIGHT = 50.0      # material units per unit of result lift (+1: always won
 PRIOR_SEEN = 5.0        # pseudo-occurrences at value 0: rarely seen patterns stay near 0
 MIN_SEEN = 3.0          # (decayed) occurrences before a longer pattern is preferred to a shorter one
 
-_LETTERS = {1: 'P', 2: 'N', 3: 'B', 4: 'R', 5: 'Q', 6: 'K'} if CHESS_AVAILABLE else {}
+def worth(piece_type: int) -> float:
+    """A kind of piece's worth by the game's scorer"""
+    return GameScorer.PIECE_VALUES[chess.piece_symbol(piece_type).upper()]
 
 
-def token(board: 'chess.Board', move: 'chess.Move') -> str:
+def token(board: 'chess.Board', move: 'chess.Move', pieces: PieceKnowledge) -> str:
     """
     Observable description of a move from the mover's side (board before the move; unchanged on return):
-    '<piece moved><x captured piece or -><+ if check> a<opponent pieces it attacks, 0-2> <s/a/h>'
-    s: the moved piece is not attacked; a: attacked but defended; h: attacked and undefended
+    '<category of the piece moved> <x category captured, or -><+ if check> a<opponent pieces it attacks, 0-2>
+    <> if one of them is worth more than it> <s/a/c/h>'
+    s: the moved piece cannot be taken; a: it can be, but is defended and no cheaper piece attacks it;
+    c: a cheaper piece attacks it; h: it is attacked and undefended
     """
     mover = board.turn
     piece = board.piece_at(move.from_square)
     if board.is_en_passant(move):
-        captured = 'P'
+        captured = pieces.category(chess.PAWN)
     else:
         target = board.piece_at(move.to_square)
-        captured = _LETTERS[target.piece_type] if target else None
+        captured = pieces.category(target.piece_type) if target else None
+    kind = move.promotion or piece.piece_type
     board.push(move)
     try:
         to = move.to_square
         check = '+' if board.is_check() else ''
-        attacked = sum(1 for sq in board.attacks(to)
-                       if board.piece_at(sq) is not None and board.piece_at(sq).color != mover)
-        if not board.is_attacked_by(not mover, to):
+        targets = [board.piece_at(sq).piece_type for sq in board.attacks(to)
+                   if board.piece_at(sq) is not None and board.piece_at(sq).color != mover]
+        richer = '>' if any(worth(t) > worth(kind) for t in targets) else ''
+        attackers = board.attackers(not mover, to)
+        if not attackers:
             safety = 's'
+        elif min(worth(board.piece_at(sq).piece_type) for sq in attackers) < worth(kind):
+            safety = 'c'
         elif board.is_attacked_by(mover, to):
             safety = 'a'
         else:
             safety = 'h'
     finally:
         board.pop()
-    moved = _LETTERS[move.promotion] if move.promotion else _LETTERS[piece.piece_type]
-    return f"{moved}{'x' + captured if captured else '-'}{check} a{min(attacked, 2)} {safety}"
+    return f"{pieces.category(kind)} {'x' + captured if captured else '-'}{check} a{min(len(targets), 2)}{richer} {safety}"
 
 
 def material(board: 'chess.Board', color: 'chess.Color') -> float:
@@ -115,6 +126,7 @@ class SequencePatternLearner:
             )
         ''')
         self.conn.commit()
+        self.pieces = PieceKnowledge(db_path)
         self.stats: Dict[str, List[float]] = {
             p: [s, d, l] for p, s, d, l in
             self.cursor.execute('SELECT pattern, seen, delta_sum, lift_sum FROM sequence_patterns')}
@@ -123,26 +135,29 @@ class SequencePatternLearner:
 
     # ------------------------------------------------------------------ use
 
-    @staticmethod
-    def context(board: 'chess.Board', plies: int = MAX_LENGTH - 1) -> List[str]:
+    def token(self, board: 'chess.Board', move: 'chess.Move') -> str:
+        return token(board, move, self.pieces)
+
+    def context(self, board: 'chess.Board', plies: int = MAX_LENGTH - 1) -> List[str]:
         """Tokens of the last plies played on board (oldest first; board unchanged on return)"""
         undone = []
         while board.move_stack and len(undone) < plies:
             undone.append(board.pop())
         tokens = []
         for move in reversed(undone):
-            tokens.append(token(board, move))
+            tokens.append(self.token(board, move))
             board.push(move)
         return tokens
 
-    def value(self, board: 'chess.Board', move: 'chess.Move', context: Optional[List[str]] = None) -> float:
+    def value(self, board: 'chess.Board', move: 'chess.Move', context: Optional[List[str]] = None,
+              token: Optional[str] = None) -> float:
         """
         Expected material gain (with the result lift) for the side to move from playing move, by the
         longest pattern ending with it seen at least MIN_SEEN times (shorter patterns otherwise)
         """
         if context is None:
             context = self.context(board)
-        tokens = context + [token(board, move)]
+        tokens = context + [token if token is not None else self.token(board, move)]
         best = 0.0
         for length in range(1, min(MAX_LENGTH, len(tokens)) + 1):
             entry = self.stats.get(' | '.join(tokens[-length:]))
@@ -158,17 +173,23 @@ class SequencePatternLearner:
 
     def record_game(self, moves: List['chess.Move'], ai_color: 'chess.Color', result: str):
         """
-        Learn from one finished game: every ply by either player ends patterns of length 1..MAX_LENGTH
+        Learn from one finished game: every move by either player is watched (piece_knowledge), then
+        every ply ends patterns of length 1..MAX_LENGTH
         Args:
             moves: the game's moves from the starting position (board.move_stack)
             ai_color: the agent's colour (results are compared with each player's own average)
             result: 'win', 'loss' or 'draw' for the agent
         """
         board = chess.Board()
+        for move in moves:
+            self.pieces.observe(board, move)
+            board.push(move)
+        self.pieces.save()
+        board = chess.Board()
         tokens, balance = [], []                    # per ply: token, White's material before it
         for move in moves:
             balance.append(material(board, chess.WHITE))
-            tokens.append(token(board, move))
+            tokens.append(self.token(board, move))
             board.push(move)
         balance.append(material(board, chess.WHITE))
         n = len(moves)
@@ -229,4 +250,5 @@ class SequencePatternLearner:
         return rows[:limit]
 
     def close(self):
+        self.pieces.close()
         self.conn.close()
