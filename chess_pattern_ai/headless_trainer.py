@@ -19,6 +19,7 @@ from game_scorer import GameScorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
 from general_move_patterns import GeneralPatternLearner, analyze_candidates, evaluate, universal_db_path
 from chess_adapter import ChessAdapter
+from mate_patterns import MatePatternLearner
 from position_patterns import PositionPatternLearner
 from sequence_patterns import SequencePatternLearner
 from pattern_search import PatternSearch
@@ -36,6 +37,7 @@ class HeadlessTrainer:
     SEARCH_SELECTIVE = False    # look-ahead reads forcing moves + a few others below the root (pattern_search)
     SEARCH_DEPTH = None         # plies the look-ahead goes to (None: as deep as its time allows)
     SEARCH_BONUS_CAP = None     # limit on the pattern bonus added to the look-ahead's value of a move
+    use_mate_values = False     # the look-ahead values kings' surroundings by how often they preceded mate
 
     def __init__(self, db_path='headless_training.db', opponent='random', stockfish_level=0,
                  stockfish_path='/usr/games/stockfish', stockfish_time=0.1):
@@ -45,10 +47,13 @@ class HeadlessTrainer:
         self.sequences = SequencePatternLearner(db_path)
         # Position values, learned from every position of every game, whichever player is to move
         self.positions = PositionPatternLearner(db_path, self.sequences.pieces)
+        # Kings' surroundings before mate, learned from both players' mates
+        self.mates = MatePatternLearner(db_path)
         self.search = PatternSearch(self.sequences, self.SEARCH_SECONDS,
                                     positions=self.positions if self.use_position_values else None,
                                     selective=self.SEARCH_SELECTIVE, max_depth=self.SEARCH_DEPTH,
-                                    bonus_cap=self.SEARCH_BONUS_CAP)
+                                    bonus_cap=self.SEARCH_BONUS_CAP,
+                                    mates=self.mates if self.use_mate_values else None)
         # Opponent: 'random' (capture-biased) or 'stockfish' at a skill level (0-20)
         self.engine = None
         self.stockfish_time = stockfish_time
@@ -244,6 +249,7 @@ class HeadlessTrainer:
         self.general.record_game(general_features, result, 'chess')
         self.sequences.record_game(board.move_stack, ai_color, result)
         self.positions.record_game(board.move_stack, ai_color, result)
+        self.mates.record_game(board.move_stack)
 
         # Store result details
         self.game_results.append({
@@ -375,12 +381,17 @@ class HeadlessTrainer:
             for pattern, weight, seen in self.positions.top_patterns(limit, worst=worst):
                 print(f"  {weight:+7.1f}  seen {seen:7.0f}  {pattern}")
 
+        print("\nKING SURROUNDINGS MOST OFTEN FOLLOWED BY MATE (free/blocked/attacked/off-board squares, + check)")
+        for pattern, rate, seen in self.mates.top_patterns(limit):
+            print(f"  {rate:6.1%}  seen {seen:7.0f}  {pattern}")
+
         print("=" * 70)
 
     def close(self):
         """Clean up resources"""
         self.prioritizer.close()
         self.general.close()
+        self.mates.close()
         self.positions.close()
         self.sequences.close()
         if self.engine is not None:

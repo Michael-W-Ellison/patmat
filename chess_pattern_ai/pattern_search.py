@@ -10,7 +10,9 @@ BREADTH best are searched, so the patterns decide which lines are read. The
 value of a line is the value of the position at its end: its material (the
 game's scorer's piece worth; checkmate is decisive) plus, if position patterns
 are given, the material its learned position patterns (position_patterns)
-expect the side to move to gain; among the agent's own moves, the pattern value is
+expect the side to move to gain, plus, if mate patterns are given, the value
+of how often each king's surroundings have been followed by its being mated
+(mate_patterns); among the agent's own moves, the pattern value is
 added (PATTERN_WEIGHT, limited to +-bonus_cap if one is given), so the patterns choose
 between moves the search finds equal.
 
@@ -31,6 +33,7 @@ from typing import List, Optional, Tuple
 
 import chess
 
+from mate_patterns import MatePatternLearner
 from position_patterns import PositionPatternLearner
 from sequence_patterns import SequencePatternLearner, material, worth
 
@@ -78,8 +81,10 @@ class PatternSearch:
 
     def __init__(self, sequences: SequencePatternLearner, seconds: float = 0.5, use_patterns: bool = True,
                  positions: Optional[PositionPatternLearner] = None, selective: bool = False,
-                 max_depth: Optional[int] = None, bonus_cap: Optional[float] = None):
+                 max_depth: Optional[int] = None, bonus_cap: Optional[float] = None,
+                 mates: Optional[MatePatternLearner] = None):
         self.sequences = sequences
+        self.mates = mates                  # None: kings' surroundings are not valued
         self.selective = selective          # below the root: forcing moves + QUIET_MOVES others (else BREADTH best)
         self.max_depth = max_depth          # None: MAX_DEPTH
         self.bonus_cap = bonus_cap          # None: the root pattern bonus is not limited
@@ -130,6 +135,8 @@ class PatternSearch:
         value = material(board, board.turn)
         if self.positions is not None:
             value += self.positions.value(board)
+        if self.mates is not None:
+            value += self.mates.value(board)
         return value
 
     # --------------------------------------------------------------- search
