@@ -125,8 +125,19 @@ class TestPositionPatterns(unittest.TestCase):
         board = moves_of(['e4', 'd5', 'Qg4'])
         feats = self.positions.features(board)
         self.assertEqual(feats['t doL c a2'], 1)        # their queen, attacked by a cheaper piece, attacks d7 and g7
-        self.assertEqual(feats['m o:dSf s a0'], 1)      # six of Black's pawns: counted once,
-        self.assertEqual(feats['m o:dSf s a0 2+'], 1)   # and once more for being shown by two or more
+        self.assertNotIn('m o:dSf s a0', feats)         # pieces neither attacked nor attacking show no pattern
+        self.assertEqual(feats['=m o:dSf'], 1)          # what material covers: the kinds of piece each side has,
+        self.assertEqual(feats['=m o:dSf 2+'], 1)       # (two or more of them)
+        self.assertEqual(feats['=material'], 0.0)       # and the material balance
+
+    def test_value_leaves_out_what_material_covers(self):
+        board = moves_of(['e4', 'd5', 'Qg4'])
+        self.positions.weights['=t doL'] = [-25.0, 1.0]       # "they have a queen": a control
+        self.positions.weights['=material'] = [5.0, 1.0]
+        self.assertEqual(self.positions.value(board), 0.0)
+        self.positions.cache.clear()
+        self.positions.weights['t doL c a2'] = [25.0, 1.0]    # their queen attacked by a cheaper piece: a pattern
+        self.assertEqual(self.positions.value(board), 25.0)
 
     def test_learns_from_the_opponents_moves(self):
         # The agent (White) leaves its queen where the bishop takes it: the opponent's capture is learned
