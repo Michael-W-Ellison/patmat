@@ -33,6 +33,9 @@ class HeadlessTrainer:
     use_search = True           # choose moves by a look-ahead guided by the sequence patterns (pattern_search)
     SEARCH_SECONDS = 0.5        # time for that look-ahead per move
     use_position_values = True  # the look-ahead values positions by learned position patterns (position_patterns)
+    SEARCH_SELECTIVE = False    # look-ahead reads forcing moves + a few others below the root (pattern_search)
+    SEARCH_DEPTH = None         # plies the look-ahead goes to (None: as deep as its time allows)
+    SEARCH_BONUS_CAP = None     # limit on the pattern bonus added to the look-ahead's value of a move
 
     def __init__(self, db_path='headless_training.db', opponent='random', stockfish_level=0,
                  stockfish_path='/usr/games/stockfish', stockfish_time=0.1):
@@ -43,7 +46,9 @@ class HeadlessTrainer:
         # Position values, learned from every position of every game, whichever player is to move
         self.positions = PositionPatternLearner(db_path, self.sequences.pieces)
         self.search = PatternSearch(self.sequences, self.SEARCH_SECONDS,
-                                    positions=self.positions if self.use_position_values else None)
+                                    positions=self.positions if self.use_position_values else None,
+                                    selective=self.SEARCH_SELECTIVE, max_depth=self.SEARCH_DEPTH,
+                                    bonus_cap=self.SEARCH_BONUS_CAP)
         # Opponent: 'random' (capture-biased) or 'stockfish' at a skill level (0-20)
         self.engine = None
         self.stockfish_time = stockfish_time

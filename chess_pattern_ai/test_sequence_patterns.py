@@ -21,7 +21,7 @@ except ImportError:
 if CHESS_AVAILABLE:
     from piece_knowledge import PieceKnowledge
     from sequence_patterns import SequencePatternLearner, MATE_VALUE
-    from pattern_search import PatternSearch
+    from pattern_search import PatternSearch, forcing
     from position_patterns import PositionPatternLearner
 
 
@@ -209,6 +209,22 @@ class TestPatternSearch(unittest.TestCase):
                 self.assertAlmostEqual(totals[chosen], max(totals.values()), places=9, msg=fen)
         finally:
             pattern_search.MAX_DEPTH = saved
+
+    def test_forcing_moves(self):
+        fork = chess.Board('3k3r/8/8/4N3/8/8/8/4K3 w - - 0 1')
+        self.assertTrue(forcing(chess.Move.from_uci('e5f7'), 'jS -+ a2> s', fork))           # check
+        self.assertFalse(forcing(chess.Move.from_uci('e5c4'), 'jS - a0 s', fork))            # quiet
+        greedy = chess.Board('4k3/8/2p5/3p4/8/8/8/3QK3 w - - 0 1')
+        self.assertFalse(forcing(chess.Move.from_uci('d1d5'), 'doL xo:dSf a1 c', greedy))    # gives up the queen
+        self.assertTrue(forcing(chess.Move.from_uci('d1d5'), 'doL xo:dSf a1 s', greedy))     # (if it were safe)
+        self.assertFalse(forcing(chess.Move.from_uci('e5f7'), 'jS - a2> h', fork))           # threat, piece lost
+
+    def test_selective_search_finds_the_fork_and_the_mate(self):
+        board = chess.Board('r3k3/8/8/1N6/8/8/8/4K3 w - - 0 1')
+        search = PatternSearch(self.learner, seconds=30.0, selective=True, max_depth=3)
+        self.assertEqual(search.choose(board), chess.Move.from_uci('b5c7'))
+        board = chess.Board('6k1/5ppp/8/8/8/8/8/R5K1 w - - 0 1')
+        self.assertEqual(search.choose(board), chess.Move.from_uci('a1a8'))
 
     def test_wins_material_two_moves_deep(self):
         # the knight fork Nc7+ wins the rook on a8 a move later

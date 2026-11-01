@@ -11,8 +11,19 @@ value of a line is the value of the position at its end: its material (the
 game's scorer's piece worth; checkmate is decisive) plus, if position patterns
 are given, the material its learned position patterns (position_patterns)
 expect the side to move to gain; among the agent's own moves, the pattern value is
-added (PATTERN_WEIGHT), so the patterns choose between moves the search
-finds equal.
+added (PATTERN_WEIGHT, limited to +-bonus_cap if one is given), so the patterns choose
+between moves the search finds equal.
+
+Selective search (selective=True), closer to how a person reads a position:
+below the root, instead of the BREADTH best moves, a side considers its
+forcing moves (captures, checks, promotions, and moves after which the moved
+piece attacks two pieces or one worth more than it, as the move's sequence
+pattern token describes it) and only its QUIET_MOVES best other moves by
+pattern value. Captures and threats count only if the moving piece cannot
+then be won at once or the capture takes at least its worth, and the same
+rule limits the captures followed after the search depth. So the replies
+that punish a move (a capture, a fork, an attack on a queen) are always
+read, and quiet lines are read little.
 """
 
 import time
@@ -28,6 +39,35 @@ BREADTH = 8             # moves searched at each position below the root (best p
 QUIESCENCE_DEPTH = 6    # captures followed beyond the search depth
 MAX_DEPTH = 8
 PATTERN_WEIGHT = 0.5    # root moves: search value + PATTERN_WEIGHT * pattern value (both material units)
+QUIET_MOVES = 2         # selective search: non-forcing moves considered at each position below the root
+
+
+def forcing(move: chess.Move, token: Optional[str], board: chess.Board) -> bool:
+    """
+    Is move a sound forcing move: a check, a promotion, a capture that does not give up more than it takes,
+    or a threat (the moved piece then attacks two pieces, or one worth more than it) by a piece that cannot
+    then be taken for less? From its sequence pattern token '<cat> <x cat|-><+> a<n><>> <safety>' (safety
+    s/a: the moved piece cannot be won by the opponent at once); without a token, captures and checks
+    """
+    if move.promotion:
+        return True
+    if token is None:
+        return board.is_capture(move) or board.gives_check(move)
+    _, taken, attacks, safety = token.split(' ')
+    if taken[-1] == '+':
+        return True
+    safe = safety in ('s', 'a')
+    if taken[0] == 'x':
+        return safe or sound_capture(board, move)
+    return safe and (attacks[-1] == '>' or attacks[1] == '2')
+
+
+def sound_capture(board: chess.Board, move: chess.Move) -> bool:
+    """Does the capture take a piece worth at least as much as the capturing piece?"""
+    target = board.piece_at(move.to_square)
+    if target is None:          # en passant
+        return True
+    return worth(target.piece_type) >= worth(board.piece_type_at(move.from_square))
 
 
 class OutOfTime(Exception):
@@ -37,8 +77,12 @@ class OutOfTime(Exception):
 class PatternSearch:
 
     def __init__(self, sequences: SequencePatternLearner, seconds: float = 0.5, use_patterns: bool = True,
-                 positions: Optional[PositionPatternLearner] = None):
+                 positions: Optional[PositionPatternLearner] = None, selective: bool = False,
+                 max_depth: Optional[int] = None, bonus_cap: Optional[float] = None):
         self.sequences = sequences
+        self.selective = selective          # below the root: forcing moves + QUIET_MOVES others (else BREADTH best)
+        self.max_depth = max_depth          # None: MAX_DEPTH
+        self.bonus_cap = bonus_cap          # None: the root pattern bonus is not limited
         self.positions = positions          # None: positions are valued by material only
         self.seconds = seconds
         self.use_patterns = use_patterns    # False: order by capture value only (for comparison)
@@ -61,6 +105,26 @@ class PatternSearch:
         out.sort(key=lambda e: -e[1])
         return out
 
+    def candidates(self, board: chess.Board, context: List[str]) -> List[Tuple]:
+        """The moves searched at a position below the root, best pattern value first"""
+        moves = self.ordered(board, context)
+        if not self.selective:
+            return moves[:BREADTH]
+        out, quiet = [], 0
+        for entry in moves:
+            if forcing(entry[0], entry[2], board):
+                out.append(entry)
+            elif quiet < QUIET_MOVES:
+                out.append(entry)
+                quiet += 1
+        return out
+
+    def bonus(self, pattern: float) -> float:
+        b = PATTERN_WEIGHT * pattern
+        if self.bonus_cap is not None:
+            b = max(-self.bonus_cap, min(self.bonus_cap, b))
+        return b
+
     def evaluate(self, board: chess.Board) -> float:
         """Value of a (non-final) position for the side to move"""
         value = material(board, board.turn)
@@ -79,12 +143,12 @@ class PatternSearch:
         if not root:
             return None
         best_move = root[0][0]
-        for depth in range(1, MAX_DEPTH + 1):
+        for depth in range(1, (self.max_depth if self.max_depth is not None else MAX_DEPTH) + 1):
             try:
                 scored = []
                 best_total = -float('inf')
                 for move, pattern, tok in root:
-                    bonus = PATTERN_WEIGHT * pattern
+                    bonus = self.bonus(pattern)
                     # only whether the move's value beats this matters: the search below cuts off at it, and
                     # a move cut off returns it exactly, so the comparison is on the value, not on
                     # value + bonus (whose rounding could make a cut-off move look better than the best)
@@ -116,11 +180,11 @@ class PatternSearch:
             raise OutOfTime
         if depth <= 0:
             return self.quiesce(board, alpha, beta, context, ply, QUIESCENCE_DEPTH)
-        moves = self.ordered(board, context)
+        moves = self.candidates(board, context)
         if not moves:
             return -(MATE - ply) if board.is_check() else 0.0
         best = -float('inf')
-        for move, _, tok in moves[:BREADTH]:
+        for move, _, tok in moves:
             board.push(move)
             try:
                 value = -self.negamax(board, depth - 1, -beta, -alpha, self.next_context(context, tok), ply + 1)
@@ -145,6 +209,8 @@ class PatternSearch:
             return stand
         alpha = max(alpha, stand)
         for move, _, tok in self.ordered(board, context, captures_only=True):
+            if self.selective and not forcing(move, tok, board):
+                continue
             board.push(move)
             try:
                 value = -self.quiesce(board, -beta, -alpha, self.next_context(context, tok), ply + 1, left - 1)
