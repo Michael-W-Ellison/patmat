@@ -175,6 +175,41 @@ class TestPatternSearch(unittest.TestCase):
         board = chess.Board('6k1/5ppp/8/8/8/8/8/R5K1 w - - 0 1')
         self.assertEqual(PatternSearch(self.learner, seconds=1.0).choose(board), chess.Move.from_uci('a1a8'))
 
+    def test_choice_matches_a_full_window_search(self):
+        # Moves the root search cuts off must never be chosen over the best move (they come back with a value
+        # exactly at the cut-off, which adding a fractional pattern bonus could round above the best)
+        import pattern_search
+
+        class FractionalPatterns:
+            def context(self, board, plies=2):
+                return []
+
+            def token(self, board, move):
+                return ''
+
+            def value(self, board, move, context=None, token=None):
+                return ((move.from_square * 7 + move.to_square * 13) % 10) * 0.37
+
+        fens = ['r1q1kbnr/p1p1pppp/b1n5/1p1N4/3P4/5P2/PPPPB1PP/1RBQK1NR w Kkq - 0 8',
+                'rnb1kb2/p3n2r/1p1pqpp1/2p1p2p/2PPPB2/P7/1P1K1PPP/RN2QBNR w - - 0 16',
+                '1r3b1r/2P1p1pp/np6/pQ1b1pN1/3k3P/NP1P2P1/P3Pn2/2R1KB1R b K - 2 20']
+        saved = pattern_search.MAX_DEPTH
+        pattern_search.MAX_DEPTH = 2
+        try:
+            for fen in fens:
+                board = chess.Board(fen)
+                search = PatternSearch(FractionalPatterns(), seconds=1000.0)
+                chosen = search.choose(board)
+                totals = {}
+                for move, pattern, tok in search.ordered(board, []):
+                    board.push(move)
+                    totals[move] = -search.negamax(board, 1, -float('inf'), float('inf'), [], 1) \
+                        + pattern_search.PATTERN_WEIGHT * pattern
+                    board.pop()
+                self.assertAlmostEqual(totals[chosen], max(totals.values()), places=9, msg=fen)
+        finally:
+            pattern_search.MAX_DEPTH = saved
+
     def test_wins_material_two_moves_deep(self):
         # the knight fork Nc7+ wins the rook on a8 a move later
         board = chess.Board('r3k3/8/8/1N6/8/8/8/4K3 w - - 0 1')

@@ -85,17 +85,19 @@ class PatternSearch:
                 best_total = -float('inf')
                 for move, pattern, tok in root:
                     bonus = PATTERN_WEIGHT * pattern
+                    # only whether the move's value beats this matters: the search below cuts off at it, and
+                    # a move cut off returns it exactly, so the comparison is on the value, not on
+                    # value + bonus (whose rounding could make a cut-off move look better than the best)
+                    threshold = best_total - bonus
                     board.push(move)
                     try:
-                        # (only whether the move beats best_total matters: a null window below it)
-                        value = -self.negamax(board, depth - 1, -float('inf'), -(best_total - bonus),
+                        value = -self.negamax(board, depth - 1, -float('inf'), -threshold,
                                               self.next_context(context, tok), 1)
                     finally:
                         board.pop()
-                    total = value + bonus
-                    scored.append((total, move, pattern, tok))
-                    if total > best_total:
-                        best_total, best_move_now = total, move
+                    scored.append((value + bonus, move, pattern, tok))
+                    if value > threshold:
+                        best_total, best_move_now = value + bonus, move
                 best_move = best_move_now
                 self.depth_reached = depth
                 # next iteration: this iteration's best first
