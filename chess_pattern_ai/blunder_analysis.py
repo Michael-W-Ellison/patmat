@@ -20,7 +20,9 @@ blunder (a loss of BLUNDER centipawns or more) it records:
            LOSS_UNITS of material down for good (None: no lasting material loss
            within the line, e.g. a mate or a positional loss)
 - rank:    where the agent's own move ordering placed the opponent's best reply
-           (0 = first); a rank of BREADTH or more means the search never read it
+           (0 = first)
+- read:    whether that reply is among the moves the agent's search considers
+           below the root (if not, the search never read it)
 - depth:   how deep the agent's search went for the move
 
 usage: blunder_analysis.py <db> <games> [--level N] [--out file.jsonl]
@@ -231,6 +233,7 @@ def analyse_move(judge, board: chess.Board, move: chess.Move, agent, color: ches
         rec['lost'] = first_lost(board, line, color, move.to_square)
         rec['loss_ply'] = loss_ply(line_material(board, line, color))
         rec['rank'] = reply_rank(agent, board, reply)
+        rec['read'] = reply_read(agent, board, reply)
         return rec
     finally:
         board.pop()
@@ -245,9 +248,17 @@ def reply_rank(agent, board: chess.Board, reply: chess.Move) -> Optional[int]:
     return ordered.index(reply) if reply in ordered else None
 
 
+def reply_read(agent, board: chess.Board, reply: chess.Move) -> Optional[bool]:
+    """Is reply among the moves the agent's search considers below the root (board: opponent to move)?"""
+    if agent is None:
+        return None
+    context = agent.sequences.context(board) if agent.use_patterns else []
+    return any(m == reply for m, _, _ in agent.candidates(board, context))
+
+
 # ------------------------------------------------------------------- report
 
-def report(records: List[Dict], moves_judged: int, breadth: int) -> str:
+def report(records: List[Dict], moves_judged: int) -> str:
     out = [f'{moves_judged} agent moves judged, {len(records)} blunders '
            f'({len(records) / max(1, moves_judged) * 100:.1f}%)']
     for kind in ('allowed', 'missed'):
@@ -266,11 +277,10 @@ def report(records: List[Dict], moves_judged: int, breadth: int) -> str:
         out.append('allowed: ply of the line from which the material loss lasts (None: no lasting loss)')
         for m, n in sorted(Counter(r['loss_ply'] for r in allowed).items(), key=lambda e: (e[0] is None, e[0] or 0)):
             out.append(f'  {str(m):26s} {n:4d}')
-        ranked = [r for r in allowed if r.get('rank') is not None]
-        if ranked:
-            pruned = sum(r['rank'] >= breadth for r in ranked)
-            out.append(f'allowed: opponent\'s best reply outside the agent\'s {breadth} best-ordered moves '
-                       f'(never read below the root): {pruned} of {len(ranked)}')
+        read = [r for r in allowed if r.get('read') is not None]
+        if read:
+            out.append('allowed: opponent\'s best reply not among the moves the agent\'s search considers '
+                       f'below the root: {sum(not r["read"] for r in read)} of {len(read)}')
         out.append('allowed: agent already lost (judge score before the move <= -500): '
                    f'{sum(r["before"] <= -500 for r in allowed)} of {len(allowed)}')
     return '\n'.join(out)
@@ -287,7 +297,6 @@ def main():
 
     import logging
     logging.disable(logging.INFO)
-    import pattern_search
     from headless_trainer import HeadlessTrainer
 
     trainer = HeadlessTrainer(args.db, opponent='stockfish', stockfish_level=args.level,
@@ -315,7 +324,7 @@ def main():
         results[result] += 1
         print(f'game {i + 1}: {result} ({len(records)} blunders so far)', file=sys.stderr, flush=True)
     print(f'results: {dict(results)}')
-    print(report(records, judged[0], pattern_search.BREADTH))
+    print(report(records, judged[0]))
     judge.quit()
     trainer.close()
     if out:

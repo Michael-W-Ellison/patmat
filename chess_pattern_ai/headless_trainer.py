@@ -37,6 +37,7 @@ class HeadlessTrainer:
     SEARCH_SELECTIVE = True     # look-ahead reads forcing moves + a few others below the root (pattern_search)
     SEARCH_DEPTH = 3            # plies the look-ahead goes to (None: as deep as its time allows)
     SEARCH_BONUS_CAP = 3.0      # limit on the pattern bonus added to the look-ahead's value of a move
+    SEARCH_THREATS = False      # look-ahead recognises threats: considers escapes, a second threat costs (pattern_search)
     use_mate_values = False     # the look-ahead values kings' surroundings by how often they preceded mate
 
     def __init__(self, db_path='headless_training.db', opponent='random', stockfish_level=0,
@@ -53,7 +54,8 @@ class HeadlessTrainer:
                                     positions=self.positions if self.use_position_values else None,
                                     selective=self.SEARCH_SELECTIVE, max_depth=self.SEARCH_DEPTH,
                                     bonus_cap=self.SEARCH_BONUS_CAP,
-                                    mates=self.mates if self.use_mate_values else None)
+                                    mates=self.mates if self.use_mate_values else None,
+                                    threats=self.SEARCH_THREATS)
         # Opponent: 'random' (capture-biased) or 'stockfish' at a skill level (0-20)
         self.engine = None
         self.stockfish_time = stockfish_time

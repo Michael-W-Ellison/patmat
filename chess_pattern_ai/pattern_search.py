@@ -26,6 +26,19 @@ then be won at once or the capture takes at least its worth, and the same
 rule limits the captures followed after the search depth. So the replies
 that punish a move (a capture, a fork, an attack on a queen) are always
 read, and quiet lines are read little.
+
+Threat recognition (threats=True), what a person asks before moving: "what
+does my opponent threaten?" A side's piece is threatened when the other side
+attacks it and it is undefended (the whole piece is at stake) or attacked by
+a cheaper piece (its worth minus that piece's is at stake), as the pieces'
+movement shows it (threatened()). Then
+- in the selective search, the side to move also considers, for each of its
+  threatened pieces, that piece's best move (by pattern value) to a square
+  where it cannot be won at once, so escaping a threat is read even when it
+  is not among the QUIET_MOVES best quiet moves;
+- where the search stops (the stand-pat value of the capture search), a side
+  can answer only one threat with its move, so the value of a position
+  subtracts what is at stake in its second-largest threat (e.g. a fork).
 """
 
 import time
@@ -73,6 +86,28 @@ def sound_capture(board: chess.Board, move: chess.Move) -> bool:
     return worth(target.piece_type) >= worth(board.piece_type_at(move.from_square))
 
 
+def threatened(board: chess.Board, color: chess.Color) -> List[Tuple[int, float]]:
+    """
+    (square, material at stake) for each of color's pieces (not the king) the other side can win at once,
+    largest first: attacked and undefended, its worth; attacked by a cheaper piece, its worth minus the
+    cheapest attacker's
+    """
+    out = []
+    enemy = not color
+    for sq in chess.scan_forward(board.occupied_co[color] & ~board.kings):
+        attackers = board.attackers_mask(enemy, sq)
+        if not attackers:
+            continue
+        value = worth(board.piece_type_at(sq))
+        cheapest = min(worth(board.piece_type_at(a)) for a in chess.scan_forward(attackers))
+        if not board.attackers_mask(color, sq):
+            out.append((sq, value))
+        elif cheapest < value:
+            out.append((sq, value - cheapest))
+    out.sort(key=lambda e: -e[1])
+    return out
+
+
 class OutOfTime(Exception):
     pass
 
@@ -82,8 +117,9 @@ class PatternSearch:
     def __init__(self, sequences: SequencePatternLearner, seconds: float = 0.5, use_patterns: bool = True,
                  positions: Optional[PositionPatternLearner] = None, selective: bool = False,
                  max_depth: Optional[int] = None, bonus_cap: Optional[float] = None,
-                 mates: Optional[MatePatternLearner] = None):
+                 mates: Optional[MatePatternLearner] = None, threats: bool = False):
         self.sequences = sequences
+        self.threats = threats              # recognise threats: escapes are considered, a second threat costs
         self.mates = mates                  # None: kings' surroundings are not valued
         self.selective = selective          # below the root: forcing moves + QUIET_MOVES others (else BREADTH best)
         self.max_depth = max_depth          # None: MAX_DEPTH
@@ -122,6 +158,16 @@ class PatternSearch:
             elif quiet < QUIET_MOVES:
                 out.append(entry)
                 quiet += 1
+        if self.threats:
+            chosen = {e[0] for e in out}
+            for sq, _ in threatened(board, board.turn):
+                for entry in moves:         # best first: the threatened piece's best move to safety
+                    move, _, tok = entry
+                    if move.from_square == sq and (tok is None or tok.split(' ')[3] in ('s', 'a')):
+                        if move not in chosen:
+                            out.append(entry)
+                            chosen.add(move)
+                        break
         return out
 
     def bonus(self, pattern: float) -> float:
@@ -212,6 +258,10 @@ class PatternSearch:
         if board.is_checkmate():
             return -(MATE - ply)
         stand = self.evaluate(board)
+        if self.threats:
+            at_stake = threatened(board, board.turn)
+            if len(at_stake) >= 2:
+                stand -= at_stake[1][1]     # one threat can be answered, the second costs what is at stake
         if stand >= beta or left == 0:
             return stand
         alpha = max(alpha, stand)

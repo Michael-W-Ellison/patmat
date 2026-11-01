@@ -21,7 +21,7 @@ except ImportError:
 if CHESS_AVAILABLE:
     from piece_knowledge import PieceKnowledge
     from sequence_patterns import SequencePatternLearner, MATE_VALUE
-    from pattern_search import PatternSearch, forcing
+    from pattern_search import PatternSearch, forcing, threatened
     from position_patterns import PositionPatternLearner
 
 
@@ -225,6 +225,30 @@ class TestPatternSearch(unittest.TestCase):
         self.assertEqual(search.choose(board), chess.Move.from_uci('b5c7'))
         board = chess.Board('6k1/5ppp/8/8/8/8/8/R5K1 w - - 0 1')
         self.assertEqual(search.choose(board), chess.Move.from_uci('a1a8'))
+
+    def test_threats(self):
+        # the knight on e6 forks the queen and the rook, which defend each other
+        board = chess.Board('3q1r2/7k/4N3/8/8/8/8/4K3 b - - 0 1')
+        self.assertEqual(threatened(board, chess.BLACK), [(chess.D8, 58.0), (chess.F8, 18.0)])
+        self.assertEqual(threatened(board, chess.WHITE), [])
+        # where the search stops, the side to move can answer only one threat: the second costs its stake
+        values = []
+        for threats in (False, True):
+            search = PatternSearch(self.learner, threats=threats)
+            search.deadline = float('inf')
+            values.append(search.quiesce(board, -float('inf'), float('inf'), [], 0, 0))
+        self.assertEqual(values[0] - values[1], 18.0)
+        # the selective search considers an escape to safety for each threatened piece
+        search = PatternSearch(self.learner, selective=True, threats=True)
+        moves = [m for m, _, _ in search.candidates(board, [])]
+        def safe(m):
+            board.push(m)
+            try:
+                return all(sq != m.to_square for sq, _ in threatened(board, chess.BLACK))
+            finally:
+                board.pop()
+        for square in (chess.D8, chess.F8):
+            self.assertTrue(any(m.from_square == square and safe(m) for m in moves))
 
     def test_wins_material_two_moves_deep(self):
         # the knight fork Nc7+ wins the rook on a8 a move later
