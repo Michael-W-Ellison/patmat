@@ -119,7 +119,8 @@ class PatternSearch:
                  max_depth: Optional[int] = None, bonus_cap: Optional[float] = None,
                  mates: Optional[MatePatternLearner] = None, threats: bool = False):
         self.sequences = sequences
-        self.threats = threats              # recognise threats: escapes are considered, a second threat costs
+        self.threat_escapes = threats       # recognise threats: escapes from them are considered ...
+        self.threat_cost = threats          # ... and a second threat costs its stake where the search stops
         self.mates = mates                  # None: kings' surroundings are not valued
         self.selective = selective          # below the root: forcing moves + QUIET_MOVES others (else BREADTH best)
         self.max_depth = max_depth          # None: MAX_DEPTH
@@ -158,7 +159,7 @@ class PatternSearch:
             elif quiet < QUIET_MOVES:
                 out.append(entry)
                 quiet += 1
-        if self.threats:
+        if self.threat_escapes:
             chosen = {e[0] for e in out}
             for sq, _ in threatened(board, board.turn):
                 for entry in moves:         # best first: the threatened piece's best move to safety
@@ -258,7 +259,7 @@ class PatternSearch:
         if board.is_checkmate():
             return -(MATE - ply)
         stand = self.evaluate(board)
-        if self.threats:
+        if self.threat_cost:
             at_stake = threatened(board, board.turn)
             if len(at_stake) >= 2:
                 stand -= at_stake[1][1]     # one threat can be answered, the second costs what is at stake
