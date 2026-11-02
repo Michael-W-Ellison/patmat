@@ -39,6 +39,7 @@ class HeadlessTrainer:
     SEARCH_BONUS_CAP = 3.0      # limit on the pattern bonus added to the look-ahead's value of a move
     SEARCH_THREATS = False      # look-ahead recognises threats: considers escapes, a second threat costs (pattern_search)
     use_mate_values = False     # the look-ahead values kings' surroundings by how often they preceded mate
+    SELF_PLAY_RANDOM_PLIES = 4  # self-play: plies played at random from the start, so that games differ
 
     def __init__(self, db_path='headless_training.db', opponent='random', stockfish_level=0,
                  stockfish_path='/usr/games/stockfish', stockfish_time=0.1):
@@ -56,7 +57,10 @@ class HeadlessTrainer:
                                     bonus_cap=self.SEARCH_BONUS_CAP,
                                     mates=self.mates if self.use_mate_values else None,
                                     threats=self.SEARCH_THREATS)
-        # Opponent: 'random' (capture-biased) or 'stockfish' at a skill level (0-20)
+        # Opponent: 'random' (capture-biased), 'stockfish' at a skill level (0-20), or 'self' (the agent's own
+        # search; self_play can also be switched per game when a Stockfish opponent is configured)
+        self.self_play = opponent == 'self'
+        self.learn = True                   # False: games are played but nothing is recorded (evaluation)
         self.engine = None
         self.stockfish_time = stockfish_time
         if opponent == 'stockfish':
@@ -148,9 +152,13 @@ class HeadlessTrainer:
         return best_move
 
     def play_opponent_move(self, board):
-        """Stockfish if configured, else a random opponent with 30% capture bias"""
+        """The agent's own search in self-play, else Stockfish if configured, else a random opponent with 30%
+        capture bias"""
         if board.is_game_over():
             return None
+
+        if self.self_play:
+            return self.search.choose(board)
 
         if self.engine is not None:
             import chess.engine
@@ -170,6 +178,10 @@ class HeadlessTrainer:
         game_moves = []
         general_features = []
         move_count = 0
+        if self.self_play:
+            # the search is deterministic: without random first plies, self-play games would repeat
+            for _ in range(self.SELF_PLAY_RANDOM_PLIES):
+                board.push(random.choice(list(board.legal_moves)))
 
         # Play until game naturally ends (checkmate, stalemate, etc.)
         # No artificial move limit - let games reach their conclusion
@@ -246,12 +258,14 @@ class HeadlessTrainer:
 
         self.score_history.append(final_score)
 
-        # Record for learning
-        self.prioritizer.record_game_moves(game_moves, ai_color, result, final_score)
-        self.general.record_game(general_features, result, 'chess')
-        self.sequences.record_game(board.move_stack, ai_color, result)
-        self.positions.record_game(board.move_stack, ai_color, result)
-        self.mates.record_game(board.move_stack)
+        # Record for learning (sequences, positions and mates learn from both players' moves, so a self-play game
+        # is learned from both colours)
+        if self.learn:
+            self.prioritizer.record_game_moves(game_moves, ai_color, result, final_score)
+            self.general.record_game(general_features, result, 'chess')
+            self.sequences.record_game(board.move_stack, ai_color, result)
+            self.positions.record_game(board.move_stack, ai_color, result)
+            self.mates.record_game(board.move_stack)
 
         # Store result details
         self.game_results.append({
@@ -411,7 +425,8 @@ def main():
     parser.add_argument('--export-json', action='store_true', help='Export results to JSON')
     parser.add_argument('--export-csv', action='store_true', help='Export results to CSV')
     parser.add_argument('--show-patterns', type=int, default=0, metavar='N', help='Show top N patterns after training')
-    parser.add_argument('--opponent', choices=['random', 'stockfish'], default='random', help='Opponent (default: random)')
+    parser.add_argument('--opponent', choices=['random', 'stockfish', 'self'], default='random',
+                        help="Opponent: 'self' is the agent's own search (default: random)")
     parser.add_argument('--level', type=int, default=0, help='Stockfish skill level 0-20 (default: 0)')
     parser.add_argument('--stockfish-path', default='/usr/games/stockfish', help='Stockfish binary')
     parser.add_argument('--db', default='headless_training.db', help='Training database (default: headless_training.db)')

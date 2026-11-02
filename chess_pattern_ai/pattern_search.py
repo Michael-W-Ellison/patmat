@@ -27,6 +27,10 @@ rule limits the captures followed after the search depth. So the replies
 that punish a move (a capture, a fork, an attack on a queen) are always
 read, and quiet lines are read little.
 
+A position that already occurred in the game is valued as a draw (0): going
+back to it starts a repetition, and repeating ends the game drawn, so a side
+that is ahead avoids it and a side that is behind may seek it.
+
 Threat recognition (threats=True), what a person asks before moving: "what
 does my opponent threaten?" A side's piece is threatened when the other side
 attacks it and it is undefended (the whole piece is at stake) or attacked by
@@ -192,6 +196,7 @@ class PatternSearch:
         """The move for the side to move"""
         self.deadline = time.time() + self.seconds
         self.nodes = 0
+        self.history = self.game_positions(board)
         context = self.sequences.context(board) if self.use_patterns else []
         root = self.ordered(board, context)
         if not root:
@@ -225,6 +230,16 @@ class PatternSearch:
         return best_move
 
     @staticmethod
+    def game_positions(board: chess.Board) -> set:
+        """The positions (transposition keys) the game has been in, the current one included"""
+        keys, b = set(), board.copy()
+        keys.add(b._transposition_key())
+        while b.move_stack:
+            b.pop()
+            keys.add(b._transposition_key())
+        return keys
+
+    @staticmethod
     def next_context(context: List[str], tok: Optional[str]) -> List[str]:
         return (context + [tok])[-2:] if tok is not None else context
 
@@ -232,6 +247,8 @@ class PatternSearch:
         self.nodes += 1
         if time.time() > self.deadline:
             raise OutOfTime
+        if board._transposition_key() in self.history:
+            return 0.0                      # back to a position of the game: a repetition, valued as a draw
         if depth <= 0:
             return self.quiesce(board, alpha, beta, context, ply, QUIESCENCE_DEPTH)
         moves = self.candidates(board, context)

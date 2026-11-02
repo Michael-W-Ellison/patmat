@@ -226,6 +226,18 @@ class TestPatternSearch(unittest.TestCase):
         board = chess.Board('6k1/5ppp/8/8/8/8/8/R5K1 w - - 0 1')
         self.assertEqual(search.choose(board), chess.Move.from_uci('a1a8'))
 
+    def test_a_repeated_position_is_a_draw(self):
+        # White is a queen up, but the position after Qg1-h1 (with Black to move) occurred earlier in the game
+        board = chess.Board('7k/8/8/8/8/8/8/K6Q b - - 0 1')
+        for uci in ('h8h7', 'h1g1', 'h7h8', 'g1h1'):
+            board.push(chess.Move.from_uci(uci))
+        search = PatternSearch(self.learner, selective=True)
+        search.deadline = float('inf')
+        search.history = PatternSearch.game_positions(board)
+        self.assertEqual(search.negamax(board, 2, -float('inf'), float('inf'), [], 1), 0.0)
+        search.history = set()
+        self.assertLess(search.negamax(board, 2, -float('inf'), float('inf'), [], 1), -50.0)
+
     def test_threats(self):
         # the knight on e6 forks the queen and the rook, which defend each other
         board = chess.Board('3q1r2/7k/4N3/8/8/8/8/4K3 b - - 0 1')
