@@ -8,7 +8,10 @@ move played, both as the judge sees them (0 for a move the judge rates best,
 never negative). Learners use it with game results (see
 general_move_patterns.GeneralPatternLearner.note_move).
 
-Two judges share one interface, move_loss(state, color, move) -> float:
+Two judges share one interface, move_loss(state, color, move) -> float, or
+None where the judge sees the position as already lost whatever is played:
+there every move's loss would be 0, rating a move that loses at once as
+highly as any other.
 
 - SearchJudge works for every game with an adapter (see
   general_move_patterns): an alpha-beta search over the game's own
@@ -24,7 +27,7 @@ Two judges share one interface, move_loss(state, color, move) -> float:
 
 from typing import Dict, Optional
 
-from general_move_patterns import evaluate
+from general_move_patterns import WIN_VALUE, evaluate
 
 INF = float('inf')
 
@@ -96,7 +99,7 @@ class SearchJudge:
                 self._unplay(after)
         return out
 
-    def move_loss(self, state, color, move) -> float:
+    def move_loss(self, state, color, move) -> Optional[float]:
         self.nodes = 0
         values = self.move_values(state, color, 1, limited=False)
         completed = 1
@@ -107,6 +110,8 @@ class SearchJudge:
                 break
             completed = depth
         best = max(v for _, v in values)
+        if best <= -WIN_VALUE / 2:
+            return None
         # the move played, searched as deep as the others (searched again: games' move objects need not compare
         # equal to those legal_moves() makes)
         after = self._play(state, move)
@@ -155,8 +160,10 @@ class StockfishJudge:
         v = self.evaluate(board)
         return v if color == chess.WHITE else -v
 
-    def move_loss(self, board, color, move) -> float:
+    def move_loss(self, board, color, move) -> Optional[float]:
         before = self.value(board, color)
+        if before <= -MATE_CP:
+            return None
         board.push(move)
         try:
             after = self.value(board, color)

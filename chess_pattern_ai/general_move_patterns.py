@@ -409,14 +409,16 @@ class GeneralPatternLearner:
         """
         A trainer's move, before it is played, with its general pattern (returned unchanged). With a judge
         (self.judge, or a SearchJudge over adapter when JUDGE_DEPTH > 0) the move's judged loss is kept, and the
-        next record_game() learns from it.
+        next record_game() learns from it (except where the judge sees the position as lost whatever is
+        played: last_loss is then None).
         """
         if self.judge is None and self.JUDGE_DEPTH > 0:
             from move_judges import SearchJudge
             self.judge = SearchJudge(adapter, self.JUDGE_DEPTH)
         if self.judge is not None and features is not None:
             self.last_loss = self.judge.move_loss(state, color, move)
-            self.pending.append((features, self.last_loss))
+            if self.last_loss is not None:          # (None: the judge sees the position as lost already)
+                self.pending.append((features, self.last_loss))
         return features
 
     def record_judged(self, judged: List[tuple], game_name: str = None):

@@ -46,6 +46,11 @@ class TestSearchJudge(unittest.TestCase):
         self.assertEqual(judge.move_loss((3, 0), 0, 1), 0.0)
         self.assertGreater(judge.move_loss((3, 0), 0, 2), 0.0)
 
+    def test_no_rating_where_every_move_loses(self):
+        judge = SearchJudge(Race(), depth=4)
+        # at 4 every move leaves the opponent a win
+        self.assertIsNone(judge.move_loss((4, 0), 0, 1))
+
     def test_node_limit_falls_back_to_a_shallower_search(self):
         judge = SearchJudge(Race(), depth=6, max_nodes=1)
         # only the first ply completes; neither move ends the game there, so no loss is seen
