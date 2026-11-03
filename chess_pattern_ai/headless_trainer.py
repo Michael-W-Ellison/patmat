@@ -17,7 +17,7 @@ import random
 from datetime import datetime
 from game_scorer import GameScorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
-from general_move_patterns import GeneralPatternLearner, analyze_candidates, evaluate, universal_db_path
+from general_move_patterns import GeneralPatternLearner, evaluate, universal_db_path
 from chess_adapter import ChessAdapter
 from mate_patterns import MatePatternLearner
 from position_patterns import PositionPatternLearner
@@ -48,6 +48,8 @@ class HeadlessTrainer:
     use_general_values = False  # root moves get the learned value of their general pattern (general_move_patterns)
     GENERAL_WEIGHT = 0.2        # material units (a pawn is 10) per point of that value (scale -50..+50)
     use_refutations = False     # learn (with the judge) which replies refute blunders; the search reads them
+    use_tactics = False         # general patterns get tactical parts: threats left after the best reply
+                                # (tactical_patterns)
 
     def __init__(self, db_path='headless_training.db', opponent='random', stockfish_level=0,
                  stockfish_path='/usr/games/stockfish', stockfish_time=0.1):
@@ -88,6 +90,8 @@ class HeadlessTrainer:
             self.general.LEARN_REFUTATIONS = True
             self.search.refutations = self.general.refutations
             self.search.adapter = self.adapter
+        if self.use_tactics:
+            self.general.TACTICS = True
 
         self.games_played = 0
         self.wins = 0
@@ -116,8 +120,8 @@ class HeadlessTrainer:
             # alone, a move's gain and mobility classes would compare it with nothing)
             moves = list(board.legal_moves)
             features = {m: a['features'] for m, a in
-                        zip(moves, analyze_candidates(self.adapter, board, ai_color, moves,
-                                                      max_replies=float('inf')))}
+                        zip(moves, self.general.analyze(self.adapter, board, ai_color, moves,
+                                                        max_replies=float('inf')))}
             extra = {m: 0.0 for m in moves}
             if self.use_mobility_values:
                 # e.g. 'mob=restricts': whether the move leaves the opponent fewer replies than most moves
@@ -147,8 +151,8 @@ class HeadlessTrainer:
             candidates = candidates + extra
         # One-ply lookahead over every opponent reply: material, progress toward
         # checkmate, and finished games valued by their result (see ChessAdapter)
-        analysis = analyze_candidates(self.adapter, board, ai_color, candidates,
-                                      max_replies=float('inf'))
+        analysis = self.general.analyze(self.adapter, board, ai_color, candidates,
+                                        max_replies=float('inf'))
         value_now = evaluate(self.adapter, board, ai_color)
 
         for move, result in zip(candidates, analysis):

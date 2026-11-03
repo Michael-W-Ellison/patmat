@@ -98,7 +98,7 @@ def evaluate(adapter, state, color) -> float:
 
 def analyze_candidates(adapter, state, color, candidates: Sequence,
                        rng: random.Random = random,
-                       max_replies: int = MAX_REPLIES, refutations=None) -> List[Dict]:
+                       max_replies: int = MAX_REPLIES, refutations=None, tactics: bool = False) -> List[Dict]:
     """
     Evaluate each candidate move one ply deep and describe it with
     game-independent features.
@@ -107,6 +107,9 @@ def analyze_candidates(adapter, state, color, candidates: Sequence,
     candidate's REPLIES_EXTENDED replies whose patterns most often refuted
     blunders are searched EXTENSION_DEPTH plies further, and 'net' becomes
     the lower of the two values (the features are those of the one-ply look).
+
+    With tactics, each feature string gets the tactical parts of
+    tactical_patterns appended: 'gain|net|mob|threat|tac=<t>|top=<u>'.
 
     Returns:
         One dict per candidate, in the same order:
@@ -133,9 +136,21 @@ def analyze_candidates(adapter, state, color, candidates: Sequence,
         if in_place:
             adapter.pop(current)
 
+    if tactics:
+        import tactical_patterns
+        now_summary = tactical_patterns.summary(
+            tactical_patterns.gains(adapter, state, color, play, unplay, rng, max_replies)[0])
+
+    def follow_ups(current):
+        values, wins = tactical_patterns.gains(adapter, current, color, play, unplay, rng, max_replies, value_now)
+        if not values:
+            return None
+        share, best = tactical_patterns.summary(values)
+        return share, best, sum(v > EPSILON for v in values), wins
+
     for move in candidates:
         after = play(state, move)
-        entry = {'replies': None, 'threat': 'safe', 'mob': None}
+        entry = {'replies': None, 'threat': 'safe', 'mob': None, 'tactics': None}
 
         if adapter.is_over(after):
             winner = adapter.winner(after)
@@ -147,6 +162,8 @@ def analyze_candidates(adapter, state, color, candidates: Sequence,
             entry['gain'] = entry['net'] = adapter.advantage(after, color) - value_now
             if adapter.to_move(after) == color:
                 entry['mob'] = 'extra_turn'
+                if tactics:
+                    entry['tactics'] = follow_ups(after)
             else:
                 replies = adapter.legal_moves(after, opp)
                 entry['replies'] = len(replies)
@@ -154,6 +171,7 @@ def analyze_candidates(adapter, state, color, candidates: Sequence,
                     replies = rng.sample(list(replies), max_replies)
 
                 worst = None
+                answer = None       # the reply rated best for opp
                 for reply in list(replies):
                     after_reply = play(after, reply)
                     if adapter.is_over(after_reply):
@@ -169,11 +187,17 @@ def analyze_candidates(adapter, state, color, candidates: Sequence,
                             value = WIN_VALUE
                     else:
                         value = adapter.advantage(after_reply, color)
-                    worst = value if worst is None else min(worst, value)
+                    if worst is None or value < worst:
+                        worst, answer = value, reply
                     unplay(after_reply)
                 if worst is not None:
                     entry['net'] = worst - value_now
                 entry['net_plain'] = entry['net']
+                if tactics and answer is not None:
+                    after_answer = play(after, answer)
+                    if not adapter.is_over(after_answer) and adapter.to_move(after_answer) == color:
+                        entry['tactics'] = follow_ups(after_answer)
+                    unplay(after_answer)
                 if refutations is not None and replies:
                     extended = _extend_refutations(adapter, after, color, opp, list(replies), refutations)
                     if extended is not None:
@@ -202,6 +226,8 @@ def analyze_candidates(adapter, state, color, candidates: Sequence,
 
         e['features'] = (f"gain={gain_class}|net={_sign_class(e.get('net_plain', e['net']))}|mob={mob}"
                          f"|threat={e['threat']}")
+        if tactics:
+            e['features'] += '|' + tactical_patterns.classify(now_summary, e['tactics'])
     return [{'features': e['features'], 'gain': e['gain'], 'net': e['net']} for e in info]
 
 
@@ -224,6 +250,17 @@ def _extend_refutations(adapter, after, color, opp, replies, refutations):
             search._unplay(state)
         worst = v if worst is None else min(worst, v)
     return worst
+
+
+BASE_PARTS = 4      # gain, net, mob, threat; analyze_candidates(tactics=True) appends more
+
+
+def split_patterns(features: str) -> List[str]:
+    """The patterns a feature string is learned as: itself, or its four-part pattern and its tactical parts"""
+    parts = features.split('|')
+    if len(parts) <= BASE_PARTS:
+        return [features]
+    return ['|'.join(parts[:BASE_PARTS]), '|'.join(parts[BASE_PARTS:])]
 
 
 def decisive_value(net: float) -> float:
@@ -304,6 +341,8 @@ class GeneralPatternLearner:
     CROSS_GAME_GAMES = 10.0
     LEARN_REFUTATIONS = False   # with a judge: learn which replies refute the agent's blunders (refutation_patterns)
     USE_REFUTATIONS = False     # analyze(): search the replies likeliest to refute further
+    TACTICS = False             # analyze(): append the tactical parts (tactical_patterns), learned as a pattern
+                                # of their own whose value is added to the four-part pattern's
     JUDGED_TABLE = 'general_judged_evidence'
     JUDGE_SCALE_TABLE = 'general_judge_scale'
     JUDGE_DEPTH = 0             # > 0: note_move() judges moves by a SearchJudge this deep (unless judge is set)
@@ -438,9 +477,10 @@ class GeneralPatternLearner:
     def value(self, features: str) -> float:
         """
         Learned value of a general pattern for this game, on the game-specific
-        priority scale (50 * win lift, -50..+50, 0 = no evidence either way)
+        priority scale (50 * win lift, -50..+50, 0 = no evidence either way); a pattern with tactical parts is
+        worth the sum of its two halves' values (split_patterns)
         """
-        return self.values.get(features, 0.0)
+        return sum(self.values.get(p, 0.0) for p in split_patterns(features))
 
     def note_move(self, adapter, state, color, move, features: str) -> str:
         """
@@ -486,6 +526,8 @@ class GeneralPatternLearner:
         """analyze_candidates(), with this game's refutation patterns when USE_REFUTATIONS is set"""
         if self.USE_REFUTATIONS and self.refutations.has_evidence():
             kwargs['refutations'] = self.refutations
+        if self.TACTICS:
+            kwargs['tactics'] = True
         return analyze_candidates(adapter, state, color, candidates, **kwargs)
 
     def record_judged(self, judged: List[tuple], game_name: str = None):
@@ -496,7 +538,7 @@ class GeneralPatternLearner:
             (game,)).fetchone()
         median, moves, quality_sum = row if row else (None, 0.0, 0.0)
         totals: Dict[str, List[float]] = {}
-        for features, loss in judged:
+        for features, loss in [(p, loss) for f, loss in judged for p in split_patterns(f)]:
             if loss > EPSILON:
                 if median is None:
                     median = loss
@@ -529,7 +571,8 @@ class GeneralPatternLearner:
             self.pending = []
         counts: Dict[str, int] = {}
         for features in features_used:
-            counts[features] = counts.get(features, 0) + 1
+            for pattern in split_patterns(features):
+                counts[pattern] = counts.get(pattern, 0) + 1
 
         ids = []
         for features, count in counts.items():
