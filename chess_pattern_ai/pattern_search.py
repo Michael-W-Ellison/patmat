@@ -46,7 +46,7 @@ movement shows it (threatened()). Then
 """
 
 import time
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import chess
 
@@ -192,8 +192,8 @@ class PatternSearch:
 
     # --------------------------------------------------------------- search
 
-    def choose(self, board: chess.Board) -> Optional[chess.Move]:
-        """The move for the side to move"""
+    def choose(self, board: chess.Board, extra: Optional[Dict[chess.Move, float]] = None) -> Optional[chess.Move]:
+        """The move for the side to move (extra: a further bonus for root moves, in material units)"""
         self.deadline = time.time() + self.seconds
         self.nodes = 0
         self.history = self.game_positions(board)
@@ -207,7 +207,7 @@ class PatternSearch:
                 scored = []
                 best_total = -float('inf')
                 for move, pattern, tok in root:
-                    bonus = self.bonus(pattern)
+                    bonus = self.bonus(pattern) + (extra.get(move, 0.0) if extra else 0.0)
                     # only whether the move's value beats this matters: the search below cuts off at it, and
                     # a move cut off returns it exactly, so the comparison is on the value, not on
                     # value + bonus (whose rounding could make a cut-off move look better than the best)

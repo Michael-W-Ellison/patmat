@@ -39,6 +39,8 @@ class HeadlessTrainer:
     SEARCH_BONUS_CAP = 3.0      # limit on the pattern bonus added to the look-ahead's value of a move
     SEARCH_THREATS = False      # look-ahead recognises threats: considers escapes, a second threat costs (pattern_search)
     use_mate_values = False     # the look-ahead values kings' surroundings by how often they preceded mate
+    use_mobility_values = False # root moves get the learned value of their mobility class (general patterns)
+    MOBILITY_WEIGHT = 1.0       # material units (a pawn is 10) per point of that value (scale -50..+50)
     SELF_PLAY_RANDOM_PLIES = 4  # self-play: plies played at random from the start, so that games differ
 
     def __init__(self, db_path='headless_training.db', opponent='random', stockfish_level=0,
@@ -95,10 +97,20 @@ class HeadlessTrainer:
             return None
 
         if self.use_search:
-            move = self.search.choose(board)
-            # (the game-independent patterns still learn from the move chosen)
-            self.last_general_features = analyze_candidates(self.adapter, board, ai_color, [move],
-                                                            max_replies=float('inf'))[0]['features']
+            # the game-independent patterns of every legal move, each compared with the others (described
+            # alone, a move's gain and mobility classes would compare it with nothing)
+            moves = list(board.legal_moves)
+            features = {m: a['features'] for m, a in
+                        zip(moves, analyze_candidates(self.adapter, board, ai_color, moves,
+                                                      max_replies=float('inf')))}
+            extra = None
+            if self.use_mobility_values:
+                # e.g. 'mob=restricts': whether the move leaves the opponent fewer replies than most moves
+                extra = {m: self.MOBILITY_WEIGHT * self.general.part_value(f.split('|')[2])
+                         for m, f in features.items()}
+            move = self.search.choose(board, extra)
+            # (the game-independent patterns learn from the move chosen)
+            self.last_general_features = features[move]
             return move
 
         legal_moves = list(board.legal_moves)

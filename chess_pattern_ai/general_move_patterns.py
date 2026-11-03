@@ -312,18 +312,28 @@ class GeneralPatternLearner:
                 target = imported
             else:
                 continue
-            totals = target.setdefault(features, [0.0, 0.0])
-            totals[0] += games
-            totals[1] += lift_sum
+            # the whole pattern, and each of its parts ('mob=restricts', ...) over all patterns that have it
+            for key in [features] + features.split('|'):
+                totals = target.setdefault(key, [0.0, 0.0])
+                totals[0] += games
+                totals[1] += lift_sum
 
         self.values = {}
-        for features in own.keys() | imported.keys():
-            own_games, own_sum = own.get(features, (0.0, 0.0))
-            imp_games, imp_sum = imported.get(features, (0.0, 0.0))
+        self.part_values = {}
+        for key in own.keys() | imported.keys():
+            own_games, own_sum = own.get(key, (0.0, 0.0))
+            imp_games, imp_sum = imported.get(key, (0.0, 0.0))
             k = min(imp_games, self.CROSS_GAME_GAMES)
             prior = (imp_sum / imp_games) * k if imp_games > 0 else 0.0
             lift = (own_sum + prior) / (own_games + k + win_lift.PRIOR_GAMES)
-            self.values[features] = 50.0 * lift
+            (self.values if '|' in key else self.part_values)[key] = 50.0 * lift
+
+    def part_value(self, part: str) -> float:
+        """
+        Learned value of one part of the general patterns (e.g. 'mob=restricts'), from the evidence of every
+        pattern that has it, weighted between games as for whole patterns; same scale as value()
+        """
+        return self.part_values.get(part, 0.0)
 
     def value(self, features: str) -> float:
         """
