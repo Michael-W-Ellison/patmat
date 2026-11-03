@@ -249,11 +249,32 @@ class GeneralPatternLearner:
     With no imported evidence this is the plain win lift (see win_lift.py).
     A game created with import_cross_game=False uses only its own evidence
     (its evidence is still recorded and available to the other games).
+
+    Judged evidence: with a judge (move_judges; self.judge, or JUDGE_DEPTH > 0
+    for a SearchJudge over the trainer's adapter), every move passed to
+    note_move() is also rated by the judge's loss for it: quality
+    q = 1 - min(2, loss / m), where m is a running median of the game's
+    nonzero losses, so the judge's best move is +1, a median loss 0 and twice
+    the median or more -1 (a scale-free rating, comparable between games).
+    A pattern's judged lift is its moves' mean quality minus the game's,
+    shrunk toward 0 by JUDGED_PRIOR moves, with other games' evidence as a
+    prior worth at most CROSS_GAME_MOVES moves (as for the win lift). Where
+    any judged evidence is loaded, a pattern's value is the weighted mean
+    of its win lift and judged lift (JUDGED_WEIGHT), each a dense signal for
+    the other's sparse one: a game result rates all of a game's moves at once,
+    the judge rates each move.
     """
 
     TABLE = 'general_pattern_evidence'
     LEGACY_TABLE = 'general_move_patterns'   # summed over games; imported as game ''
     CROSS_GAME_GAMES = 10.0
+    JUDGED_TABLE = 'general_judged_evidence'
+    JUDGE_SCALE_TABLE = 'general_judge_scale'
+    JUDGE_DEPTH = 0             # > 0: note_move() judges moves by a SearchJudge this deep (unless judge is set)
+    JUDGED_PRIOR = 30.0         # moves at quality lift 0 that a pattern's judged lift is shrunk toward
+    CROSS_GAME_MOVES = 300.0    # most moves other games' judged evidence counts as
+    JUDGED_WEIGHT = 1.0         # weight of the judged lift against the win lift in value()
+    SCALE_STEP = 1.05           # running median of nonzero losses: factor per move
 
     def __init__(self, db_path: str = DB_NAME, game_name: str = '',
                  import_cross_game: bool = True):
@@ -264,6 +285,9 @@ class GeneralPatternLearner:
         self.conn = sqlite3.connect(db_path, timeout=60)
         self.cursor = self.conn.cursor()
         self.values: Dict[str, float] = {}
+        self.judge = None                   # a move judge (move_judges); see note_move
+        self.pending: List[tuple] = []      # (features, judged loss) of moves noted since the last record_game
+        self.last_loss = None               # the judged loss of the last move noted
 
         self.cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS {self.TABLE} (
@@ -278,6 +302,23 @@ class GeneralPatternLearner:
             )
         ''')
         win_lift.ensure_columns(self.cursor, self.TABLE)
+        self.cursor.execute(f'''
+            CREATE TABLE IF NOT EXISTS {self.JUDGED_TABLE} (
+                features TEXT NOT NULL,
+                game TEXT NOT NULL,
+                moves REAL DEFAULT 0.0,         -- moves judged
+                lift_sum REAL DEFAULT 0.0,      -- sum over them of (quality - the game's mean quality then)
+                PRIMARY KEY (features, game)
+            )
+        ''')
+        self.cursor.execute(f'''
+            CREATE TABLE IF NOT EXISTS {self.JUDGE_SCALE_TABLE} (
+                game TEXT PRIMARY KEY,
+                median_loss REAL,               -- running median of the game's nonzero judged losses
+                moves REAL DEFAULT 0.0,         -- moves judged
+                quality_sum REAL DEFAULT 0.0
+            )
+        ''')
         self._import_legacy()
         self.conn.commit()
         self._load_values()
@@ -318,14 +359,36 @@ class GeneralPatternLearner:
                 totals[0] += games
                 totals[1] += lift_sum
 
+        judged_own: Dict[str, List[float]] = {}
+        judged_imported: Dict[str, List[float]] = {}
+        for features, game, moves, lift_sum in self.cursor.execute(
+                f"SELECT features, game, moves, lift_sum FROM {self.JUDGED_TABLE}"):
+            if game == self.game_name:
+                target = judged_own
+            elif self.import_cross_game:
+                target = judged_imported
+            else:
+                continue
+            for key in [features] + features.split('|'):
+                totals = target.setdefault(key, [0.0, 0.0])
+                totals[0] += moves
+                totals[1] += lift_sum
+
+        def combined(own_totals, imported_totals, key, cap, prior_n):
+            own_n, own_sum = own_totals.get(key, (0.0, 0.0))
+            imp_n, imp_sum = imported_totals.get(key, (0.0, 0.0))
+            k = min(imp_n, cap)
+            prior = (imp_sum / imp_n) * k if imp_n > 0 else 0.0
+            return (own_sum + prior) / (own_n + k + prior_n)
+
+        judged = bool(judged_own or judged_imported)
         self.values = {}
         self.part_values = {}
-        for key in own.keys() | imported.keys():
-            own_games, own_sum = own.get(key, (0.0, 0.0))
-            imp_games, imp_sum = imported.get(key, (0.0, 0.0))
-            k = min(imp_games, self.CROSS_GAME_GAMES)
-            prior = (imp_sum / imp_games) * k if imp_games > 0 else 0.0
-            lift = (own_sum + prior) / (own_games + k + win_lift.PRIOR_GAMES)
+        for key in own.keys() | imported.keys() | judged_own.keys() | judged_imported.keys():
+            lift = combined(own, imported, key, self.CROSS_GAME_GAMES, win_lift.PRIOR_GAMES)
+            if judged:
+                judged_lift = combined(judged_own, judged_imported, key, self.CROSS_GAME_MOVES, self.JUDGED_PRIOR)
+                lift = (lift + self.JUDGED_WEIGHT * judged_lift) / (1.0 + self.JUDGED_WEIGHT)
             (self.values if '|' in key else self.part_values)[key] = 50.0 * lift
 
     def part_value(self, part: str) -> float:
@@ -342,9 +405,59 @@ class GeneralPatternLearner:
         """
         return self.values.get(features, 0.0)
 
-    def record_game(self, features_used: List[str], result: str, game_name: str = None):
-        """Credit the general patterns used in one game of game_name (default: this learner's game)"""
+    def note_move(self, adapter, state, color, move, features: str) -> str:
+        """
+        A trainer's move, before it is played, with its general pattern (returned unchanged). With a judge
+        (self.judge, or a SearchJudge over adapter when JUDGE_DEPTH > 0) the move's judged loss is kept, and the
+        next record_game() learns from it.
+        """
+        if self.judge is None and self.JUDGE_DEPTH > 0:
+            from move_judges import SearchJudge
+            self.judge = SearchJudge(adapter, self.JUDGE_DEPTH)
+        if self.judge is not None and features is not None:
+            self.last_loss = self.judge.move_loss(state, color, move)
+            self.pending.append((features, self.last_loss))
+        return features
+
+    def record_judged(self, judged: List[tuple], game_name: str = None):
+        """Learn from judged moves of one game: [(features, judged loss)] (see the class docstring)"""
         game = self.game_name if game_name is None else game_name
+        row = self.cursor.execute(
+            f"SELECT median_loss, moves, quality_sum FROM {self.JUDGE_SCALE_TABLE} WHERE game = ?",
+            (game,)).fetchone()
+        median, moves, quality_sum = row if row else (None, 0.0, 0.0)
+        totals: Dict[str, List[float]] = {}
+        for features, loss in judged:
+            if loss > EPSILON:
+                if median is None:
+                    median = loss
+                else:
+                    median = median * self.SCALE_STEP if loss > median else median / self.SCALE_STEP
+            quality = 1.0 - min(2.0, loss / median) if median else 1.0
+            mean = quality_sum / moves if moves else 0.0
+            entry = totals.setdefault(features, [0.0, 0.0])
+            entry[0] += 1.0
+            entry[1] += quality - mean
+            moves += 1.0
+            quality_sum += quality
+        self.cursor.executemany(f'''
+            INSERT INTO {self.JUDGED_TABLE} (features, game, moves, lift_sum) VALUES (?, ?, ?, ?)
+            ON CONFLICT(features, game) DO UPDATE SET
+                moves = moves + excluded.moves, lift_sum = lift_sum + excluded.lift_sum
+        ''', [(f, game, n, l) for f, (n, l) in totals.items()])
+        self.cursor.execute(f"INSERT OR REPLACE INTO {self.JUDGE_SCALE_TABLE} VALUES (?, ?, ?, ?)",
+                            (game, median, moves, quality_sum))
+        self.conn.commit()
+
+    def record_game(self, features_used: List[str], result: str, game_name: str = None):
+        """
+        Credit the general patterns used in one game of game_name (default: this learner's game), and learn
+        from the moves judged since the last call (note_move)
+        """
+        game = self.game_name if game_name is None else game_name
+        if self.pending:
+            self.record_judged(self.pending, game)
+            self.pending = []
         counts: Dict[str, int] = {}
         for features in features_used:
             counts[features] = counts.get(features, 0) + 1

@@ -155,19 +155,25 @@ class PositionPatternLearner:
 
     # -------------------------------------------------------------- learning
 
-    def record_game(self, moves: List['chess.Move'], ai_color: 'chess.Color', result: str):
+    def record_game(self, moves: List['chess.Move'], ai_color: 'chess.Color', result: str, judge=None):
         """
         Learn from one finished game: every position, with either player to move
         Args:
             moves: the game's moves from the starting position (board.move_stack)
             ai_color: the agent's colour
             result: 'win', 'loss' or 'draw' for the agent
+            judge: a chess judge (move_judges.StockfishJudge): if given, a position's target is instead the
+                judge's evaluation of it for the side to move, in material units (a pawn is 10, at most
+                +-MATE_VALUE), minus that side's material balance: what the judge sees beyond material
         """
         board = chess.Board()
         positions, balance = [], []                 # per ply: features before it, White's material before it
+        judged = []                                 # per ply, with a judge: its evaluation for White
         for move in moves:
             positions.append(self.features(board))
             balance.append(material(board, chess.WHITE))
+            if judge is not None:
+                judged.append(max(-MATE_VALUE, min(MATE_VALUE, judge.evaluate(board) / 10.0)))
             board.push(move)
         balance.append(material(board, chess.WHITE))
         n = len(moves)
@@ -186,9 +192,12 @@ class PositionPatternLearner:
             color = chess.WHITE if i % 2 == 0 else chess.BLACK
             end = min(i + HORIZON, n)
             sign = 1.0 if color == chess.WHITE else -1.0
-            target = sign * (balance[end] - balance[i]) + LIFT_WEIGHT * lifts[color]
-            if mated and n - i <= HORIZON:
-                target += MATE_VALUE if (n - 1 - i) % 2 == 0 else -MATE_VALUE
+            if judge is not None:
+                target = sign * (judged[i] - balance[i])
+            else:
+                target = sign * (balance[end] - balance[i]) + LIFT_WEIGHT * lifts[color]
+                if mated and n - i <= HORIZON:
+                    target += MATE_VALUE if (n - 1 - i) % 2 == 0 else -MATE_VALUE
             entries = [(self.weights.setdefault(f, [0.0, 0.0]), c) for f, c in feats.items()]
             error = target - sum(e[0] * c for e, c in entries)
             step = LEARNING_RATE * error / sum(c * c for _, c in entries)

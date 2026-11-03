@@ -141,7 +141,7 @@ class ArimaaHeadlessTrainer:
         else:
             # Highest priority plus general-pattern value
             chosen = max(scored, key=lambda x: x[1])
-        self.last_general_features = chosen[2]
+        self.last_general_features = self.general.note_move(self.adapter, game, game.current_player, chosen[0], chosen[2])
         return chosen[0]
 
     def execute_turn(self, game: ArimaaGame, max_steps: int = 4, verbose: bool = False) -> Tuple[ArimaaGame, List[dict], List[str]]:

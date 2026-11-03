@@ -42,6 +42,11 @@ class HeadlessTrainer:
     use_mobility_values = False # root moves get the learned value of their mobility class (general patterns)
     MOBILITY_WEIGHT = 1.0       # material units (a pawn is 10) per point of that value (scale -50..+50)
     SELF_PLAY_RANDOM_PLIES = 4  # self-play: plies played at random from the start, so that games differ
+    use_judge = False           # Stockfish judges every agent move; the general patterns learn from it (move_judges)
+    JUDGE_DEPTH = 12            # the judge's search depth
+    judge_positions = False     # with the judge: position patterns learn the judge's evaluations (position_patterns)
+    use_general_values = False  # root moves get the learned value of their general pattern (general_move_patterns)
+    GENERAL_WEIGHT = 0.2        # material units (a pawn is 10) per point of that value (scale -50..+50)
 
     def __init__(self, db_path='headless_training.db', opponent='random', stockfish_level=0,
                  stockfish_path='/usr/games/stockfish', stockfish_time=0.1):
@@ -73,6 +78,11 @@ class HeadlessTrainer:
         self.general = GeneralPatternLearner(universal_db_path(db_path), 'chess')
         self.adapter = ChessAdapter()
         self.last_general_features = None
+        self.judge = None
+        if self.use_judge:
+            from move_judges import StockfishJudge
+            self.judge = StockfishJudge(stockfish_path, self.JUDGE_DEPTH)
+            self.general.judge = self.judge
 
         self.games_played = 0
         self.wins = 0
@@ -103,14 +113,17 @@ class HeadlessTrainer:
             features = {m: a['features'] for m, a in
                         zip(moves, analyze_candidates(self.adapter, board, ai_color, moves,
                                                       max_replies=float('inf')))}
-            extra = None
+            extra = {m: 0.0 for m in moves}
             if self.use_mobility_values:
                 # e.g. 'mob=restricts': whether the move leaves the opponent fewer replies than most moves
-                extra = {m: self.MOBILITY_WEIGHT * self.general.part_value(f.split('|')[2])
-                         for m, f in features.items()}
+                for m, f in features.items():
+                    extra[m] += self.MOBILITY_WEIGHT * self.general.part_value(f.split('|')[2])
+            if self.use_general_values:
+                for m, f in features.items():
+                    extra[m] += self.GENERAL_WEIGHT * self.general.value(f)
             move = self.search.choose(board, extra)
             # (the game-independent patterns learn from the move chosen)
-            self.last_general_features = features[move]
+            self.last_general_features = self.general.note_move(self.adapter, board, ai_color, move, features[move])
             return move
 
         legal_moves = list(board.legal_moves)
@@ -161,6 +174,7 @@ class HeadlessTrainer:
                 best_move = move
                 self.last_general_features = features
 
+        self.general.note_move(self.adapter, board, ai_color, best_move, self.last_general_features)
         return best_move
 
     def play_opponent_move(self, board):
@@ -276,7 +290,8 @@ class HeadlessTrainer:
             self.prioritizer.record_game_moves(game_moves, ai_color, result, final_score)
             self.general.record_game(general_features, result, 'chess')
             self.sequences.record_game(board.move_stack, ai_color, result)
-            self.positions.record_game(board.move_stack, ai_color, result)
+            self.positions.record_game(board.move_stack, ai_color, result,
+                                       judge=self.judge if self.judge_positions else None)
             self.mates.record_game(board.move_stack)
 
         # Store result details
@@ -424,6 +439,8 @@ class HeadlessTrainer:
         self.sequences.close()
         if self.engine is not None:
             self.engine.quit()
+        if self.judge is not None:
+            self.judge.close()
 
 
 def main():

@@ -162,7 +162,7 @@ class GoHeadlessTrainer:
         else:
             # Choose move with highest priority plus general patterns
             chosen = max(scored, key=lambda x: x[1])
-        self.last_general_features = chosen[2]
+        self.last_general_features = self.general.note_move(self.adapter, game, ai_color, chosen[0], chosen[2])
         return chosen[0]
 
     def play_game(self, ai_color: Color, verbose: bool = False) -> Tuple[str, float, int]:
