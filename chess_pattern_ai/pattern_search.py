@@ -43,6 +43,13 @@ movement shows it (threatened()). Then
 - where the search stops (the stand-pat value of the capture search), a side
   can answer only one threat with its move, so the value of a position
   subtracts what is at stake in its second-largest threat (e.g. a fork).
+
+Refutation patterns (refutations set to a refutation_patterns.RefutationLearner,
+with adapter set to the game's adapter): in the selective search, the replies
+to each root move also include the REPLIES_EXTENDED replies whose
+game-independent reply patterns most often refuted the agent's blunders
+(learned from a judge), so a quiet reply that punishes a move is read even
+when it is not among the QUIET_MOVES best quiet moves.
 """
 
 import time
@@ -53,6 +60,7 @@ import chess
 from mate_patterns import MatePatternLearner
 from position_patterns import PositionPatternLearner
 from sequence_patterns import SequencePatternLearner, material, worth
+from refutation_patterns import REPLIES_EXTENDED, reply_features
 
 MATE = 100_000.0
 BREADTH = 8             # moves searched at each position below the root (best pattern value first)
@@ -134,6 +142,9 @@ class PatternSearch:
         self.use_patterns = use_patterns    # False: order by capture value only (for comparison)
         self.nodes = 0
         self.depth_reached = 0
+        self.refutations = None             # a RefutationLearner: replies to root moves likeliest to refute them
+        self.adapter = None                 # (the game's adapter, for the reply patterns)
+        self.refutation_cache: Dict = {}
 
     # ------------------------------------------------------------- ordering
 
@@ -151,8 +162,8 @@ class PatternSearch:
         out.sort(key=lambda e: -e[1])
         return out
 
-    def candidates(self, board: chess.Board, context: List[str]) -> List[Tuple]:
-        """The moves searched at a position below the root, best pattern value first"""
+    def candidates(self, board: chess.Board, context: List[str], ply: int = 0) -> List[Tuple]:
+        """The moves searched at a position below the root (ply: its distance from the root)"""
         moves = self.ordered(board, context)
         if not self.selective:
             return moves[:BREADTH]
@@ -173,6 +184,16 @@ class PatternSearch:
                             out.append(entry)
                             chosen.add(move)
                         break
+        if self.refutations is not None and ply == 1 and self.refutations.has_evidence():
+            key = board._transposition_key()
+            extra = self.refutation_cache.get(key)
+            if extra is None:
+                features = reply_features(self.adapter, board, board.turn, [e[0] for e in moves])
+                chosen = {e[0] for e in out}
+                extra = [moves[i] for i in self.refutations.ranked(
+                    features, REPLIES_EXTENDED, exclude={i for i, e in enumerate(moves) if e[0] in chosen})]
+                self.refutation_cache[key] = extra
+            out = out + extra
         return out
 
     def bonus(self, pattern: float) -> float:
@@ -197,6 +218,7 @@ class PatternSearch:
         self.deadline = time.time() + self.seconds
         self.nodes = 0
         self.history = self.game_positions(board)
+        self.refutation_cache = {}
         context = self.sequences.context(board) if self.use_patterns else []
         root = self.ordered(board, context)
         if not root:
@@ -251,7 +273,7 @@ class PatternSearch:
             return 0.0                      # back to a position of the game: a repetition, valued as a draw
         if depth <= 0:
             return self.quiesce(board, alpha, beta, context, ply, QUIESCENCE_DEPTH)
-        moves = self.candidates(board, context)
+        moves = self.candidates(board, context, ply)
         if not moves:
             return -(MATE - ply) if board.is_check() else 0.0
         best = -float('inf')

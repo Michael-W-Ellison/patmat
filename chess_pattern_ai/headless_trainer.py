@@ -47,6 +47,7 @@ class HeadlessTrainer:
     judge_positions = False     # with the judge: position patterns learn the judge's evaluations (position_patterns)
     use_general_values = False  # root moves get the learned value of their general pattern (general_move_patterns)
     GENERAL_WEIGHT = 0.2        # material units (a pawn is 10) per point of that value (scale -50..+50)
+    use_refutations = False     # learn (with the judge) which replies refute blunders; the search reads them
 
     def __init__(self, db_path='headless_training.db', opponent='random', stockfish_level=0,
                  stockfish_path='/usr/games/stockfish', stockfish_time=0.1):
@@ -83,6 +84,10 @@ class HeadlessTrainer:
             from move_judges import StockfishJudge
             self.judge = StockfishJudge(stockfish_path, self.JUDGE_DEPTH)
             self.general.judge = self.judge
+        if self.use_refutations:
+            self.general.LEARN_REFUTATIONS = True
+            self.search.refutations = self.general.refutations
+            self.search.adapter = self.adapter
 
         self.games_played = 0
         self.wins = 0

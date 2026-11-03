@@ -128,7 +128,7 @@ class ArimaaHeadlessTrainer:
             explore_step = random.choice(legal_steps)
             if all(step is not explore_step for step, _ in candidates):
                 candidates.append((explore_step, 0.0))
-        analysis = analyze_candidates(self.adapter, game, game.current_player,
+        analysis = self.general.analyze(self.adapter, game, game.current_player,
                                       [step for step, _ in candidates])
         # A win now, or a loss the opponent can force at once, decides first;
         # otherwise the existing score plus the general-pattern value

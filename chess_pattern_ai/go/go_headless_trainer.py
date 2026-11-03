@@ -148,7 +148,7 @@ class GoHeadlessTrainer:
             explore_move = random.choice(legal_moves)
             if all(move is not explore_move for move, _ in candidates):
                 candidates.append((explore_move, 0.0))
-        analysis = analyze_candidates(self.adapter, game, ai_color,
+        analysis = self.general.analyze(self.adapter, game, ai_color,
                                       [move for move, _ in candidates])
         # A win now, or a loss the opponent can force at once, decides first;
         # otherwise the existing score plus the general-pattern value

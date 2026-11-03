@@ -8,7 +8,10 @@ move played, both as the judge sees them (0 for a move the judge rates best,
 never negative). Learners use it with game results (see
 general_move_patterns.GeneralPatternLearner.note_move).
 
-Two judges share one interface, move_loss(state, color, move) -> float, or
+Both judges also give best_reply(state, color, replies): the index of the
+reply, among the other side's moves after a move of color, that is worst for
+color (refutation_patterns learns from it). Two judges share one interface,
+move_loss(state, color, move) -> float, or
 None where the judge sees the position as already lost whatever is played:
 there every move's loss would be 0, rating a move that loses at once as
 highly as any other.
@@ -121,6 +124,27 @@ class SearchJudge:
             self._unplay(after)
         return max(0.0, best - chosen)
 
+    def best_reply(self, state, color, replies: list) -> int:
+        """
+        Index, in replies (the other side's legal moves in state, after a move of color), of the reply worst for
+        color, searched depth - 1 plies (less if the node limit stops it)
+        """
+        self.nodes = 0
+        best = None
+        for depth in range(1, self.depth):
+            values = []
+            try:
+                for reply in replies:
+                    after = self._play(state, reply)
+                    try:
+                        values.append(self._search(after, color, depth - 1, -INF, INF, depth > 1))
+                    finally:
+                        self._unplay(after)
+            except _OutOfNodes:
+                break
+            best = min(range(len(replies)), key=lambda i: values[i])
+        return 0 if best is None else best
+
 
 class _OutOfNodes(Exception):
     pass
@@ -172,6 +196,14 @@ class StockfishJudge:
         finally:
             board.pop()
         return float(max(0, before - after))
+
+    def best_reply(self, board, color, replies: list) -> int:
+        """Index, in replies (the other side's legal moves after a move of color), of Stockfish's best reply"""
+        pv = self.engine.analyse(board, self.limit).get('pv') or [replies[0]]
+        try:
+            return replies.index(pv[0])
+        except ValueError:
+            return 0
 
     def close(self):
         self.engine.quit()

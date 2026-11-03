@@ -59,6 +59,8 @@ import statistics
 from typing import Dict, List, Sequence
 
 import win_lift
+from refutation_patterns import (BLUNDER_MEDIANS, EXTENSION_DEPTH, REPLIES_EXTENDED, RefutationLearner,
+                                 reply_features)
 
 DB_NAME = 'universal_move_patterns.db'
 MAX_REPLIES = 30       # opponent replies examined per candidate (sampled above this)
@@ -96,10 +98,15 @@ def evaluate(adapter, state, color) -> float:
 
 def analyze_candidates(adapter, state, color, candidates: Sequence,
                        rng: random.Random = random,
-                       max_replies: int = MAX_REPLIES) -> List[Dict]:
+                       max_replies: int = MAX_REPLIES, refutations=None) -> List[Dict]:
     """
     Evaluate each candidate move one ply deep and describe it with
     game-independent features.
+
+    With refutations (a refutation_patterns.RefutationLearner), each
+    candidate's REPLIES_EXTENDED replies whose patterns most often refuted
+    blunders are searched EXTENSION_DEPTH plies further, and 'net' becomes
+    the lower of the two values (the features are those of the one-ply look).
 
     Returns:
         One dict per candidate, in the same order:
@@ -166,6 +173,11 @@ def analyze_candidates(adapter, state, color, candidates: Sequence,
                     unplay(after_reply)
                 if worst is not None:
                     entry['net'] = worst - value_now
+                entry['net_plain'] = entry['net']
+                if refutations is not None and replies:
+                    extended = _extend_refutations(adapter, after, color, opp, list(replies), refutations)
+                    if extended is not None:
+                        entry['net'] = min(entry['net'], extended - value_now)
         unplay(after)
         info.append(entry)
 
@@ -188,8 +200,30 @@ def analyze_candidates(adapter, state, color, candidates: Sequence,
             else:
                 mob = 'neutral'
 
-        e['features'] = f"gain={gain_class}|net={_sign_class(e['net'])}|mob={mob}|threat={e['threat']}"
+        e['features'] = (f"gain={gain_class}|net={_sign_class(e.get('net_plain', e['net']))}|mob={mob}"
+                         f"|threat={e['threat']}")
     return [{'features': e['features'], 'gain': e['gain'], 'net': e['net']} for e in info]
+
+
+def _extend_refutations(adapter, after, color, opp, replies, refutations):
+    """
+    color's lowest value after the replies (opp's, in after) rated likeliest to refute, each searched
+    EXTENSION_DEPTH plies further; None if none is rated above average
+    """
+    from move_judges import SearchJudge
+    chosen = refutations.ranked(reply_features(adapter, after, opp, replies), REPLIES_EXTENDED)
+    if not chosen:
+        return None
+    search = SearchJudge(adapter, EXTENSION_DEPTH)
+    worst = None
+    for i in chosen:
+        state = search._play(after, replies[i])
+        try:
+            v = search._search(state, color, EXTENSION_DEPTH, -float('inf'), float('inf'), False)
+        finally:
+            search._unplay(state)
+        worst = v if worst is None else min(worst, v)
+    return worst
 
 
 def decisive_value(net: float) -> float:
@@ -268,6 +302,8 @@ class GeneralPatternLearner:
     TABLE = 'general_pattern_evidence'
     LEGACY_TABLE = 'general_move_patterns'   # summed over games; imported as game ''
     CROSS_GAME_GAMES = 10.0
+    LEARN_REFUTATIONS = False   # with a judge: learn which replies refute the agent's blunders (refutation_patterns)
+    USE_REFUTATIONS = False     # analyze(): search the replies likeliest to refute further
     JUDGED_TABLE = 'general_judged_evidence'
     JUDGE_SCALE_TABLE = 'general_judge_scale'
     JUDGE_DEPTH = 0             # > 0: note_move() judges moves by a SearchJudge this deep (unless judge is set)
@@ -322,6 +358,7 @@ class GeneralPatternLearner:
         self._import_legacy()
         self.conn.commit()
         self._load_values()
+        self.refutations = RefutationLearner(self.conn, game_name, import_cross_game)
 
     def _import_legacy(self):
         """
@@ -419,7 +456,37 @@ class GeneralPatternLearner:
             self.last_loss = self.judge.move_loss(state, color, move)
             if self.last_loss is not None:          # (None: the judge sees the position as lost already)
                 self.pending.append((features, self.last_loss))
+                if self.LEARN_REFUTATIONS:
+                    row = self.cursor.execute(f"SELECT median_loss FROM {self.JUDGE_SCALE_TABLE} WHERE game = ?",
+                                              (self.game_name,)).fetchone()
+                    if row and row[0] and self.last_loss >= BLUNDER_MEDIANS * row[0]:
+                        self.learn_refutation(adapter, state, color, move)
         return features
+
+    def learn_refutation(self, adapter, state, color, move):
+        """The judge rated color's move a blunder: learn the patterns of the replies and of its best reply"""
+        in_place = hasattr(adapter, 'push') and hasattr(adapter, 'pop')
+        if in_place:
+            adapter.push(state, move)
+            after = state
+        else:
+            after = adapter.apply(state, move)
+        try:
+            opp = adapter.opponent(color)
+            if not adapter.is_over(after) and adapter.to_move(after) == opp:
+                replies = list(adapter.legal_moves(after, opp))
+                if len(replies) > 1:
+                    features = reply_features(adapter, after, opp, replies)
+                    self.refutations.record(features, self.judge.best_reply(after, color, replies))
+        finally:
+            if in_place:
+                adapter.pop(state)
+
+    def analyze(self, adapter, state, color, candidates: Sequence, **kwargs) -> List[Dict]:
+        """analyze_candidates(), with this game's refutation patterns when USE_REFUTATIONS is set"""
+        if self.USE_REFUTATIONS and self.refutations.has_evidence():
+            kwargs['refutations'] = self.refutations
+        return analyze_candidates(adapter, state, color, candidates, **kwargs)
 
     def record_judged(self, judged: List[tuple], game_name: str = None):
         """Learn from judged moves of one game: [(features, judged loss)] (see the class docstring)"""

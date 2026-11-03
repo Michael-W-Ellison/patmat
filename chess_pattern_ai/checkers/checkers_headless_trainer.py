@@ -74,7 +74,7 @@ class CheckersHeadlessTrainer:
 
         # One-ply lookahead over every opponent reply: material, progress toward
         # the winning condition, and finished games valued by their result
-        analysis = analyze_candidates(self.adapter, game, ai_color, legal_moves,
+        analysis = self.general.analyze(self.adapter, game, ai_color, legal_moves,
                                       max_replies=float('inf'))
 
         # Score each move using learned patterns
