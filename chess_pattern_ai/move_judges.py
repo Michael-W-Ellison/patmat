@@ -148,7 +148,9 @@ class StockfishJudge:
             if outcome is not None:
                 v = 0 if outcome.winner is None else (MATE_CP if outcome.winner == chess.WHITE else -MATE_CP)
             else:
-                score = self.engine.analyse(board, self.limit)['score'].white().score(mate_score=MATE_CP)
+                # a forced mate scores beyond the limit, so every forced mate is exactly +-MATE_CP (with
+                # mate_score=MATE_CP, being mated in 3 would score -997 and the position would not count as lost)
+                score = self.engine.analyse(board, self.limit)['score'].white().score(mate_score=100 * MATE_CP)
                 v = max(-MATE_CP, min(MATE_CP, score))
             if len(self.cache) > 100_000:
                 self.cache.clear()

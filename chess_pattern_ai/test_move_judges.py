@@ -57,6 +57,20 @@ class TestSearchJudge(unittest.TestCase):
         self.assertEqual(judge.move_loss((0, 0), 0, 2), 0.0)
 
 
+@unittest.skipUnless(os.path.exists('/usr/games/stockfish'), 'needs Stockfish')
+class TestStockfishJudge(unittest.TestCase):
+    def test_no_rating_when_being_mated(self):
+        from move_judges import StockfishJudge
+        judge = StockfishJudge(depth=8)
+        try:
+            # Black's only move is Kb8, then Rh8 mates
+            board = chess.Board('k7/8/1K6/8/8/8/8/7R b - - 0 1')
+            self.assertEqual(judge.value(board, chess.BLACK), -1000)
+            self.assertIsNone(judge.move_loss(board, chess.BLACK, next(iter(board.legal_moves))))
+        finally:
+            judge.close()
+
+
 class FixedJudge:
     """Judge with given losses per move"""
 
