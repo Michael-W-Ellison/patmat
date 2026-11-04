@@ -39,6 +39,9 @@ class LOAHeadlessTrainer:
     # 2 x 300 games against this trainer's opponent, 96.5% of games won with it against 68.8% without
     # (0: off; judging makes a game several times slower)
     JUDGE_DEPTH = 3
+    # The general patterns get tactical parts (tactical_patterns: the threats left after the opponent's best
+    # answer): over 2 x 300 games with the judge, 99.2% of games won with them against 96.5% without
+    TACTICS = True
 
     def __init__(self, db_path: str = 'loa_training.db'):
         """Initialize trainer"""
@@ -55,6 +58,7 @@ class LOAHeadlessTrainer:
         if self.JUDGE_DEPTH > 0:
             from move_judges import SearchJudge
             self.general.judge = SearchJudge(self.adapter, self.JUDGE_DEPTH)
+        self.general.TACTICS = self.TACTICS
         self.last_general_features = None
 
         # Statistics
