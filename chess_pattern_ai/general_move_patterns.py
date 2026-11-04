@@ -98,7 +98,8 @@ def evaluate(adapter, state, color) -> float:
 
 def analyze_candidates(adapter, state, color, candidates: Sequence,
                        rng: random.Random = random,
-                       max_replies: int = MAX_REPLIES, refutations=None, tactics: bool = False) -> List[Dict]:
+                       max_replies: int = MAX_REPLIES, refutations=None, tactics: bool = False,
+                       move_history=None) -> List[Dict]:
     """
     Evaluate each candidate move one ply deep and describe it with
     game-independent features.
@@ -107,6 +108,11 @@ def analyze_candidates(adapter, state, color, candidates: Sequence,
     candidate's REPLIES_EXTENDED replies whose patterns most often refuted
     blunders are searched EXTENSION_DEPTH plies further, and 'net' becomes
     the lower of the two values (the features are those of the one-ply look).
+
+    With move_history (a move_history.MoveHistory, kept between calls by the
+    caller), where the opponent's replies are sampled the killer replies
+    (opp's best against earlier candidates here) and the replies with the
+    highest history scores fill REPLIES_KEPT of the sample first.
 
     With tactics, each feature string gets the tactical parts of
     tactical_patterns appended: 'gain|net|mob|threat|tac=<t>|top=<u>'.
@@ -148,6 +154,9 @@ def analyze_candidates(adapter, state, color, candidates: Sequence,
         share, best = tactical_patterns.summary(values)
         return share, best, sum(v > EPSILON for v in values), wins
 
+    if move_history is not None:
+        move_history.new_search()
+
     for move in candidates:
         after = play(state, move)
         entry = {'replies': None, 'threat': 'safe', 'mob': None, 'tactics': None}
@@ -168,7 +177,7 @@ def analyze_candidates(adapter, state, color, candidates: Sequence,
                 replies = adapter.legal_moves(after, opp)
                 entry['replies'] = len(replies)
                 if len(replies) > max_replies:
-                    replies = rng.sample(list(replies), max_replies)
+                    replies = _sample_replies(list(replies), opp, max_replies, rng, move_history)
 
                 worst = None
                 answer = None       # the reply rated best for opp
@@ -192,6 +201,8 @@ def analyze_candidates(adapter, state, color, candidates: Sequence,
                     unplay(after_reply)
                 if worst is not None:
                     entry['net'] = worst - value_now
+                    if move_history is not None:
+                        move_history.record(1, opp, answer, 1)
                 entry['net_plain'] = entry['net']
                 if tactics and answer is not None:
                     after_answer = play(after, answer)
@@ -229,6 +240,18 @@ def analyze_candidates(adapter, state, color, candidates: Sequence,
         if tactics:
             e['features'] += '|' + tactical_patterns.classify(now_summary, e['tactics'])
     return [{'features': e['features'], 'gain': e['gain'], 'net': e['net']} for e in info]
+
+
+def _sample_replies(replies: list, opp, count: int, rng, move_history) -> list:
+    """count of replies: at random, or with move_history its killers and best-scored first (REPLIES_KEPT)"""
+    if move_history is None:
+        return rng.sample(replies, count)
+    from move_history import REPLIES_KEPT
+    first = [r for r in move_history.order(replies, 1, opp)[:max(1, int(count * REPLIES_KEPT))]
+             if move_history.is_killer(1, r) or move_history.score(opp, r) > 0]
+    taken = {id(r) for r in first}
+    rest = [r for r in replies if id(r) not in taken]
+    return first + rng.sample(rest, count - len(first))
 
 
 def _extend_refutations(adapter, after, color, opp, replies, refutations):
@@ -341,6 +364,8 @@ class GeneralPatternLearner:
     CROSS_GAME_GAMES = 10.0
     LEARN_REFUTATIONS = False   # with a judge: learn which replies refute the agent's blunders (refutation_patterns)
     USE_REFUTATIONS = False     # analyze(): search the replies likeliest to refute further
+    USE_MOVE_HISTORY = False    # killer moves and history scores (move_history): analyze() samples replies
+                                # with them, and a SearchJudge orders its moves by them
     TACTICS = False             # analyze(): append the tactical parts (tactical_patterns), learned as a pattern
                                 # of their own whose value is added to the four-part pattern's
     JUDGED_TABLE = 'general_judged_evidence'
@@ -398,6 +423,7 @@ class GeneralPatternLearner:
         self.conn.commit()
         self._load_values()
         self.refutations = RefutationLearner(self.conn, game_name, import_cross_game)
+        self.move_history = None    # a move_history.MoveHistory, made by analyze() when USE_MOVE_HISTORY is set
 
     def _import_legacy(self):
         """
@@ -492,6 +518,9 @@ class GeneralPatternLearner:
         if self.judge is None and self.JUDGE_DEPTH > 0:
             from move_judges import SearchJudge
             self.judge = SearchJudge(adapter, self.JUDGE_DEPTH)
+        if self.USE_MOVE_HISTORY and getattr(self.judge, 'move_history', False) is None:
+            from move_history import MoveHistory
+            self.judge.move_history = MoveHistory()
         if self.judge is not None and features is not None:
             self.last_loss = self.judge.move_loss(state, color, move)
             if self.last_loss is not None:          # (None: the judge sees the position as lost already)
@@ -528,6 +557,11 @@ class GeneralPatternLearner:
             kwargs['refutations'] = self.refutations
         if self.TACTICS:
             kwargs['tactics'] = True
+        if self.USE_MOVE_HISTORY:
+            if self.move_history is None:
+                from move_history import MoveHistory
+                self.move_history = MoveHistory()
+            kwargs['move_history'] = self.move_history
         return analyze_candidates(adapter, state, color, candidates, **kwargs)
 
     def record_judged(self, judged: List[tuple], game_name: str = None):

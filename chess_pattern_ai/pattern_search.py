@@ -50,6 +50,12 @@ to each root move also include the REPLIES_EXTENDED replies whose
 game-independent reply patterns most often refuted the agent's blunders
 (learned from a judge), so a quiet reply that punishes a move is read even
 when it is not among the QUIET_MOVES best quiet moves.
+
+Killer moves and history scores (move_history set to a move_history.MoveHistory):
+below the root, the killer moves of the ply (the last moves that caused a
+cutoff there) are searched besides the usual moves, and the moves searched are
+tried forcing moves first (in pattern order), then killers, then the others by
+history score. Cutoffs and best moves are recorded as the search goes.
 """
 
 import time
@@ -145,6 +151,7 @@ class PatternSearch:
         self.refutations = None             # a RefutationLearner: replies to root moves likeliest to refute them
         self.adapter = None                 # (the game's adapter, for the reply patterns)
         self.refutation_cache: Dict = {}
+        self.move_history = None            # a MoveHistory: killers and history scores order the moves below the root
 
     # ------------------------------------------------------------- ordering
 
@@ -194,6 +201,18 @@ class PatternSearch:
                     features, REPLIES_EXTENDED, exclude={i for i, e in enumerate(moves) if e[0] in chosen})]
                 self.refutation_cache[key] = extra
             out = out + extra
+        history = self.move_history
+        if history is not None:
+            chosen = {e[0] for e in out}
+            out = out + [e for e in moves if e[0] not in chosen and history.is_killer(ply, e[0])]
+            side = board.turn
+
+            def rank(i, entry):
+                if forcing(entry[0], entry[2], board):
+                    return 0, i, 0.0
+                return 1, 0 if history.is_killer(ply, entry[0]) else 1, -history.score(side, entry[0]), i
+
+            out = [e for _, e in sorted(((rank(i, e), e) for i, e in enumerate(out)), key=lambda r: r[0])]
         return out
 
     def bonus(self, pattern: float) -> float:
@@ -219,6 +238,8 @@ class PatternSearch:
         self.nodes = 0
         self.history = self.game_positions(board)
         self.refutation_cache = {}
+        if self.move_history is not None:
+            self.move_history.new_search()
         context = self.sequences.context(board) if self.use_patterns else []
         root = self.ordered(board, context)
         if not root:
@@ -276,7 +297,7 @@ class PatternSearch:
         moves = self.candidates(board, context, ply)
         if not moves:
             return -(MATE - ply) if board.is_check() else 0.0
-        best = -float('inf')
+        best, best_move, cutoff, raised = -float('inf'), None, False, False
         for move, _, tok in moves:
             board.push(move)
             try:
@@ -284,11 +305,14 @@ class PatternSearch:
             finally:
                 board.pop()
             if value > best:
-                best = value
+                best, best_move = value, move
             if value > alpha:
-                alpha = value
+                alpha, raised = value, True
             if alpha >= beta:
+                cutoff = True
                 break
+        if self.move_history is not None and raised:
+            self.move_history.record(ply, board.turn, best_move, depth, cutoff)
         return best
 
     def quiesce(self, board: chess.Board, alpha: float, beta: float, context: List[str], ply: int, left: int) -> float:

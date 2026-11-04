@@ -48,6 +48,7 @@ class HeadlessTrainer:
     use_general_values = False  # root moves get the learned value of their general pattern (general_move_patterns)
     GENERAL_WEIGHT = 0.2        # material units (a pawn is 10) per point of that value (scale -50..+50)
     use_refutations = False     # learn (with the judge) which replies refute blunders; the search reads them
+    use_move_history = False    # the search orders moves by killer moves and history scores (move_history)
     use_tactics = False         # general patterns get tactical parts: threats left after the best reply
                                 # (tactical_patterns)
 
@@ -92,6 +93,9 @@ class HeadlessTrainer:
             self.search.adapter = self.adapter
         if self.use_tactics:
             self.general.TACTICS = True
+        if self.use_move_history:
+            from move_history import MoveHistory
+            self.search.move_history = MoveHistory()
 
         self.games_played = 0
         self.wins = 0

@@ -50,6 +50,7 @@ class SearchJudge:
         self.max_nodes = max_nodes
         self.in_place = hasattr(adapter, 'push') and hasattr(adapter, 'pop')
         self.nodes = 0
+        self.move_history = None    # a move_history.MoveHistory: moves tried killers first, then by history
 
     def _play(self, state, move):
         if self.in_place:
@@ -61,8 +62,11 @@ class SearchJudge:
         if self.in_place:
             self.adapter.pop(state)
 
-    def _search(self, state, color, depth: int, alpha: float, beta: float, limited: bool) -> float:
-        """Value of state for color, depth plies deep (the side to move maximizes its own value)"""
+    def _search(self, state, color, depth: int, alpha: float, beta: float, limited: bool, ply: int = 1) -> float:
+        """
+        Value of state for color, depth plies deep (the side to move maximizes its own value); ply: its distance
+        from the position judged
+        """
         adapter = self.adapter
         self.nodes += 1
         if depth == 0 or adapter.is_over(state):
@@ -74,21 +78,30 @@ class SearchJudge:
         if not moves:
             return evaluate(adapter, state, color)
         maximize = mover == color
+        history = self.move_history
+        if history is not None:
+            moves = history.order(moves, ply, mover)
         best = -INF if maximize else INF
+        best_move, cutoff = None, False     # best_move: the move that last narrowed the window
         for move in moves:
             after = self._play(state, move)
             try:
-                v = self._search(after, color, depth - 1, alpha, beta, limited)
+                v = self._search(after, color, depth - 1, alpha, beta, limited, ply + 1)
             finally:
                 self._unplay(after)
             if maximize:
                 best = max(best, v)
-                alpha = max(alpha, v)
+                if v > alpha:
+                    alpha, best_move = v, move
             else:
                 best = min(best, v)
-                beta = min(beta, v)
+                if v < beta:
+                    beta, best_move = v, move
             if alpha >= beta:
+                cutoff = True
                 break
+        if history is not None and best_move is not None:
+            history.record(ply, mover, best_move, depth, cutoff)
         return best
 
     def move_values(self, state, color, depth: int, limited: bool = True) -> list:
@@ -104,6 +117,8 @@ class SearchJudge:
 
     def move_loss(self, state, color, move) -> Optional[float]:
         self.nodes = 0
+        if self.move_history is not None:
+            self.move_history.new_search()
         values = self.move_values(state, color, 1, limited=False)
         completed = 1
         for depth in range(2, self.depth + 1):
@@ -130,6 +145,8 @@ class SearchJudge:
         color, searched depth - 1 plies (less if the node limit stops it)
         """
         self.nodes = 0
+        if self.move_history is not None:
+            self.move_history.new_search()
         best = None
         for depth in range(1, self.depth):
             values = []
