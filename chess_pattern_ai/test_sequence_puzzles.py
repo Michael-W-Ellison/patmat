@@ -87,12 +87,15 @@ class TestWorksheets(unittest.TestCase):
         self.assertEqual(wrong, [])
 
     def test_the_held_out_sheets(self):
-        # every held-out item is answered; only the number sequences (arithmetic) are not read
+        # with the digits learned from counting worksheets (digit_lessons), the number sequences are read too
         from children_worksheets import HELD_OUT, run
         summary = run(HELD_OUT, use_slow=False)
-        wrong = {i.kind for i, o, _ in summary['results'] if o != 'right'}
-        self.assertEqual(wrong, {'number'})
-        self.assertEqual(summary['unanswered'], 0)
+        self.assertEqual([(i.sheet, i.number) for i, o, _ in summary['results'] if o != 'right'], [])
+
+    def test_without_learned_symbols_the_number_sequences_are_not_read(self):
+        from children_worksheets import HELD_OUT, run
+        summary = run([i for i in HELD_OUT if i.kind == 'number'], symbols=None, use_slow=False)
+        self.assertEqual(summary['right'], 0)
 
 
 if __name__ == '__main__':

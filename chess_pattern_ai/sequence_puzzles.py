@@ -36,6 +36,10 @@ Rule families:
   step are those of the step before, each moved by its own fixed amount (a
   caterpillar's new segments one segment further along; a tower's new floor
   on top). Needs three panels.
+- numbers: each panel read as a number with symbols the program has
+  learned (symbol_learning, digit_lessons; pass symbols=SymbolMemory), the
+  numbers going up or down by a fixed step; the next numbers are written
+  with the learned digits, and given as 'values' too. Rule size 2.
 - arc_step: each step from a panel to the next as a training pair for the
   ARC pattern solver (arc_pattern_solver); the last panel is the test input.
   Slow (seconds to minutes), so tried only when the families above predict
@@ -52,7 +56,7 @@ import numpy as np
 
 Array = np.ndarray
 MAX_PREFIX = 1          # repeat: panels before the cycle starts (a train's engine)
-FAMILIES = ('repeat', 'runs', 'growth', 'arc_step', 'repeat_all')
+FAMILIES = ('repeat', 'runs', 'growth', 'numbers', 'arc_step', 'repeat_all')
 SLOW = ('arc_step',)
 
 
@@ -70,8 +74,8 @@ class SequencePuzzle:
             raise ValueError('a sequence puzzle has at least one panel and one blank')
 
 
-def _same(a: Array, b: Array) -> bool:
-    return a.shape == b.shape and np.array_equal(a, b)
+def _same(a: Optional[Array], b: Optional[Array]) -> bool:
+    return a is not None and b is not None and a.shape == b.shape and np.array_equal(a, b)
 
 
 def _symbols(panels: Sequence[Array]) -> List[int]:
@@ -261,25 +265,53 @@ def arc_step(panels: List[Array], count: int) -> List[Tuple[str, List[Array]]]:
     return [('ARC: ' + names[0], seq[len(panels):], None)]
 
 
-FAMILY_FUNCTIONS = {'repeat': repeat, 'runs': runs, 'growth': growth, 'arc_step': arc_step,
+def numbers(panels: List[Array], count: int, symbols=None) -> List[tuple]:
+    """
+    Each panel read as a number with the learned symbols (symbol_learning.SymbolMemory); the numbers go up or
+    down by a fixed step (not 0: equal numbers are a repeat)
+    """
+    if symbols is None or len(panels) < 3:
+        return []
+    values = [symbols.read_number(p) for p in panels]
+    if any(v is None for v in values):
+        return []
+    step = values[1] - values[0]
+    if step == 0 or any(b - a != step for a, b in zip(values, values[1:])):
+        return []
+    nxt = [values[-1] + step * (j + 1) for j in range(count)]
+    if any(v < 0 for v in nxt):
+        return []
+    drawn = [symbols.draw_number(v) for v in nxt]
+    return [(f'numbers going {"up" if step > 0 else "down"} by {abs(step)}', drawn, 2, nxt)]
+
+
+FAMILY_FUNCTIONS = {'repeat': repeat, 'runs': runs, 'growth': growth, 'numbers': numbers, 'arc_step': arc_step,
                     'repeat_all': repeat_all}
 
 
 def predictions(puzzle: SequencePuzzle, families: Sequence[str] = FAMILIES,
-                use_slow: Optional[bool] = None) -> List[Dict]:
+                use_slow: Optional[bool] = None, symbols=None) -> List[Dict]:
     """
-    Every family's predictions, best-ranked first: [{'family', 'rule', 'panels'}] (panels: one per blank).
-    use_slow: whether to try arc_step (None: only if the families before it predict nothing, or nothing among
-    the choices). repeat_all is only used when nothing before it predicts.
+    Every family's predictions, best-ranked first: [{'family', 'rule', 'panels'}] (panels: one per blank;
+    the numbers family also gives 'values'). use_slow: whether to try arc_step (None: only if the families
+    before it predict nothing, or nothing among the choices). repeat_all is only used when nothing before it
+    predicts. symbols: a SymbolMemory to read numbers with (the numbers family needs one)
     """
     out = []
 
     def run(name):
         try:
-            found = FAMILY_FUNCTIONS[name](puzzle.panels, puzzle.blanks)
+            if name == 'numbers':
+                found = numbers(puzzle.panels, puzzle.blanks, symbols)
+            else:
+                found = FAMILY_FUNCTIONS[name](puzzle.panels, puzzle.blanks)
         except Exception:
             found = []
-        out.extend({'family': name, 'rule': rule, 'panels': ps, 'size': size} for rule, ps, size in found)
+        for entry in found:
+            e = {'family': name, 'rule': entry[0], 'panels': entry[1], 'size': entry[2]}
+            if len(entry) > 3:
+                e['values'] = entry[3]
+            out.append(e)
 
     def wanted():
         if not out:

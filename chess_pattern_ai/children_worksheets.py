@@ -37,17 +37,26 @@ What a child does that is not transcribed: reading the instruction, and for
 with several blanks are scored right only if every blank is right. Choices
 (cut-outs, "circle the answer") are given as panels.
 
-Results (sequence_puzzles as committed with this file):
+Results (sequence_puzzles, symbol_learning and learned_symbols.json as committed with this file):
 - ITEMS, the 21 sheets seen while writing sequence_puzzles: 105/105 right.
-- HELD_OUT, 33 worksheetfun.com sheets transcribed after it was frozen:
-  173/180 right, 7 wrong, 0 unanswered. The 7 wrong are the number
-  sequences (1 3 5 7 9 -> 11): numbers are read as pictures, with no digits
-  or arithmetic, so the last resort (repeat_all) answers them, wrongly.
-  The other 173 are repeats with periods 2 to 4, mostly 2.
+- HELD_OUT, 33 worksheetfun.com sheets transcribed after sequence_puzzles
+  was frozen: first 173/180 (the 7 wrong: the number sequences, numbers
+  read as pictures). Then the program was taught digits from counting
+  worksheets (digit_lessons) and given the numbers family, and the number
+  sequences' panels replaced by the sheet's own cells cut from the page
+  (number_cells): 180/180. The number sheet is no longer held out: it was
+  examined while the digit reading was developed (the cell cutting was
+  fixed on it: slivers of ruled lines left in cells were read as 1s). The
+  digits on it are in a type style the program was never shown; what it
+  reads them with is learned from other sheets only.
+- Without learned symbols (run(..., symbols=None)) the 7 number items are
+  wrong, as before.
 
 Run: python children_worksheets.py  (per sheet and per kind of item; -v for every item)
 """
 
+import json
+import os
 import sys
 import zlib
 from dataclasses import dataclass, field
@@ -327,8 +336,79 @@ def panel(token: str) -> np.ndarray:
     if token.startswith('grow:'):
         _, kind, n = token.split(':')
         return growing(kind, int(n))
+    if token.startswith('cell:'):
+        _, r, c = token.split(':')
+        return _number_cells()[int(r)][int(c)]
     shape = OUTLINES[token]
     return shape.copy() if isinstance(shape, np.ndarray) else _art(shape)
+
+
+# ------------------------------------------------------------------ cells cut from a rendered page
+
+NUMBER_CELLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'worksheet_number_cells.json')
+NUMBER_SHEET = 'https://www.worksheetfun.com/wp-content/uploads/2016/02/wfun16_number_patterns_7.pdf'
+_cells_cache: List = []
+
+
+def number_cells(pdf_path: str, upright_turns: int = -1) -> List[List[Optional[np.ndarray]]]:
+    """
+    The cells of a sheet printed as a grid of boxes, row by row: the page rendered (scale 2), turned upright
+    (upright_turns quarter turns), its ruled lines found (rows / columns of the page more than half ink), the
+    boxes between them cut out (a band counts as a row of boxes where the vertical lines cross it), the ink
+    touching a box's edge (pieces of the lines) dropped, and each box cropped to its ink (None: empty)
+    """
+    import pypdfium2 as pdfium
+    from symbol_learning import components
+    page = np.array(pdfium.PdfDocument(pdf_path)[0].render(scale=2.0).to_pil().convert('L'))
+    dark = np.rot90(page, upright_turns) < 128
+
+    def runs(index):
+        out = []
+        for i in index:
+            if out and i - out[-1][1] <= 2:
+                out[-1][1] = i
+            else:
+                out.append([i, i])
+        return out
+
+    h = runs(np.nonzero(dark.mean(axis=1) > 0.5)[0])
+    v = runs(np.nonzero(dark.mean(axis=0) > 0.5)[0])
+    col_bands = [(a[1] + 1, b[0]) for a, b in zip(v, v[1:]) if b[0] - a[1] > 40]
+    rows = []
+    for a, b in zip(h, h[1:]):
+        r0, r1 = a[1] + 1, b[0]
+        if r1 - r0 <= 40 or not all(dark[r0:r1, c0 - 1].mean() > 0.9 for c0, _ in col_bands):
+            continue
+        row = []
+        for c0, c1 in col_bands:
+            cell = dark[r0:r1, c0:c1].copy()
+            for rs, cs, m in components(cell):
+                if rs.start == 0 or cs.start == 0 or rs.stop == cell.shape[0] or cs.stop == cell.shape[1]:
+                    cell[rs, cs] &= ~m
+            if not cell.any():
+                row.append(None)
+                continue
+            ys, xs = np.nonzero(cell)
+            row.append(cell[ys.min():ys.max() + 1, xs.min():xs.max() + 1].astype(int))
+        rows.append(row)
+    return rows
+
+
+def save_number_cells(pdf_path: str, path: str = NUMBER_CELLS) -> None:
+    from symbol_learning import pack
+    rows = number_cells(pdf_path)
+    with open(path, 'w') as f:
+        json.dump({'source': NUMBER_SHEET, 'how': 'children_worksheets.number_cells',
+                   'rows': [[None if c is None else pack(c) for c in row] for row in rows]}, f)
+
+
+def _number_cells() -> List[List[Optional[np.ndarray]]]:
+    from symbol_learning import unpack
+    if not _cells_cache:
+        with open(NUMBER_CELLS) as f:
+            data = json.load(f)
+        _cells_cache.extend([[None if c is None else unpack(c) for c in row] for row in data['rows']])
+    return _cells_cache
 
 
 # ------------------------------------------------------------------ the items
@@ -518,11 +598,12 @@ HELD_OUT += _shapes('WSF what comes next 1 (trace)', _TRACE_1)
 HELD_OUT += _shapes('WSF what comes next 2 (trace)', _TRACE_2)
 HELD_OUT += _shapes('WSF what comes next circle 1', _TRACE_1)
 HELD_OUT += _shapes('WSF what comes next circle 2', _TRACE_2)
+# The number sequences are not transcribed: their panels are the sheet's own cells, cut from the rendered page
+# by number_cells() and kept in NUMBER_CELLS; the program reads them with what it learned (digit_lessons). The
+# answers are values (value:<n>), compared with the value the program gives.
 HELD_OUT += _shapes('WSF number patterns 7', [
-    'num:1 num:3 num:5 num:7 num:9 | num:11', 'num:2 num:4 num:6 num:8 num:10 | num:12',
-    'num:26 num:24 num:22 num:20 num:18 | num:16', 'num:27 num:24 num:21 num:18 num:15 | num:12',
-    'num:17 num:19 num:21 num:23 num:25 | num:27', 'num:36 num:32 num:28 num:24 num:20 | num:16',
-    'num:15 num:16 num:17 num:18 num:19 | num:20'], kind='number')
+    ' '.join(f'cell:{r}:{c}' for c in range(5)) + f' | value:{v}'
+    for r, v in enumerate([11, 12, 16, 12, 27, 16, 20])], kind='number')
 HELD_OUT += _shapes('WSF pattern T200 1', [
     'pic:face_sad pic:face_happy pic:face_sad pic:face_happy pic:face_sad | pic:face_happy',
     'pic:face_zigzag pic:face_o pic:face_zigzag pic:face_o pic:face_zigzag | pic:face_o',
@@ -650,16 +731,24 @@ HELD_OUT += _shapes('WSF shape cut and paste 8', [r + ' | ' + _CUT_B for r in [
 
 # ------------------------------------------------------------------ running
 
-def run(items: List[Item] = ITEMS, verbose: bool = False, **solve_kwargs) -> Dict:
+def run(items: List[Item] = ITEMS, verbose: bool = False, symbols='learned', **solve_kwargs) -> Dict:
+    """symbols: the SymbolMemory to read symbols with ('learned': the one digit_lessons saved, None: none)"""
     from sequence_puzzles import SequencePuzzle, solve
+    if symbols == 'learned':
+        from digit_lessons import LEARNED
+        from symbol_learning import SymbolMemory
+        symbols = SymbolMemory(LEARNED) if os.path.exists(LEARNED) else None
     results = []
     for item in items:
-        truth = [panel(t) for t in item.answer]
+        values = [int(t[6:]) for t in item.answer if t.startswith('value:')]
+        truth = [] if values else [panel(t) for t in item.answer]
         choices = [panel(c) for c in item.choices]
-        puzzle = SequencePuzzle([panel(t) for t in item.given], len(truth), choices)
-        answer = solve(puzzle, **solve_kwargs)
+        puzzle = SequencePuzzle([panel(t) for t in item.given], len(item.answer), choices)
+        answer = solve(puzzle, symbols=symbols, **solve_kwargs)
         if answer is None:
             outcome = 'no answer'
+        elif values:
+            outcome = 'right' if answer.get('values') == values else 'wrong'
         elif all(a.shape == t.shape and np.array_equal(a, t) for a, t in zip(answer['panels'], truth)):
             outcome = 'right'
         else:
