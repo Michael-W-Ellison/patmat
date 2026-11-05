@@ -2793,11 +2793,66 @@ def template_patterns(pairs, bg) -> List[Pattern]:
     return found
 
 
+def _continued(t: Array, axis: int, blanks: int) -> Optional[Array]:
+    """t with blanks more columns (axis 1) or rows (axis 0), continuing its columns or rows as a sequence
+    (sequence_puzzles: repeat, runs, growth, or the whole repeated; not the slow ARC family)"""
+    from sequence_puzzles import SequencePuzzle, solve
+    if blanks < 1:
+        return None
+    panels = [t[:, j:j + 1] for j in range(t.shape[1])] if axis == 1 else [t[i:i + 1, :] for i in range(t.shape[0])]
+    answer = solve(SequencePuzzle(panels, blanks), use_slow=False)
+    if answer is None or any(p is None or p.shape != panels[0].shape for p in answer['panels']):
+        return None
+    return np.concatenate([t] + list(answer['panels']), axis=axis)
+
+
+def sequence_patterns(pairs, bg) -> List[Pattern]:
+    """
+    The output continues the input's columns (or rows) as a sequence, read by sequence_puzzles (a pattern
+    repeated, runs growing, a figure growing step by step): grown by a number of columns (rows) that is a
+    fixed multiple of, or a fixed number more than, the input's, or to a fixed size; or, the output of the
+    input's size, its trailing columns (rows) of background filled
+    """
+    found = []
+    for axis in (1, 0):
+        ins = [a.shape[axis] for a, _ in pairs]
+        outs = [b.shape[axis] for _, b in pairs]
+        other = 1 - axis
+        if not all(a.shape[other] == b.shape[other] for a, b in pairs):
+            continue
+        rules = []
+        if all(o > i for i, o in zip(ins, outs)):
+            if all(o % i == 0 for i, o in zip(ins, outs)) and len({o // i for i, o in zip(ins, outs)}) == 1:
+                k = outs[0] // ins[0]
+                rules.append((f'to {k} times its length', lambda n, k=k: n * k - n))
+            if len({o - i for i, o in zip(ins, outs)}) == 1:
+                d = outs[0] - ins[0]
+                rules.append((f'by {d}', lambda n, d=d: d))
+            if len(set(outs)) == 1:
+                rules.append((f'to {outs[0]}', lambda n, o=outs[0]: o - n))
+        for name, blanks in rules:
+            fn = lambda a, ax=axis, bl=blanks: _continued(a, ax, bl(a.shape[ax]))
+            found.append(Pattern('U', f'{"columns" if axis else "rows"} continued as a sequence, {name}', 3, fn))
+        if all(i == o for i, o in zip(ins, outs)):
+            def fill(a, ax=axis):
+                b = background([a])
+                lines = a if ax == 0 else a.T
+                n = len(lines)
+                while n > 0 and np.all(lines[n - 1] == b):
+                    n -= 1
+                if n in (0, len(lines)):
+                    return None
+                start = a[:n] if ax == 0 else a[:, :n]
+                return _continued(start, ax, len(lines) - n)
+            found.append(Pattern('U', f'{"columns" if axis else "rows"} continued as a sequence over the background', 3, fill))
+    return found
+
+
 FAMILIES = {'A': object_action_patterns, 'B': select_crop_patterns, 'C': transform_patterns,
             'D': move_patterns, 'E': resize_patterns, 'F': relation_patterns,
             'H': count_patterns, 'I': build_patterns, 'J': role_patterns, 'K': ray_patterns,
             'M': param_patterns, 'N': symmetry_patterns, 'O': relative_patterns, 'Q': mirror_patterns,
-            'R': repetition_patterns, 'S': cell_rule_patterns, 'T': template_patterns}
+            'R': repetition_patterns, 'S': cell_rule_patterns, 'T': template_patterns, 'U': sequence_patterns}
 COMBINATION_SECONDS = 60     # time budget for combinations, used only when no single pattern fits
 
 
