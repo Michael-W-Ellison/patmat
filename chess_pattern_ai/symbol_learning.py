@@ -50,7 +50,10 @@ under their count.
 
 Reading: read(panel) splits a panel into symbols (connected ink, left to
 right) and recognises each; read_number() makes a number of digits by
-place value.
+place value. readings(panel) gives the panel's possible readings from each
+symbol's few likeliest meanings (alternatives), for reading in context
+(sequence_puzzles). Handwriting is learned the same way as print, from
+lessons shaped like practice sheets (handwriting_lessons).
 
 Blobs (blobs): ink is dark (luminance below DARK) or coloured (saturation
 above COLOURED); connected ink is grouped into blobs (parts whose boxes
@@ -263,6 +266,17 @@ def unpack(packed: Dict) -> np.ndarray:
                     dtype=int).reshape(len(packed['rows']), w)
 
 
+def _image_code(image: np.ndarray) -> str:
+    """A normalised image (values 0..1) as a hex string, one byte per cell (for the JSON file)"""
+    return np.clip(np.round(image * 255), 0, 255).astype(np.uint8).tobytes().hex()
+
+
+def _image_values(code) -> np.ndarray:
+    if isinstance(code, str):
+        return np.frombuffer(bytes.fromhex(code), np.uint8).astype(float).reshape(SIZE, SIZE) / 255
+    return np.asarray(code, dtype=float)              # files written before the hex code: lists of values
+
+
 UPPER = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 LOWER = UPPER.lower()
 
@@ -328,7 +342,7 @@ class SymbolMemory:
 
     def learn(self, image, meaning, source: str = '') -> None:
         mask = ink(image)
-        self.examples.append({'meaning': meaning, 'image': normalise(mask).round(3).tolist(),
+        self.examples.append({'meaning': meaning, 'image': _image_code(normalise(mask)),
                               'ink': pack(mask), 'source': source})
         self._cache = None
 
@@ -428,6 +442,7 @@ class SymbolMemory:
           matching       'numerals', 'counts' (paired one to one)
           order          'symbols', 'names' (in that order)
           anchored order 'symbols', 'names', 'domain' (consecutive in names, from a start to be found)
+          set matching   'symbols', 'names', 'domain' (the symbols are the names, shuffled)
           case choice    'capital', 'symbols' (one symbol is the capital's lower case)
           case matching  'capitals', 'symbols' (each symbol is one capital's lower case)
         The case lessons wait until their capitals are recognised with confidence.
@@ -449,6 +464,8 @@ class SymbolMemory:
                     r = self.learn_by_matching(l['numerals'], l['counts'], src)
                 elif kind == 'order':
                     r = self.learn_in_order(l['symbols'], l['names'], src)
+                elif kind == 'set matching':
+                    r = self.learn_by_matching(l['symbols'], l['names'], src, l.get('domain'))
                 elif kind == 'anchored order':
                     r = self.learn_by_anchored_order(l['symbols'], l['names'], src, l.get('domain'))
                 elif kind in ('case choice', 'case matching'):
@@ -481,7 +498,7 @@ class SymbolMemory:
 
     def _matrix(self):
         if self._cache is None:
-            self._cache = (np.array([e['image'] for e in self.examples]).reshape(len(self.examples), -1)
+            self._cache = (np.array([_image_values(e['image']) for e in self.examples]).reshape(len(self.examples), -1)
                            if self.examples else np.zeros((0, SIZE * SIZE)))
         return self._cache
 
@@ -539,6 +556,38 @@ class SymbolMemory:
                 return None
             out.append(meaning)
         return out
+
+    def alternatives(self, image, domain: Optional[str] = None, k: int = 3) -> List[Tuple[object, float]]:
+        """The k nearest distinct meanings in domain within REJECT, each with its nearest example's distance"""
+        keep = [i for i, e in enumerate(self.examples) if in_domain(e['meaning'], domain)]
+        if not keep:
+            return []
+        d = np.abs(self._matrix()[keep] - normalise(ink(image)).reshape(1, -1)).mean(axis=1)
+        out, seen = [], set()
+        for j in np.argsort(d):
+            if d[j] > REJECT or len(out) == k:
+                break
+            meaning = self.examples[keep[j]]['meaning']
+            if meaning not in seen:
+                seen.add(meaning)
+                out.append((meaning, float(d[j])))
+        return out
+
+    def readings(self, panel, domain: Optional[str] = None, k: int = 3) -> List[Tuple[List, float]]:
+        """
+        A panel's possible readings, most likely first: each a list of meanings (one per symbol, left to right)
+        with its total distance, from the alternatives of each symbol (at most k ** symbols readings)
+        """
+        symbols = symbols_of(panel)
+        if not symbols:
+            return []
+        out = [([], 0.0)]
+        for m in symbols:
+            alts = self.alternatives(m, domain, k)
+            if not alts:
+                return []
+            out = [(r + [a], c + d) for r, c in out for a, d in alts]
+        return sorted(out, key=lambda e: e[1])
 
     def read_number(self, panel) -> Optional[int]:
         symbols = self.read(panel, 'digit')

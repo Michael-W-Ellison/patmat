@@ -165,5 +165,22 @@ class TestNumberWorksheet(unittest.TestCase):
         self.assertGreaterEqual(right, 73)
 
 
+class TestHandwriting(unittest.TestCase):
+    """Runs only where the handwriting datasets are downloaded (PATMAT_HANDWRITING: their cache directory)"""
+
+    def test_the_learned_memory_reads_test_writers(self):
+        cache = os.environ.get('PATMAT_HANDWRITING')
+        if not cache or not os.path.isdir(cache):
+            self.skipTest('handwriting datasets not downloaded')
+        import handwriting_lessons as H
+        from digit_lessons import LEARNED
+        data = H.load(cache)
+        m = SymbolMemory(LEARNED)
+        alone = H.read_alone(m, data)
+        self.assertGreaterEqual(alone['digit'][0], 400)
+        items = H.score_items(m, H.test_items(data))
+        self.assertGreaterEqual(items['handwritten numbers'][0], 35)
+
+
 if __name__ == '__main__':
     unittest.main()

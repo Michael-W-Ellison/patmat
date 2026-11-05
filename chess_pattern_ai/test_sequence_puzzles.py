@@ -96,6 +96,21 @@ class TestLetters(unittest.TestCase):
         self.assertEqual(answer['values'], ['B', 'D', 'F'])
 
 
+class TestReadingInContext(unittest.TestCase):
+    def test_a_doubtful_symbol_read_as_its_neighbours_require(self):
+        from sequence_puzzles import _in_context
+        # panel 2 reads likelier as 7 than as 3, but only 3 makes 1 2 3 4 5 go by a fixed step
+        options = [[(1, 0.05)], [(2, 0.06)], [(7, 0.10), (3, 0.12)], [(4, 0.05)], [(5, 0.07)]]
+        places, cost = _in_context(options)
+        self.assertEqual(places, [1, 2, 3, 4, 5])
+        self.assertAlmostEqual(cost, 0.35)
+
+    def test_a_row_of_second_choices_is_not_answered(self):
+        from sequence_puzzles import _in_context
+        options = [[(9, 0.05), (1, 0.06)], [(8, 0.05), (2, 0.06)], [(6, 0.05), (3, 0.07)], [(5, 0.05), (4, 0.08)]]
+        self.assertIsNone(_in_context(options))
+
+
 class TestWorksheets(unittest.TestCase):
     def test_the_sheets_seen_while_writing_the_reader(self):
         from children_worksheets import ITEMS, run
@@ -113,7 +128,7 @@ class TestWorksheets(unittest.TestCase):
         from children_worksheets import LETTER_ITEMS, run
         summary = run(LETTER_ITEMS, use_slow=False)
         self.assertEqual(summary['wrong'], 0)
-        self.assertGreaterEqual(summary['right'], 21)
+        self.assertGreaterEqual(summary['right'], 23)
 
     def test_without_learned_symbols_the_number_sequences_are_not_read(self):
         from children_worksheets import HELD_OUT, run

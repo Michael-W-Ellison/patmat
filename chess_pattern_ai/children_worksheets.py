@@ -54,7 +54,9 @@ Results (sequence_puzzles, symbol_learning and learned_symbols.json as committed
 - LETTER_ITEMS, K5 "order of letters" (24 rows, fill in the missing
   letters), cells cut from the pages (letter_rows), read with letters
   learned by letter_lessons: 21/24 right, 0 wrong, 3 unanswered (73 of the
-  78 given letters read right; the misses: Arial f read as t, b as h).
+  78 given letters read right; the misses: Arial f read as t, b as h); with
+  the handwriting lessons in the memory and reading in context
+  (sequence_puzzles), 23/24, 0 wrong.
   With the round-font printing sheets alone: 12/24 (1 wrong). Most of the
   gain is from the case choice sheet, which is in the same Arial-like style
   as these sheets: the program learned that style from other sheets, not

@@ -40,6 +40,11 @@ Rule families:
   learned (symbol_learning, digit_lessons; pass symbols=SymbolMemory), the
   numbers going up or down by a fixed step; the next numbers are written
   with the learned digits, and given as 'values' too. Rule size 2.
+  Read in context: of each symbol's 3 likeliest meanings (within REJECT),
+  the reading of the row that goes by a fixed step at the smallest total
+  distance (a 7 read as 1 is put right by its neighbours). The rule's size
+  is 2 plus that distance, so a row read as letters and as numbers is taken
+  as the one it reads as better.
 - letters: as numbers, with each panel read as a letter (all capitals or
   all lower case) and its place in the alphabet going up or down by a fixed
   step; the next letters are given as 'values'.
@@ -62,6 +67,8 @@ import numpy as np
 
 Array = np.ndarray
 MAX_PREFIX = 1          # repeat: panels before the cycle starts (a train's engine)
+FIRST_CHOICES = 1 / 3   # numbers, letters: share of given panels to be read in context as their likeliest reading
+                        # (chosen on validation items of training writers: handwriting_lessons)
 FAMILIES = ('repeat', 'runs', 'growth', 'numbers', 'letters', 'arc_step', 'repeat_all')
 SLOW = ('arc_step',)
 
@@ -298,41 +305,99 @@ def _ordered(panels, count, positions, draw, name):
     return [(f'{name} going {"up" if step > 0 else "down"} by {abs(step)}', drawn, 2, places)]
 
 
+def _in_context(options: List[Optional[List[Tuple[int, float]]]]):
+    """
+    Reading in context: options holds, for each panel, its possible places in the order with their reading
+    distances (None for a missing panel). The start and step (not 0) that give every given panel one of its
+    places, at the smallest total distance: the places chosen ([None for missing panels]), or None
+    """
+    known = [i for i, o in enumerate(options) if o is not None]
+    if len(known) < 2 or any(not options[i] for i in known):
+        return None
+    i0, i1 = known[0], known[1]
+    fits = []
+    for v0, c0 in options[i0]:
+        for v1, c1 in options[i1]:
+            if (v1 - v0) % (i1 - i0):
+                continue
+            step = (v1 - v0) // (i1 - i0)
+            if step == 0:
+                continue
+            total, places = c0 + c1, {i0: v0, i1: v1}
+            for i in known[2:]:
+                want = v0 + step * (i - i0)
+                cost = next((c for v, c in options[i] if v == want), None)
+                if cost is None:
+                    break
+                total += cost
+                places[i] = want
+            else:
+                fits.append((total, [places.get(i) for i in range(len(options))]))
+    if not fits:
+        return None
+    fits.sort(key=lambda f: f[0])
+    places = fits[0][1]
+    # most given panels must be read as their likeliest reading: a row put together from second choices is
+    # too unsure to answer
+    firsts = sum(places[i] == options[i][0][0] for i in known)
+    if firsts < FIRST_CHOICES * len(known):
+        return None
+    return places, fits[0][0]
+
+
 def numbers(panels: List[Optional[Array]], count: int, symbols=None) -> List[tuple]:
     """
     Each panel read as a number with the learned symbols (symbol_learning.SymbolMemory); the numbers go up or
-    down by a fixed step (not 0: equal numbers are a repeat); missing panels are filled in too
+    down by a fixed step (not 0: equal numbers are a repeat); missing panels are filled in too. Panels are
+    read in context: of each symbol's few likeliest readings, those that make the row go by a fixed step
     """
     given = [p for p in panels if p is not None]
     if symbols is None or len(given) < 2 or (len(given) < 3 and len(given) == len(panels)):
         return []
-    values = [None if p is None else symbols.read_number(p) for p in panels]
-    if any(v is None for v, p in zip(values, panels) if p is not None):
+    options = []
+    for p in panels:
+        if p is None:
+            options.append(None)
+            continue
+        seen = {}
+        for meanings, cost in symbols.readings(p, 'digit'):
+            value = int(''.join(str(m) for m in meanings))
+            seen.setdefault(value, cost)
+        options.append(sorted(seen.items(), key=lambda e: e[1]))
+    fit = _in_context(options)
+    if fit is None:
         return []
-    found = _ordered(panels, count, values, lambda v: symbols.draw_number(v) if v >= 0 else None, 'numbers')
-    return found
+    values, cost = fit
+    return [(rule, drawn, size + cost, at) for rule, drawn, size, at in
+            _ordered(panels, count, values, lambda v: symbols.draw_number(v) if v >= 0 else None, 'numbers')]
 
 
 def letters(panels: List[Optional[Array]], count: int, symbols=None) -> List[tuple]:
     """
     Each panel read as a letter with the learned symbols, all capitals or all lower case; their places in the
-    alphabet go up or down by a fixed step; missing panels are filled in too. Values: the letters
+    alphabet go up or down by a fixed step; missing panels are filled in too; read in context as numbers are.
+    Values: the letters
     """
     from symbol_learning import UPPER, LOWER
     given = [p for p in panels if p is not None]
     if symbols is None or len(given) < 2 or (len(given) < 3 and len(given) == len(panels)):
         return []
+    out = []
     for domain, alphabet in (('upper', UPPER), ('lower', LOWER)):
-        read = [None if p is None else symbols.read_letter(p, domain) for p in panels]
-        if any(r is None for r, p in zip(read, panels) if p is not None):
+        options = []
+        for p in panels:
+            if p is None:
+                options.append(None)
+                continue
+            options.append([(alphabet.index(r[0]), c) for r, c in symbols.readings(p, domain) if len(r) == 1])
+        fit = _in_context(options)
+        if fit is None:
             continue
-        places = [None if r is None else alphabet.index(r) for r in read]
+        places, cost = fit
         found = _ordered(panels, count, places,
-                         lambda v: symbols.draw([alphabet[v]]) if 0 <= v < len(alphabet) else None, 'letters')
-        if found:
-            rule, drawn, size, at = found[0]
-            return [(rule, drawn, size, [alphabet[v] for v in at])]
-    return []
+                         lambda v, a=alphabet: symbols.draw([a[v]]) if 0 <= v < len(a) else None, 'letters')
+        out += [(rule, drawn, size + cost, [alphabet[v] for v in at]) for rule, drawn, size, at in found]
+    return sorted(out, key=lambda e: e[2])[:1]          # capitals or lower case: the better reading
 
 
 FAMILY_FUNCTIONS = {'repeat': repeat, 'runs': runs, 'growth': growth, 'numbers': numbers, 'letters': letters,
