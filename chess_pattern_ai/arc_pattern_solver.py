@@ -810,6 +810,17 @@ def build_patterns(pairs, bg) -> List[Pattern]:
                     if all((lambda o: o is not None and o.shape == b.shape and np.array_equal(o, b))(_safe(fn, a))
                            for a, b in pairs):
                         found.append(Pattern('I', f'{sname}: {opname} -> {color} else {rest}', 3, fn))
+                # the cells the operation keeps take their own colour (that of the first part that has one), so
+                # the same operation fits pairs drawn in different colours
+                def own(a, op=op, parts_of=parts_of):
+                    ps = parts_of(a)
+                    if ps is None or len(ps) != 2:
+                        return None
+                    m = op(ps[0] != bg, ps[1] != bg)
+                    return np.where(m, np.where(ps[0] != bg, ps[0], ps[1]), bg).astype(int)
+                if all((lambda o: o is not None and o.shape == b.shape and np.array_equal(o, b))(_safe(own, a))
+                       for a, b in pairs):
+                    found.append(Pattern('I', f'{sname}: {opname} in the parts\' own colours', 3, own))
         for order in (itertools.permutations(range(len(parts0))) if len(parts0) <= 4 else ()):
             def overlay(a, order=order, parts_of=parts_of):
                 ps = parts_of(a)
