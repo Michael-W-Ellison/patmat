@@ -53,7 +53,11 @@ right) and recognises each; read_number() makes a number of digits by
 place value. readings(panel) gives the panel's possible readings from each
 symbol's few likeliest meanings (alternatives), for reading in context
 (sequence_puzzles). Handwriting is learned the same way as print, from
-lessons shaped like practice sheets (handwriting_lessons).
+lessons shaped like practice sheets (handwriting_lessons). read_word(panel,
+vocabulary) reads a printed word in context: the vocabulary word its
+letters' likeliest readings spell with the fewest changes. Shapes (domain
+'shape', names in SHAPES) are compared by silhouette (an outline filled in),
+and learned from shape worksheets (shape_lessons).
 
 Blobs (blobs): ink is dark (luminance below DARK) or coloured (saturation
 above COLOURED); connected ink is grouped into blobs (parts whose boxes
@@ -279,6 +283,25 @@ def _image_values(code) -> np.ndarray:
 
 UPPER = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 LOWER = UPPER.lower()
+# the names of shapes, known beforehand as words (as the alphabet is); a shape is recognised by its silhouette
+SHAPES = ('circle', 'oval', 'square', 'rectangle', 'triangle', 'diamond', 'star', 'heart', 'pentagon',
+          'hexagon', 'octagon', 'parallelogram', 'cross', 'trapezoid')
+
+
+def silhouette(mask: np.ndarray) -> np.ndarray:
+    """A shape's ink with its insides filled: an outline and a filled shape (or one with a face drawn on it)
+    look alike"""
+    from scipy import ndimage
+    return ndimage.binary_fill_holes(ink(mask))
+
+
+def edit_distance(a: str, b: str) -> int:
+    row = list(range(len(b) + 1))
+    for i, x in enumerate(a, 1):
+        prev, row[0] = row[0], i
+        for j, y in enumerate(b, 1):
+            prev, row[j] = row[j], min(row[j] + 1, row[j - 1] + 1, prev + (x != y))
+    return row[-1]
 
 
 def in_domain(meaning, domain: Optional[str]) -> bool:
@@ -286,6 +309,8 @@ def in_domain(meaning, domain: Optional[str]) -> bool:
         return True
     if domain == 'digit':
         return isinstance(meaning, int) and not isinstance(meaning, bool) and 0 <= meaning <= 9
+    if domain == 'shape':
+        return meaning in SHAPES
     if not isinstance(meaning, str) or len(meaning) != 1:
         return False
     return {'upper': meaning in UPPER, 'lower': meaning in LOWER, 'letter': meaning in UPPER + LOWER}[domain]
@@ -341,7 +366,7 @@ class SymbolMemory:
     # -------------------------------------------------------------- learning
 
     def learn(self, image, meaning, source: str = '') -> None:
-        mask = ink(image)
+        mask = silhouette(image) if meaning in SHAPES else ink(image)
         self.examples.append({'meaning': meaning, 'image': _image_code(normalise(mask)),
                               'ink': pack(mask), 'source': source})
         self._cache = None
@@ -443,6 +468,9 @@ class SymbolMemory:
           order          'symbols', 'names' (in that order)
           anchored order 'symbols', 'names', 'domain' (consecutive in names, from a start to be found)
           set matching   'symbols', 'names', 'domain' (the symbols are the names, shuffled)
+          shape choice   'model', 'symbols' (one symbol is the shape the model is)
+          shape matching 'models', 'symbols' (each symbol is the shape one model is)
+        choice and matching lessons may also give a 'domain' (default 'digit').
           case choice    'capital', 'symbols' (one symbol is the capital's lower case)
           case matching  'capitals', 'symbols' (each symbol is one capital's lower case)
         The case lessons wait until their capitals are recognised with confidence.
@@ -459,9 +487,18 @@ class SymbolMemory:
                 if kind == 'counting':
                     r = self.learn_by_counting(l['numerals'], l['count'], src)
                 elif kind == 'choice':
-                    r = self.learn_by_choice(l['numerals'], l['count'], src)
+                    r = self.learn_by_choice(l['numerals'], l['count'], src, l.get('domain', 'digit'))
                 elif kind == 'matching':
-                    r = self.learn_by_matching(l['numerals'], l['counts'], src)
+                    r = self.learn_by_matching(l['numerals'], l['counts'], src, l.get('domain', 'digit'))
+                elif kind in ('shape choice', 'shape matching'):
+                    models = [l['model']] if kind == 'shape choice' else l['models']
+                    names = [self.confident(m, 'shape') for m in models]
+                    if any(n is None for n in names):
+                        r = {'outcome': 'pending', 'why': 'a model shape not recognised'}
+                    elif kind == 'shape choice':
+                        r = self.learn_by_choice(l['symbols'], names[0], src, 'shape')
+                    else:
+                        r = self.learn_by_matching(l['symbols'], names, src, 'shape')
                 elif kind == 'order':
                     r = self.learn_in_order(l['symbols'], l['names'], src)
                 elif kind == 'set matching':
@@ -510,7 +547,7 @@ class SymbolMemory:
         keep = [i for i, e in enumerate(self.examples) if in_domain(e['meaning'], domain)]
         if not keep:
             return None, float('inf')
-        d = np.abs(self._matrix()[keep] - normalise(ink(image)).reshape(1, -1)).mean(axis=1)
+        d = np.abs(self._matrix()[keep] - normalise(silhouette(image) if domain == 'shape' else ink(image)).reshape(1, -1)).mean(axis=1)
         i = int(d.argmin())
         return self.examples[keep[i]]['meaning'], float(d[i])
 
@@ -529,7 +566,7 @@ class SymbolMemory:
         keep = [i for i, e in enumerate(self.examples) if in_domain(e['meaning'], domain)]
         if not keep:
             return None
-        d = np.abs(self._matrix()[keep] - normalise(ink(image)).reshape(1, -1)).mean(axis=1)
+        d = np.abs(self._matrix()[keep] - normalise(silhouette(image) if domain == 'shape' else ink(image)).reshape(1, -1)).mean(axis=1)
         best = int(d.argmin())
         meaning = self.examples[keep[best]]['meaning']
         if d[best] <= CONFIDENT:
@@ -562,7 +599,7 @@ class SymbolMemory:
         keep = [i for i, e in enumerate(self.examples) if in_domain(e['meaning'], domain)]
         if not keep:
             return []
-        d = np.abs(self._matrix()[keep] - normalise(ink(image)).reshape(1, -1)).mean(axis=1)
+        d = np.abs(self._matrix()[keep] - normalise(silhouette(image) if domain == 'shape' else ink(image)).reshape(1, -1)).mean(axis=1)
         out, seen = [], set()
         for j in np.argsort(d):
             if d[j] > REJECT or len(out) == k:
@@ -588,6 +625,33 @@ class SymbolMemory:
                 return []
             out = [(r + [a], c + d) for r, c in out for a, d in alts]
         return sorted(out, key=lambda e: e[1])
+
+    def read_word(self, panel, vocabulary: Sequence[str], most: int = 2) -> Optional[str]:
+        """
+        A printed word, read in context: each letter's few likeliest readings (capitals or lower case, without
+        case), and the word of vocabulary that needs the fewest changes to be spelt by them (a letter counts as
+        spelt when it is among its symbol's readings): at most most changes, and fewer than any other word needs
+        """
+        symbols = symbols_of(panel)
+        if not symbols:
+            return None
+        alts = []
+        for m in symbols:
+            options = {str(a).lower() for a, _ in self.alternatives(m, 'letter', 3)}
+            alts.append(options)
+
+        def changes(word):
+            w = word.lower()
+            row = list(range(len(w) + 1))
+            for i, options in enumerate(alts, 1):
+                prev, row[0] = row[0], i
+                for j, ch in enumerate(w, 1):
+                    prev, row[j] = row[j], min(row[j] + 1, row[j - 1] + 1, prev + (ch not in options))
+            return row[-1]
+        scored = sorted((changes(w), w) for w in vocabulary)
+        if scored[0][0] > most or (len(scored) > 1 and scored[1][0] == scored[0][0]):
+            return None
+        return scored[0][1]
 
     def read_number(self, panel) -> Optional[int]:
         symbols = self.read(panel, 'digit')

@@ -130,6 +130,17 @@ class TestWorksheets(unittest.TestCase):
         self.assertEqual(summary['wrong'], 0)
         self.assertGreaterEqual(summary['right'], 23)
 
+    def test_the_shape_sheets(self):
+        from children_worksheets import SHAPE_ITEMS, _SHAPE_ROWS, run, run_identify
+        self.assertEqual(run_identify()['right'], 7)
+        summary = run(SHAPE_ITEMS, use_slow=False)
+        self.assertGreaterEqual(summary['right'], 23)
+        # every row answered wrongly holds a shape no lesson taught
+        for item, outcome, _ in summary['results']:
+            if outcome != 'right':
+                row = _SHAPE_ROWS[int(item.sheet[-1]) - 1][item.number - 1].split()
+                self.assertTrue({'cross', 'pentagon'} & set(row), (item.sheet, item.number))
+
     def test_without_learned_symbols_the_number_sequences_are_not_read(self):
         from children_worksheets import HELD_OUT, run
         summary = run([i for i in HELD_OUT if i.kind == 'number'], symbols=None, use_slow=False)

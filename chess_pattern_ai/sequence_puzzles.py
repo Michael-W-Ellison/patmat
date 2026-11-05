@@ -51,6 +51,12 @@ Rule families:
 Panels may be missing within the row (None: "fill in the missing
 letters"); only numbers and letters fill them in, and the missing panels'
 values come first in 'values', then the blanks'.
+- shapes: each panel read as the name of its shape (learned: shape_lessons),
+  so copies of a shape drawn a little differently (cut from a page) are the
+  same; the names repeat as in repeat (rule size + 1 + reading distance).
+  Panels of one name must be copies of one drawing (alike in ink, size and
+  colours: SAME_DRAWING, SAME_SIZE): names do not merge two pictures, sizes
+  or colours that the panels tell apart.
 - arc_step: each step from a panel to the next as a training pair for the
   ARC pattern solver (arc_pattern_solver); the last panel is the test input.
   Slow (seconds to minutes), so tried only when the families above predict
@@ -67,9 +73,11 @@ import numpy as np
 
 Array = np.ndarray
 MAX_PREFIX = 1          # repeat: panels before the cycle starts (a train's engine)
+SAME_DRAWING = 0.1      # shapes: panels of one name differ in normalised ink by at most this (copies on a page: 0.094)
+SAME_SIZE = 0.15        # shapes: ... and in height and width by at most this share
 FIRST_CHOICES = 1 / 3   # numbers, letters: share of given panels to be read in context as their likeliest reading
                         # (chosen on validation items of training writers: handwriting_lessons)
-FAMILIES = ('repeat', 'runs', 'growth', 'numbers', 'letters', 'arc_step', 'repeat_all')
+FAMILIES = ('repeat', 'runs', 'growth', 'numbers', 'letters', 'shapes', 'arc_step', 'repeat_all')
 SLOW = ('arc_step',)
 
 
@@ -400,7 +408,45 @@ def letters(panels: List[Optional[Array]], count: int, symbols=None) -> List[tup
     return sorted(out, key=lambda e: e[2])[:1]          # capitals or lower case: the better reading
 
 
+def shapes(panels: List[Optional[Array]], count: int, symbols=None) -> List[tuple]:
+    """
+    Each panel read as the name of its shape with the learned symbols (domain 'shape': by silhouette, so
+    copies of a shape need not be drawn alike); the names repeat as in repeat. Values: the next names
+    """
+    if symbols is None or any(p is None for p in panels):
+        return []
+    names, cost = [], 0.0
+    for p in panels:
+        alts = symbols.alternatives(p, 'shape', 1)
+        if not alts:
+            return []
+        names.append(alts[0][0])
+        cost += alts[0][1]
+    # panels given one name must be copies of one drawing: alike in ink, size and colours (else the names would
+    # merge what the panels themselves tell apart: two pictures, two sizes, two colours)
+    from symbol_learning import ink, normalise
+    looks = [normalise(ink(p)) for p in panels]
+    for i in range(len(panels)):
+        for j in range(i + 1, len(panels)):
+            if names[i] != names[j]:
+                continue
+            a, b = panels[i], panels[j]
+            if np.abs(looks[i] - looks[j]).mean() > SAME_DRAWING or \
+                    any(abs(x - y) > SAME_SIZE * max(x, y) for x, y in zip(a.shape, b.shape)) or \
+                    set(np.unique(a)) != set(np.unique(b)):
+                return []
+    stand_ins = [np.full((1, 1), sorted(set(names)).index(n) + 1) for n in names]
+    found = repeat(stand_ins, count)
+    if not found:
+        return []
+    rule, nxt, size = found[0]
+    values = [sorted(set(names))[int(p[0, 0]) - 1] for p in nxt]
+    drawn = [symbols.draw([v]) for v in values]
+    return [(f'shapes: {rule}', drawn, size + 1 + cost, values)]
+
+
 FAMILY_FUNCTIONS = {'repeat': repeat, 'runs': runs, 'growth': growth, 'numbers': numbers, 'letters': letters,
+                    'shapes': shapes,
                     'arc_step': arc_step,
                     'repeat_all': repeat_all}
 
@@ -417,7 +463,7 @@ def predictions(puzzle: SequencePuzzle, families: Sequence[str] = FAMILIES,
 
     def run(name):
         try:
-            if name in ('numbers', 'letters'):
+            if name in ('numbers', 'letters', 'shapes'):
                 found = FAMILY_FUNCTIONS[name](puzzle.panels, puzzle.blanks, symbols)
             elif puzzle.missing:
                 found = []                  # the other families continue a complete row

@@ -122,6 +122,26 @@ class TestLetterLessons(unittest.TestCase):
         self.assertEqual(m.recognise(glyph(STYLE_A['0']), 'upper'), 'C')
 
 
+class TestShapesAndWords(unittest.TestCase):
+    def test_an_outline_and_a_filled_shape_are_alike(self):
+        filled = np.zeros((30, 30), int)
+        filled[5:25, 5:25] = 1
+        outline = filled.copy()
+        outline[8:22, 8:22] = 0
+        m = SymbolMemory()
+        m.learn(filled, 'square')
+        self.assertEqual(m.recognise(outline, 'shape'), 'square')
+        self.assertLess(m.nearest(outline, 'shape')[1], 0.01)
+
+    def test_a_word_read_by_its_letters(self):
+        m = SymbolMemory()
+        for ch, rows in TestLetterLessons.CAPS_A.items():
+            m.learn(glyph(rows), ch)
+        word = np.hstack([np.pad(glyph(TestLetterLessons.CAPS_A[c]), ((0, 0), (0, 6))) for c in 'BED'])
+        self.assertEqual(m.read_word(word, ['bed', 'bad', 'cab']), 'bed')
+        self.assertIsNone(m.read_word(word, ['circle']))
+
+
 class TestScenes(unittest.TestCase):
     def test_a_numeral_and_copies_of_a_picture(self):
         scene = np.zeros((60, 200), int)

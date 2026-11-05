@@ -61,6 +61,13 @@ Results (sequence_puzzles, symbol_learning and learned_symbols.json as committed
   gain is from the case choice sheet, which is in the same Arial-like style
   as these sheets: the program learned that style from other sheets, not
   to read an unseen one.
+- SHAPE_ITEMS, K5 shapes in patterns 1-4 (28 rows, the next 2 shapes), and
+  the K5 identify sheet shapes-3 (7 rows), shapes cut from the pages and
+  read with shapes learned by shape_lessons: patterns 23/28 right, 5 wrong
+  (each holds a cross or a pentagon, which no lesson taught; they are read
+  as the nearest known shape); identify 7/7. The copies of a shape cut from
+  a page are never identical cell for cell, so without learned shapes the
+  pattern rows are not read (the repeat family finds no repeat).
 
 Run: python children_worksheets.py  (per sheet and per kind of item; -v for every item)
 """
@@ -346,6 +353,9 @@ def panel(token: str) -> np.ndarray:
     if token.startswith('grow:'):
         _, kind, n = token.split(':')
         return growing(kind, int(n))
+    if token.startswith('scell:'):
+        _, k, r, c = token.split(':')
+        return _shape_cells()['patterns'][int(k)][int(r)][int(c)]
     if token.startswith('lcell:'):
         _, k, r, c = token.split(':')
         return _letter_cells()[int(k)][int(r)][int(c)]
@@ -488,6 +498,41 @@ def _letter_cells():
         _letter_cache.extend([[[None if c is None else unpack(c) for c in row] for row in sheet['rows']]
                               for sheet in data['sheets']])
     return _letter_cache
+
+
+SHAPE_CELLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'worksheet_shape_cells.json')
+SHAPE_PATTERN_SHEETS = ['pattern-shapes-1', 'pattern-shapes-2', 'pattern-shapes-3', 'pattern-shapes-4']
+SHAPE_IDENTIFY_SHEET = 'shapes-3'
+SHAPE_URL = 'https://www.k5learning.com/worksheets/kindergarten/{}.pdf'
+_shape_cache: Dict = {}
+
+
+def save_shape_cells(cache: str, path: str = SHAPE_CELLS) -> None:
+    """The shapes of the K5 shape pattern sheets (6 per row) and of the identify sheet (a name, 4 shapes per
+    row), cut from the pages by shape_lessons.table / shapes_in"""
+    import shape_lessons as S
+    from digit_lessons import fetch
+    from symbol_learning import pack
+    patterns = []
+    for name in SHAPE_PATTERN_SHEETS:
+        rows = S.table(S.page(fetch(SHAPE_URL.format(name), cache)))
+        patterns.append([[pack(m) for m in S.shapes_in(row[0])] for row in rows])
+    identify = []
+    for row in S.table(S.page(fetch(SHAPE_URL.format(SHAPE_IDENTIFY_SHEET), cache))):
+        identify.append({'name': pack(S._dark(row[0])), 'shapes': [pack(m) for m in S.shapes_in(row[1])]})
+    with open(path, 'w') as f:
+        json.dump({'source': SHAPE_URL, 'patterns': patterns, 'identify': identify}, f)
+
+
+def _shape_cells() -> Dict:
+    from symbol_learning import unpack
+    if not _shape_cache:
+        with open(SHAPE_CELLS) as f:
+            data = json.load(f)
+        _shape_cache['patterns'] = [[[unpack(c) for c in row] for row in sheet] for sheet in data['patterns']]
+        _shape_cache['identify'] = [{'name': unpack(r['name']), 'shapes': [unpack(c) for c in r['shapes']]}
+                                    for r in data['identify']]
+    return _shape_cache
 
 
 def _number_cells() -> List[List[Optional[np.ndarray]]]:
@@ -776,6 +821,51 @@ for _k, (_sheet, _rows) in enumerate(zip(['K5 order of letters upper 1', 'K5 ord
         LETTER_ITEMS.append(Item(_sheet, _r + 1, 'letters',
                                  ['missing' if ch == '_' else f'lcell:{_k}:{_r}:{i}' for i, ch in enumerate(_row)],
                                  [f'value:{_alphabet[_start + i]}' for i, ch in enumerate(_row) if ch == '_']))
+# "Shapes in patterns" (K5 Learning, 1-4): draw the 2 shapes that come next. The shapes are the sheet's own,
+# cut from the pages (save_shape_cells); the answers (the next two shapes' names) are mine.
+_SHAPE_ROWS = [
+    ['circle triangle', 'diamond square', 'oval triangle', 'star square', 'heart diamond', 'triangle rectangle',
+     'rectangle circle'],
+    ['triangle cross', 'square star', 'circle pentagon', 'hexagon diamond', 'oval triangle', 'square circle',
+     'circle hexagon'],
+    ['square diamond', 'oval circle', 'pentagon star', 'triangle cross', 'rectangle heart', 'star hexagon',
+     'oval rectangle'],
+    ['oval triangle', 'rectangle diamond', 'heart square', 'rectangle star', 'circle cross', 'square heart',
+     'triangle hexagon']]
+SHAPE_ITEMS: List[Item] = [
+    Item(f'K5 shapes in patterns {k + 1}', r + 1, 'shape pattern', [f'scell:{k}:{r}:{i}' for i in range(6)],
+         [f'value:{n}' for n in names.split()])
+    for k, rows in enumerate(_SHAPE_ROWS) for r, names in enumerate(rows)]
+# "Identifying shapes" (K5 shapes-3): a name and four shapes; the answer (mine) is the named shape's place (1-4)
+SHAPE_IDENTIFY_ANSWERS = [2, 2, 4, 1, 3, 1, 4]
+
+
+def run_identify(symbols='learned') -> Dict:
+    """The identify rows: the name read (SymbolMemory.read_word), the answer the shape nearest to that name's
+    examples among those read as it (None if none is)"""
+    from symbol_learning import SHAPES, SymbolMemory
+    if symbols == 'learned':
+        from digit_lessons import LEARNED
+        symbols = SymbolMemory(LEARNED)
+    out = {'right': 0, 'wrong': 0, 'unanswered': 0, 'items': 0, 'results': []}
+    for row, truth in zip(_shape_cells()['identify'], SHAPE_IDENTIFY_ANSWERS):
+        out['items'] += 1
+        name = symbols.read_word(row['name'], SHAPES)
+        answer = None
+        if name is not None:
+            fits = []
+            for i, shape in enumerate(row['shapes']):
+                alts = symbols.alternatives(shape, 'shape', 1)
+                if alts and alts[0][0] == name:
+                    fits.append((alts[0][1], i + 1))
+            if fits:
+                answer = min(fits)[1]
+        outcome = 'no answer' if answer is None else 'right' if answer == truth else 'wrong'
+        out['right' if outcome == 'right' else 'wrong' if outcome == 'wrong' else 'unanswered'] += 1
+        out['results'].append((name, answer, truth, outcome))
+    return out
+
+
 _BUGS = ['ladybug', 'snail', 'sunflower', 'butterfly', 'flower', 'bee', 'spider']
 _TOYS = ['ball', 'drum', 'zebra', 'van', 'turtle', 'top', 'rocket', 'car']
 HELD_OUT += _pics('WSF picture cut and paste 1', ['butterfly flower butterfly flower butterfly | flower',
@@ -889,6 +979,10 @@ def report(summary: Dict):
 if __name__ == '__main__':
     for title, items in (('Sheets seen while writing sequence_puzzles (K5 Learning, Math Worksheets 4 Kids)', ITEMS),
                          ('Held out (worksheetfun.com)', HELD_OUT),
-                         ('Missing letters (K5 Learning order of letters), read with learned letters', LETTER_ITEMS)):
+                         ('Missing letters (K5 Learning order of letters), read with learned letters', LETTER_ITEMS),
+                         ('Shapes in patterns (K5 Learning), read with learned shapes', SHAPE_ITEMS)):
         print(f'== {title}')
         report(run(items, verbose='-v' in sys.argv))
+    found = run_identify()
+    print(f'== Identifying shapes (K5 shapes-3): right {found["right"]}/{found["items"]}, wrong {found["wrong"]}, '
+          f'no answer {found["unanswered"]}')
