@@ -51,6 +51,14 @@ Results (sequence_puzzles, symbol_learning and learned_symbols.json as committed
   reads them with is learned from other sheets only.
 - Without learned symbols (run(..., symbols=None)) the 7 number items are
   wrong, as before.
+- LETTER_ITEMS, K5 "order of letters" (24 rows, fill in the missing
+  letters), cells cut from the pages (letter_rows), read with letters
+  learned by letter_lessons: 21/24 right, 0 wrong, 3 unanswered (73 of the
+  78 given letters read right; the misses: Arial f read as t, b as h).
+  With the round-font printing sheets alone: 12/24 (1 wrong). Most of the
+  gain is from the case choice sheet, which is in the same Arial-like style
+  as these sheets: the program learned that style from other sheets, not
+  to read an unseen one.
 
 Run: python children_worksheets.py  (per sheet and per kind of item; -v for every item)
 """
@@ -336,6 +344,9 @@ def panel(token: str) -> np.ndarray:
     if token.startswith('grow:'):
         _, kind, n = token.split(':')
         return growing(kind, int(n))
+    if token.startswith('lcell:'):
+        _, k, r, c = token.split(':')
+        return _letter_cells()[int(k)][int(r)][int(c)]
     if token.startswith('cell:'):
         _, r, c = token.split(':')
         return _number_cells()[int(r)][int(c)]
@@ -400,6 +411,81 @@ def save_number_cells(pdf_path: str, path: str = NUMBER_CELLS) -> None:
     with open(path, 'w') as f:
         json.dump({'source': NUMBER_SHEET, 'how': 'children_worksheets.number_cells',
                    'rows': [[None if c is None else pack(c) for c in row] for row in rows]}, f)
+
+
+LETTER_CELLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'worksheet_letter_cells.json')
+LETTER_SHEETS = ['kindergarten-order-of-letters-uppercase-1', 'kindergarten-order-of-letters-uppercase-2',
+                 'kindergarten-order-of-letters-lowercase-1', 'kindergarten-order-of-letters-lowercase-2']
+LETTER_URL = 'https://www.k5learning.com/worksheets/{}.pdf'
+_letter_cache: List = []
+
+
+def letter_rows(pdf_path: str) -> List[List[Optional[np.ndarray]]]:
+    """
+    The rows of an "order of letters" sheet (K5 Learning): the page rendered (scale 2), each row a frame wider
+    than most of the page; in it, the underlines are the rows more than 30% ink, the slots the runs of ink
+    over 60 cells long along them; with the underline rows removed, a slot's letter is the ink in its columns
+    (pieces one above another taken together, so a descender or a dot stays with its letter; the
+    underlines' end marks dropped); None for
+    an empty slot
+    """
+    import pypdfium2 as pdfium
+    from symbol_learning import components, ink, symbols_of
+    page = np.array(pdfium.PdfDocument(pdf_path)[0].render(scale=2.0).to_pil().convert('RGB'))
+    mask = ink(page)
+    rows = []
+    frames = sorted(((rs, cs) for rs, cs, m in components(mask)
+                     if cs.stop - cs.start > 0.6 * mask.shape[1] and rs.stop - rs.start > 100),
+                    key=lambda f: f[0].start)
+    for rs, cs in frames:
+        inner = mask[rs.start + 8:rs.stop - 8, cs.start + 8:cs.stop - 8].copy()
+        line_rows = np.nonzero(inner.mean(axis=1) > 0.3)[0]     # the underlines' rows
+        if not len(line_rows):
+            rows.append([])
+            continue
+        y = int(line_rows[len(line_rows) // 2])
+        slots, start = [], None
+        for x, v in enumerate(list(inner[y]) + [False]):
+            if v and start is None:
+                start = x
+            elif not v and start is not None:
+                if x - start > 60:
+                    slots.append((start, x))
+                start = None
+        letters = inner.copy()
+        letters[line_rows.min():line_rows.max() + 1] = False
+        ends = [x for slot in slots for x in slot]
+        for r, c, m in components(letters):     # the underlines' end marks: specks at the ends of the underlines
+            if r.stop - r.start < 20 and c.stop - c.start < 20 and line_rows.min() - 12 <= r.start <= line_rows.max() + 12 \
+                    and min(abs(c.start - x) for x in ends) < 20:
+                letters[r, c] &= ~m
+        row = []
+        for c0, c1 in slots:
+            found = [m for m in symbols_of(letters[:, c0:c1]) if m.shape[0] >= 20]
+            row.append(found[0].astype(int) if len(found) == 1 else None)
+        rows.append(row)
+    return rows
+
+
+def save_letter_cells(cache: str, path: str = LETTER_CELLS) -> None:
+    from digit_lessons import fetch
+    from symbol_learning import pack
+    sheets = []
+    for name in LETTER_SHEETS:
+        rows = letter_rows(fetch(LETTER_URL.format(name), cache))
+        sheets.append({'sheet': name, 'rows': [[None if c is None else pack(c) for c in row] for row in rows]})
+    with open(path, 'w') as f:
+        json.dump({'source': LETTER_URL, 'how': 'children_worksheets.letter_rows', 'sheets': sheets}, f)
+
+
+def _letter_cells():
+    from symbol_learning import unpack
+    if not _letter_cache:
+        with open(LETTER_CELLS) as f:
+            data = json.load(f)
+        _letter_cache.extend([[[None if c is None else unpack(c) for c in row] for row in sheet['rows']]
+                              for sheet in data['sheets']])
+    return _letter_cache
 
 
 def _number_cells() -> List[List[Optional[np.ndarray]]]:
@@ -670,6 +756,24 @@ HELD_OUT += _shapes('WSF trace T35 8', [
     'ellipse tri ellipse tri | ellipse | tri ellipse', 'wrect heart wrect heart | wrect | wrect heart',
     'pentagon circle pentagon circle | pentagon | circle pentagon',
     'octagon rhombus octagon rhombus | octagon | rhombus octagon'])
+# "Order of letters" (K5 Learning, uppercase 1-2, lowercase 1-2): fill in the missing letters of each row. The
+# cells are the sheet's own, cut from the page by letter_rows() and kept in LETTER_CELLS; the answers (the
+# missing letters, left to right) are mine, the alphabet's. Sheets 3 of each case have other layouts, not used.
+_LETTER_ROWS = [
+    ['ABC_E_', 'DEF__I', 'J_LMN_', 'UVW__Z', 'PQ__TU', 'G__JKL'],
+    ['A_C__F', '_EF___', 'R____W', '___XYZ', '_Q__T_', '_H_J__'],
+    ['abc__f', 'jklm__', 'rs__vw', 'e_gh_j', 'lm_o_q', 'tuv__y'],
+    ['ab___f', '__mn_p', 't___xy', '_ef___', 'ij_l__', 'q_s___']]
+LETTER_ITEMS: List[Item] = []
+for _k, (_sheet, _rows) in enumerate(zip(['K5 order of letters upper 1', 'K5 order of letters upper 2',
+                                          'K5 order of letters lower 1', 'K5 order of letters lower 2'], _LETTER_ROWS)):
+    for _r, _row in enumerate(_rows):
+        _alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' if _row.strip('_').isupper() else 'abcdefghijklmnopqrstuvwxyz'
+        _first = next(i for i, ch in enumerate(_row) if ch != '_')
+        _start = _alphabet.index(_row[_first]) - _first
+        LETTER_ITEMS.append(Item(_sheet, _r + 1, 'letters',
+                                 ['missing' if ch == '_' else f'lcell:{_k}:{_r}:{i}' for i, ch in enumerate(_row)],
+                                 [f'value:{_alphabet[_start + i]}' for i, ch in enumerate(_row) if ch == '_']))
 _BUGS = ['ladybug', 'snail', 'sunflower', 'butterfly', 'flower', 'bee', 'spider']
 _TOYS = ['ball', 'drum', 'zebra', 'van', 'turtle', 'top', 'rocket', 'car']
 HELD_OUT += _pics('WSF picture cut and paste 1', ['butterfly flower butterfly flower butterfly | flower',
@@ -740,10 +844,12 @@ def run(items: List[Item] = ITEMS, verbose: bool = False, symbols='learned', **s
         symbols = SymbolMemory(LEARNED) if os.path.exists(LEARNED) else None
     results = []
     for item in items:
-        values = [int(t[6:]) for t in item.answer if t.startswith('value:')]
+        values = [int(t[6:]) if t[6:].isdigit() else t[6:] for t in item.answer if t.startswith('value:')]
         truth = [] if values else [panel(t) for t in item.answer]
         choices = [panel(c) for c in item.choices]
-        puzzle = SequencePuzzle([panel(t) for t in item.given], len(item.answer), choices)
+        given = [None if t == 'missing' else panel(t) for t in item.given]
+        blanks = len(item.answer) - sum(g is None for g in given)
+        puzzle = SequencePuzzle(given, blanks, choices)
         answer = solve(puzzle, symbols=symbols, **solve_kwargs)
         if answer is None:
             outcome = 'no answer'
@@ -780,6 +886,7 @@ def report(summary: Dict):
 
 if __name__ == '__main__':
     for title, items in (('Sheets seen while writing sequence_puzzles (K5 Learning, Math Worksheets 4 Kids)', ITEMS),
-                         ('Held out (worksheetfun.com)', HELD_OUT)):
+                         ('Held out (worksheetfun.com)', HELD_OUT),
+                         ('Missing letters (K5 Learning order of letters), read with learned letters', LETTER_ITEMS)):
         print(f'== {title}')
         report(run(items, verbose='-v' in sys.argv))

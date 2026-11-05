@@ -92,6 +92,36 @@ class TestLessons(unittest.TestCase):
         self.assertEqual(m.recognise(glyph(STYLE_B['5'])), 5)
 
 
+class TestLetterLessons(unittest.TestCase):
+    CAPS_A = {'A': '.###.|#...#|#...#|#####|#...#|#...#|#...#', 'B': '####.|#...#|#...#|####.|#...#|#...#|####.',
+              'C': '.###.|#...#|#....|#....|#....|#...#|.###.', 'D': '####.|#...#|#...#|#...#|#...#|#...#|####.',
+              'E': '#####|#....|#....|####.|#....|#....|#####'}
+    # a second style: heavier strokes drawn as 3 x 3 blocks of the same letters, on a 7 x 7 grid
+    CAPS_B = {'B': '#####..|##..##.|##..##.|#####..|##..##.|##..##.|#####..',
+              'C': '.#####.|##...##|##.....|##.....|##.....|##...##|.#####.'}
+
+    def test_an_anchored_order_places_new_styles(self):
+        m = SymbolMemory()
+        m.learn_in_order([glyph(self.CAPS_A[c]) for c in 'ADE'], list('ADE'))
+        # A, B, C, D in order from an unknown start: A and D fix the start, so B and C are learned
+        row = [glyph(self.CAPS_A['A']), glyph(self.CAPS_B['B']), glyph(self.CAPS_B['C']), glyph(self.CAPS_A['D'])]
+        r = m.learn_by_anchored_order(row, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', domain='upper')
+        self.assertEqual(r, {'outcome': 'learned', 'learned': ['B', 'C']})
+        self.assertEqual(m.recognise(glyph(self.CAPS_B['C']), 'upper'), 'C')
+
+    def test_an_order_with_too_few_anchors_waits(self):
+        m = SymbolMemory()
+        m.learn(glyph(self.CAPS_A['A']), 'A')
+        row = [glyph(self.CAPS_A['A']), glyph(self.CAPS_B['B']), glyph(self.CAPS_B['C'])]
+        self.assertEqual(m.learn_by_anchored_order(row, 'ABCDEFGH', domain='upper')['outcome'], 'pending')
+
+    def test_domains_keep_digits_and_letters_apart(self):
+        m = memory_of(STYLE_A, '0')
+        m.learn(glyph(self.CAPS_A['C']), 'C')
+        self.assertEqual(m.recognise(glyph(STYLE_A['0']), 'digit'), 0)
+        self.assertEqual(m.recognise(glyph(STYLE_A['0']), 'upper'), 'C')
+
+
 class TestScenes(unittest.TestCase):
     def test_a_numeral_and_copies_of_a_picture(self):
         scene = np.zeros((60, 200), int)
@@ -117,6 +147,22 @@ class TestNumberWorksheet(unittest.TestCase):
         cells = cw._number_cells()
         self.assertEqual([[m.read_number(cells[r][c]) for c in range(5)] for r in range(7)], truth)
         self.assertTrue(all(row[5] is None for row in cells))      # the answer boxes are empty
+
+    def test_the_learned_letters_read_the_order_of_letters_sheets(self):
+        import children_worksheets as cw
+        from digit_lessons import LEARNED
+        m = SymbolMemory(LEARNED)
+        cells = cw._letter_cells()
+        right = total = 0
+        for k, rows in enumerate(cw._LETTER_ROWS):
+            for r, row in enumerate(rows):
+                domain = 'upper' if row.strip('_').isupper() else 'lower'
+                for c, ch in enumerate(row):
+                    if ch != '_':
+                        total += 1
+                        right += m.recognise(cells[k][r][c], domain) == ch
+        self.assertEqual(total, 78)
+        self.assertGreaterEqual(right, 73)
 
 
 if __name__ == '__main__':

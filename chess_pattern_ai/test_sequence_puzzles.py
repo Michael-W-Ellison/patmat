@@ -79,6 +79,23 @@ class TestChoices(unittest.TestCase):
         self.assertEqual(answer['choice'], 1)
 
 
+class TestLetters(unittest.TestCase):
+    def test_missing_letters_filled_in_from_the_alphabet(self):
+        from symbol_learning import SymbolMemory
+        m = SymbolMemory()
+        shapes = {}
+        for i, ch in enumerate('ABCDEF'):
+            g = np.zeros((7, 5), int)
+            g[i % 7, :] = 1
+            g[:, i % 5] = 1
+            g[6 - i % 7, (i + 2) % 5] = 1
+            shapes[ch] = np.kron(g, np.ones((4, 4), int))
+            m.learn(shapes[ch], ch)
+        answer = solve(SequencePuzzle([shapes['A'], None, shapes['C'], None, shapes['E']], 1), symbols=m)
+        self.assertEqual(answer['family'], 'letters')
+        self.assertEqual(answer['values'], ['B', 'D', 'F'])
+
+
 class TestWorksheets(unittest.TestCase):
     def test_the_sheets_seen_while_writing_the_reader(self):
         from children_worksheets import ITEMS, run
@@ -91,6 +108,12 @@ class TestWorksheets(unittest.TestCase):
         from children_worksheets import HELD_OUT, run
         summary = run(HELD_OUT, use_slow=False)
         self.assertEqual([(i.sheet, i.number) for i, o, _ in summary['results'] if o != 'right'], [])
+
+    def test_the_missing_letters_sheets(self):
+        from children_worksheets import LETTER_ITEMS, run
+        summary = run(LETTER_ITEMS, use_slow=False)
+        self.assertEqual(summary['wrong'], 0)
+        self.assertGreaterEqual(summary['right'], 21)
 
     def test_without_learned_symbols_the_number_sequences_are_not_read(self):
         from children_worksheets import HELD_OUT, run

@@ -40,6 +40,12 @@ Rule families:
   learned (symbol_learning, digit_lessons; pass symbols=SymbolMemory), the
   numbers going up or down by a fixed step; the next numbers are written
   with the learned digits, and given as 'values' too. Rule size 2.
+- letters: as numbers, with each panel read as a letter (all capitals or
+  all lower case) and its place in the alphabet going up or down by a fixed
+  step; the next letters are given as 'values'.
+Panels may be missing within the row (None: "fill in the missing
+letters"); only numbers and letters fill them in, and the missing panels'
+values come first in 'values', then the blanks'.
 - arc_step: each step from a panel to the next as a training pair for the
   ARC pattern solver (arc_pattern_solver); the last panel is the test input.
   Slow (seconds to minutes), so tried only when the families above predict
@@ -56,22 +62,26 @@ import numpy as np
 
 Array = np.ndarray
 MAX_PREFIX = 1          # repeat: panels before the cycle starts (a train's engine)
-FAMILIES = ('repeat', 'runs', 'growth', 'numbers', 'arc_step', 'repeat_all')
+FAMILIES = ('repeat', 'runs', 'growth', 'numbers', 'letters', 'arc_step', 'repeat_all')
 SLOW = ('arc_step',)
 
 
 @dataclass
 class SequencePuzzle:
-    """panels: the given panels in order; blanks: how many panels come next; choices: candidates for 1 blank"""
-    panels: List[Array]
+    """
+    panels: the given panels in order, None for a missing one ("fill in the missing letters"); blanks: how many
+    panels come next (may be 0 when panels are missing); choices: candidates for 1 blank
+    """
+    panels: List[Optional[Array]]
     blanks: int = 1
     choices: List[Array] = field(default_factory=list)
 
     def __post_init__(self):
-        self.panels = [np.asarray(p, dtype=int) for p in self.panels]
+        self.panels = [None if p is None else np.asarray(p, dtype=int) for p in self.panels]
         self.choices = [np.asarray(c, dtype=int) for c in self.choices]
-        if not self.panels or self.blanks < 1:
-            raise ValueError('a sequence puzzle has at least one panel and one blank')
+        self.missing = [i for i, p in enumerate(self.panels) if p is None]
+        if not self.panels or self.blanks < 0 or (self.blanks == 0 and not self.missing):
+            raise ValueError('a sequence puzzle has at least one panel and something to fill in')
 
 
 def _same(a: Optional[Array], b: Optional[Array]) -> bool:
@@ -265,27 +275,68 @@ def arc_step(panels: List[Array], count: int) -> List[Tuple[str, List[Array]]]:
     return [('ARC: ' + names[0], seq[len(panels):], None)]
 
 
-def numbers(panels: List[Array], count: int, symbols=None) -> List[tuple]:
+def _ordered(panels, count, positions, draw, name):
+    """
+    positions: each given panel's place in an order (a number's value, a letter's place in the alphabet), None
+    for a missing panel; they must go up or down by a fixed step (not 0) from panel to panel. Fills the missing
+    panels and the count next ones: (rule, panels drawn, size 2, places)
+    """
+    known = [(i, v) for i, v in enumerate(positions) if v is not None]
+    if len(known) < 2:
+        return []
+    (i0, v0), (i1, v1) = known[0], known[1]
+    if (v1 - v0) % (i1 - i0):
+        return []
+    step = (v1 - v0) // (i1 - i0)
+    if step == 0 or any(v != v0 + step * (i - i0) for i, v in known):
+        return []
+    wanted = [i for i, v in enumerate(positions) if v is None] + list(range(len(panels), len(panels) + count))
+    places = [v0 + step * (i - i0) for i in wanted]
+    drawn = [draw(v) for v in places]
+    if any(d is None for d in drawn):
+        return []
+    return [(f'{name} going {"up" if step > 0 else "down"} by {abs(step)}', drawn, 2, places)]
+
+
+def numbers(panels: List[Optional[Array]], count: int, symbols=None) -> List[tuple]:
     """
     Each panel read as a number with the learned symbols (symbol_learning.SymbolMemory); the numbers go up or
-    down by a fixed step (not 0: equal numbers are a repeat)
+    down by a fixed step (not 0: equal numbers are a repeat); missing panels are filled in too
     """
-    if symbols is None or len(panels) < 3:
+    given = [p for p in panels if p is not None]
+    if symbols is None or len(given) < 2 or (len(given) < 3 and len(given) == len(panels)):
         return []
-    values = [symbols.read_number(p) for p in panels]
-    if any(v is None for v in values):
+    values = [None if p is None else symbols.read_number(p) for p in panels]
+    if any(v is None for v, p in zip(values, panels) if p is not None):
         return []
-    step = values[1] - values[0]
-    if step == 0 or any(b - a != step for a, b in zip(values, values[1:])):
-        return []
-    nxt = [values[-1] + step * (j + 1) for j in range(count)]
-    if any(v < 0 for v in nxt):
-        return []
-    drawn = [symbols.draw_number(v) for v in nxt]
-    return [(f'numbers going {"up" if step > 0 else "down"} by {abs(step)}', drawn, 2, nxt)]
+    found = _ordered(panels, count, values, lambda v: symbols.draw_number(v) if v >= 0 else None, 'numbers')
+    return found
 
 
-FAMILY_FUNCTIONS = {'repeat': repeat, 'runs': runs, 'growth': growth, 'numbers': numbers, 'arc_step': arc_step,
+def letters(panels: List[Optional[Array]], count: int, symbols=None) -> List[tuple]:
+    """
+    Each panel read as a letter with the learned symbols, all capitals or all lower case; their places in the
+    alphabet go up or down by a fixed step; missing panels are filled in too. Values: the letters
+    """
+    from symbol_learning import UPPER, LOWER
+    given = [p for p in panels if p is not None]
+    if symbols is None or len(given) < 2 or (len(given) < 3 and len(given) == len(panels)):
+        return []
+    for domain, alphabet in (('upper', UPPER), ('lower', LOWER)):
+        read = [None if p is None else symbols.read_letter(p, domain) for p in panels]
+        if any(r is None for r, p in zip(read, panels) if p is not None):
+            continue
+        places = [None if r is None else alphabet.index(r) for r in read]
+        found = _ordered(panels, count, places,
+                         lambda v: symbols.draw([alphabet[v]]) if 0 <= v < len(alphabet) else None, 'letters')
+        if found:
+            rule, drawn, size, at = found[0]
+            return [(rule, drawn, size, [alphabet[v] for v in at])]
+    return []
+
+
+FAMILY_FUNCTIONS = {'repeat': repeat, 'runs': runs, 'growth': growth, 'numbers': numbers, 'letters': letters,
+                    'arc_step': arc_step,
                     'repeat_all': repeat_all}
 
 
@@ -301,8 +352,10 @@ def predictions(puzzle: SequencePuzzle, families: Sequence[str] = FAMILIES,
 
     def run(name):
         try:
-            if name == 'numbers':
-                found = numbers(puzzle.panels, puzzle.blanks, symbols)
+            if name in ('numbers', 'letters'):
+                found = FAMILY_FUNCTIONS[name](puzzle.panels, puzzle.blanks, symbols)
+            elif puzzle.missing:
+                found = []                  # the other families continue a complete row
             else:
                 found = FAMILY_FUNCTIONS[name](puzzle.panels, puzzle.blanks)
         except Exception:

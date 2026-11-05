@@ -24,6 +24,15 @@ Lessons (each returns what it learned, or why it learned nothing):
   to be paired ("count and match"). Confidently recognised numerals are
   paired with their counts; when one numeral and one count are left, the
   numeral is learned as that count.
+- order lesson (learn_in_order): symbols shown in a known order (a series
+  of sheets one per letter, A to Z) mean the names in that order.
+- anchored order lesson (learn_by_anchored_order): symbols consecutive in a
+  known order from an unknown start (capitals down the rows of a sheet set,
+  A to Z): the start is fixed by symbols already recognised (at least two
+  agreeing, none disagreeing), and the others are learned by their place.
+- case lessons: lower case letters to be matched with capitals (one of
+  several, or a column of them, shuffled): once the capitals are recognised,
+  as choice and matching lessons with the capitals' lower case names.
 Lessons that cannot yet be decided are kept (teach) and tried again once
 other lessons have taught more, so knowledge spreads from symbols known in
 one style to the same symbols in other styles.
@@ -31,8 +40,13 @@ one style to the same symbols in other styles.
 Recognition: an ink image is cropped to its ink, scaled into a SIZE x SIZE
 square keeping its proportions, and blurred; the nearest stored example
 (mean absolute difference) gives the meaning when nearer than REJECT, else
-the symbol is unknown (None). Lessons rule a numeral out only when its
-nearest example is nearer than CONFIDENT.
+the symbol is unknown (None). Lessons rely only on recognitions made with
+confidence: the nearest example nearer than CONFIDENT, or nearer by MARGIN
+than any example of another meaning (MARGIN was chosen on the capitals of
+the case choice sheets, letter_lessons: it keeps 13 of 26, all right).
+Ruling a symbol out uses CONFIDENT alone (strict): with the margin, two
+handwritten digits were ruled out wrongly and the other numeral taught
+under their count.
 
 Reading: read(panel) splits a panel into symbols (connected ink, left to
 right) and recognises each; read_number() makes a number of digits by
@@ -55,7 +69,8 @@ import numpy as np
 
 SIZE = 16               # recognition: symbols compared at SIZE x SIZE
 REJECT = 0.22           # recognition: nearest example further than this -> unknown
-CONFIDENT = 0.10        # lessons: a numeral is ruled out only when recognised nearer than this
+CONFIDENT = 0.10        # lessons: a symbol is recognised with confidence when nearer than this,
+MARGIN = 0.06           # ... or (nearer than REJECT and) nearer by this than any example of another meaning
 GAP = 3                 # blobs: parts of one blob may be this many cells apart
 DARK = 160              # ink: luminance below this (0..255)
 COLOURED = 60           # ink: or saturation (max - min channel) above this
@@ -96,11 +111,12 @@ def components(mask: np.ndarray) -> List[Tuple[slice, slice, np.ndarray]]:
 
 
 def is_frame(m: np.ndarray) -> bool:
-    """A rectangular outline (possibly with rounded corners or a shadow): most of its box border is ink and
+    """A rectangular outline (possibly with rounded corners or a shadow): most of its box border (the outer 3
+    cells of each side) is ink and
     the inside of the box (a margin of 15% in from each side) is nearly empty"""
     if min(m.shape) < 12:
         return False
-    border = np.concatenate([m[0], m[-1], m[:, 0], m[:, -1]])
+    border = np.concatenate([m[:3].any(axis=0), m[-3:].any(axis=0), m[:, :3].any(axis=1), m[:, -3:].any(axis=1)])
     dy, dx = max(2, m.shape[0] * 15 // 100), max(2, m.shape[1] * 15 // 100)
     return border.mean() >= FRAME and m[dy:-dy, dx:-dx].mean() < 0.05
 
@@ -247,6 +263,45 @@ def unpack(packed: Dict) -> np.ndarray:
                     dtype=int).reshape(len(packed['rows']), w)
 
 
+UPPER = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+LOWER = UPPER.lower()
+
+
+def in_domain(meaning, domain: Optional[str]) -> bool:
+    if domain is None:
+        return True
+    if domain == 'digit':
+        return isinstance(meaning, int) and not isinstance(meaning, bool) and 0 <= meaning <= 9
+    if not isinstance(meaning, str) or len(meaning) != 1:
+        return False
+    return {'upper': meaning in UPPER, 'lower': meaning in LOWER, 'letter': meaning in UPPER + LOWER}[domain]
+
+
+def symbols_of(panel) -> List[np.ndarray]:
+    """A panel's symbols, left to right: its connected pieces of ink, pieces overlapping in columns (one above
+    another: the dot of an i or j) taken together"""
+    mask = ink(panel)
+    pieces = sorted(components(mask), key=lambda c: c[1].start)
+    groups: List[List] = []
+    for rs, cs, m in pieces:
+        if groups:
+            g0, g1 = min(p[1].start for p in groups[-1]), max(p[1].stop for p in groups[-1])
+            overlap = min(g1, cs.stop) - max(g0, cs.start)
+            if overlap > 0.5 * min(g1 - g0, cs.stop - cs.start):
+                groups[-1].append((rs, cs, m))
+                continue
+        groups.append([(rs, cs, m)])
+    out = []
+    for g in groups:
+        r0, c0 = min(p[0].start for p in g), min(p[1].start for p in g)
+        r1, c1 = max(p[0].stop for p in g), max(p[1].stop for p in g)
+        m = np.zeros((r1 - r0, c1 - c0), bool)
+        for rs, cs, pm in g:
+            m[rs.start - r0:rs.stop - r0, cs.start - c0:cs.stop - c0] |= pm
+        out.append(m)
+    return out
+
+
 # ------------------------------------------------------------------ the memory
 
 class SymbolMemory:
@@ -277,6 +332,40 @@ class SymbolMemory:
                               'ink': pack(mask), 'source': source})
         self._cache = None
 
+    def learn_in_order(self, symbols: Sequence[np.ndarray], names: Sequence, source: str = '') -> Dict:
+        """An order lesson: symbols shown in a known order (the alphabet on a chart, or a series of sheets one
+        per letter) mean the names in that order"""
+        if len(symbols) != len(names):
+            return {'outcome': 'not a lesson', 'why': f'{len(symbols)} symbols, {len(names)} names'}
+        for image, name in zip(symbols, names):
+            self.learn(image, name, source)
+        return {'outcome': 'learned', 'learned': list(names)}
+
+    def learn_by_anchored_order(self, symbols: Sequence[np.ndarray], names: Sequence, source: str = '',
+                                domain: Optional[str] = None, anchors: int = 2) -> Dict:
+        """
+        symbols are consecutive in the order names (letters down a page in alphabetical order), starting
+        somewhere unknown: the start is the one where at least anchors symbols recognised with confidence agree
+        and none disagree; the others are then learned by their place
+        """
+        known = [self.confident(s, domain) for s in symbols]
+        fits = []
+        for start in range(len(names) - len(symbols) + 1):
+            agree = sum(k == names[start + i] for i, k in enumerate(known) if k is not None)
+            disagree = sum(k != names[start + i] for i, k in enumerate(known) if k is not None)
+            if agree >= anchors and not disagree:
+                fits.append(start)
+        if len(fits) != 1:
+            return {'outcome': 'pending' if not fits else 'contradiction',
+                    'why': f'{len(fits)} places in the order fit {known}'}
+        start = fits[0]
+        learned = []
+        for i, (s, k) in enumerate(zip(symbols, known)):
+            if k is None:
+                self.learn(s, names[start + i], source)
+                learned.append(names[start + i])
+        return {'outcome': 'learned' if learned else 'confirmed', 'learned': learned}
+
     def learn_by_counting(self, numerals: Sequence[np.ndarray], count: int, source: str = '') -> Dict:
         """numerals (left to right) mean count; see the module docstring"""
         digits = str(count)
@@ -285,7 +374,7 @@ class SymbolMemory:
         if len(numerals) == 1:
             self.learn(numerals[0], count, source)
             return {'outcome': 'learned', 'learned': [count]}
-        known = [self.confident(s) for s in numerals]
+        known = [self.confident(s, 'digit', strict=True) for s in numerals]
         if any(k is not None and str(k) != d for k, d in zip(known, digits)):
             return {'outcome': 'contradiction', 'why': f'read {known} for {count}'}
         unknown = [i for i, k in enumerate(known) if k is None]
@@ -295,29 +384,30 @@ class SymbolMemory:
         self.learn(numerals[i], int(digits[i]), source)
         return {'outcome': 'learned', 'learned': [int(digits[i])]}
 
-    def learn_by_choice(self, numerals: Sequence[np.ndarray], count: int, source: str = '') -> Dict:
-        """One of numerals means count; see the module docstring"""
-        known = [self.confident(s) for s in numerals]
-        possible = [i for i, k in enumerate(known) if k is None or k == count]
+    def learn_by_choice(self, symbols: Sequence[np.ndarray], meaning, source: str = '', domain: str = 'digit') -> Dict:
+        """One of symbols means meaning (a count, or the lower case of a letter); see the module docstring"""
+        known = [self.confident(s, domain, strict=True) for s in symbols]
+        possible = [i for i, k in enumerate(known) if k is None or k == meaning]
         if not possible:
-            return {'outcome': 'contradiction', 'why': f'read {known}, count {count}'}
+            return {'outcome': 'contradiction', 'why': f'read {known}, wanted {meaning}'}
         if len(possible) > 1:
-            return {'outcome': 'pending', 'why': f'{len(possible)} numerals possible'}
-        self.learn(numerals[possible[0]], count, source)
-        return {'outcome': 'learned' if known[possible[0]] is None else 'confirmed', 'learned': [count]}
+            return {'outcome': 'pending', 'why': f'{len(possible)} symbols possible'}
+        self.learn(symbols[possible[0]], meaning, source)
+        return {'outcome': 'learned' if known[possible[0]] is None else 'confirmed', 'learned': [meaning]}
 
-    def learn_by_matching(self, numerals: Sequence[np.ndarray], counts: Sequence[int], source: str = '') -> Dict:
-        """numerals and counts pair up one to one; see the module docstring"""
-        if len(numerals) != len(counts):
-            return {'outcome': 'not a lesson', 'why': f'{len(numerals)} numerals, {len(counts)} counts'}
-        left = list(counts)
+    def learn_by_matching(self, symbols: Sequence[np.ndarray], meanings: Sequence, source: str = '',
+                          domain: str = 'digit') -> Dict:
+        """symbols and meanings pair up one to one; see the module docstring"""
+        if len(symbols) != len(meanings):
+            return {'outcome': 'not a lesson', 'why': f'{len(symbols)} symbols, {len(meanings)} meanings'}
+        left = list(meanings)
         unknown = []
-        for s in numerals:
-            k = self.confident(s)
+        for s in symbols:
+            k = self.confident(s, domain, strict=True)
             if k is not None and k in left:
                 left.remove(k)
             elif k is not None:
-                return {'outcome': 'contradiction', 'why': f'read {k}, counts {list(counts)}'}
+                return {'outcome': 'contradiction', 'why': f'read {k}, meanings {list(meanings)}'}
             else:
                 unknown.append(s)
         if len(unknown) != 1:
@@ -325,11 +415,22 @@ class SymbolMemory:
         self.learn(unknown[0], left[0], source)
         return {'outcome': 'learned', 'learned': [left[0]]}
 
+    def _case_meanings(self, capitals: Sequence[np.ndarray]) -> Optional[List[str]]:
+        known = [self.confident(c, 'upper') for c in capitals]
+        return None if any(k is None for k in known) else [k.lower() for k in known]
+
     def teach(self, lessons: Sequence[Dict], passes: int = 4) -> List[Dict]:
         """
-        Run lessons ({'kind': 'counting' | 'choice' | 'matching', 'numerals', 'count' or 'counts', 'source'})
-        until none teaches more (at most passes times over those still pending); returns each lesson's
-        final outcome
+        Run lessons until none teaches more (at most passes times over those still pending); returns each
+        lesson's final outcome. A lesson is {'kind', 'source', ...}:
+          counting       'numerals', 'count'
+          choice         'numerals', 'count' (one numeral is the count)
+          matching       'numerals', 'counts' (paired one to one)
+          order          'symbols', 'names' (in that order)
+          anchored order 'symbols', 'names', 'domain' (consecutive in names, from a start to be found)
+          case choice    'capital', 'symbols' (one symbol is the capital's lower case)
+          case matching  'capitals', 'symbols' (each symbol is one capital's lower case)
+        The case lessons wait until their capitals are recognised with confidence.
         """
         outcomes: List[Optional[Dict]] = [None] * len(lessons)
         todo = list(range(len(lessons)))
@@ -338,12 +439,34 @@ class SymbolMemory:
             still = []
             for i in todo:
                 l = lessons[i]
-                if l['kind'] == 'counting':
-                    r = self.learn_by_counting(l['numerals'], l['count'], l.get('source', ''))
-                elif l['kind'] == 'choice':
-                    r = self.learn_by_choice(l['numerals'], l['count'], l.get('source', ''))
+                src = l.get('source', '')
+                kind = l['kind']
+                if kind == 'counting':
+                    r = self.learn_by_counting(l['numerals'], l['count'], src)
+                elif kind == 'choice':
+                    r = self.learn_by_choice(l['numerals'], l['count'], src)
+                elif kind == 'matching':
+                    r = self.learn_by_matching(l['numerals'], l['counts'], src)
+                elif kind == 'order':
+                    r = self.learn_in_order(l['symbols'], l['names'], src)
+                elif kind == 'anchored order':
+                    r = self.learn_by_anchored_order(l['symbols'], l['names'], src, l.get('domain'))
+                elif kind in ('case choice', 'case matching'):
+                    lower = self._case_meanings([l['capital']] if kind == 'case choice' else l['capitals'])
+                    if lower is None:
+                        r = {'outcome': 'pending', 'why': 'a capital not recognised'}
+                    else:
+                        if kind == 'case choice':
+                            r = self.learn_by_choice(l['symbols'], lower[0], src, 'lower')
+                        else:
+                            r = self.learn_by_matching(l['symbols'], lower, src, 'lower')
+                        if r['outcome'] in ('learned', 'confirmed') and not l.get('capitals learned'):
+                            # the lesson agreed with the capitals as recognised: one more example of each
+                            for c, k in zip([l['capital']] if kind == 'case choice' else l['capitals'], lower):
+                                self.learn(c, k.upper(), src)
+                            l['capitals learned'] = True
                 else:
-                    r = self.learn_by_matching(l['numerals'], l['counts'], l.get('source', ''))
+                    raise ValueError(kind)
                 outcomes[i] = r
                 if r['outcome'] in ('learned', 'confirmed'):
                     progress = progress or r['outcome'] == 'learned'
@@ -362,46 +485,76 @@ class SymbolMemory:
                            if self.examples else np.zeros((0, SIZE * SIZE)))
         return self._cache
 
-    def nearest(self, image) -> Tuple[Optional[object], float]:
-        """(meaning of the nearest example, its distance); (None, inf) with no examples"""
-        if not self.examples:
+    def nearest(self, image, domain: Optional[str] = None) -> Tuple[Optional[object], float]:
+        """
+        (meaning of the nearest example, its distance), among the examples whose meaning is in domain ('digit',
+        'upper', 'lower', 'letter'; None: all); (None, inf) without such examples
+        """
+        keep = [i for i, e in enumerate(self.examples) if in_domain(e['meaning'], domain)]
+        if not keep:
             return None, float('inf')
-        d = np.abs(self._matrix() - normalise(ink(image)).reshape(1, -1)).mean(axis=1)
+        d = np.abs(self._matrix()[keep] - normalise(ink(image)).reshape(1, -1)).mean(axis=1)
         i = int(d.argmin())
-        return self.examples[i]['meaning'], float(d[i])
+        return self.examples[keep[i]]['meaning'], float(d[i])
 
-    def recognise(self, image):
-        meaning, distance = self.nearest(image)
+    def recognise(self, image, domain: Optional[str] = None):
+        meaning, distance = self.nearest(image, domain)
         return meaning if distance <= REJECT else None
 
-    def confident(self, image):
-        meaning, distance = self.nearest(image)
-        return meaning if distance <= CONFIDENT else None
+    def confident(self, image, domain: Optional[str] = None, strict: bool = False):
+        """
+        The meaning when it is recognised with confidence: its nearest example nearer than CONFIDENT, or (not
+        strict) nearer than REJECT and nearer by MARGIN than the nearest example of any other meaning; else
+        None. Ruling a symbol out (choice, matching and place value lessons) is strict: a symbol of a new
+        style may be nearer to another meaning's examples by a margin; placing symbols in an order (where
+        two or more must agree) and recognising capitals in case lessons are not
+        """
+        keep = [i for i, e in enumerate(self.examples) if in_domain(e['meaning'], domain)]
+        if not keep:
+            return None
+        d = np.abs(self._matrix()[keep] - normalise(ink(image)).reshape(1, -1)).mean(axis=1)
+        best = int(d.argmin())
+        meaning = self.examples[keep[best]]['meaning']
+        if d[best] <= CONFIDENT:
+            return meaning
+        if strict:
+            return None
+        others = [d[j] for j, i in enumerate(keep) if self.examples[i]['meaning'] != meaning]
+        if d[best] <= REJECT and (not others or min(others) - d[best] >= MARGIN):
+            return meaning
+        return None
 
-    def read(self, panel) -> Optional[List]:
-        """The meanings of a panel's symbols, left to right; None if the panel is empty or a symbol is unknown"""
-        mask = ink(panel)
-        if not mask.any():
+    def read(self, panel, domain: Optional[str] = None) -> Optional[List]:
+        """
+        The meanings of a panel's symbols, left to right (pieces one above another, as the dot of an i, are one
+        symbol); None if the panel is empty or a symbol is unknown
+        """
+        symbols = symbols_of(panel)
+        if not symbols:
             return None
         out = []
-        for _, _, m in sorted(components(mask), key=lambda c: c[1].start):
-            meaning = self.recognise(m)
+        for m in symbols:
+            meaning = self.recognise(m, domain)
             if meaning is None:
                 return None
             out.append(meaning)
         return out
 
     def read_number(self, panel) -> Optional[int]:
-        symbols = self.read(panel)
-        if not symbols or not all(isinstance(s, int) and not isinstance(s, bool) and 0 <= s <= 9 for s in symbols):
+        symbols = self.read(panel, 'digit')
+        if not symbols:
             return None
         return int(''.join(str(s) for s in symbols))
 
-    def draw_number(self, value: int) -> Optional[np.ndarray]:
-        """A panel showing value, written with the first stored example of each digit (bottoms aligned)"""
+    def read_letter(self, panel, domain: str = 'letter') -> Optional[str]:
+        symbols = self.read(panel, domain)
+        return symbols[0] if symbols and len(symbols) == 1 else None
+
+    def draw(self, meanings: Sequence) -> Optional[np.ndarray]:
+        """A panel showing the meanings side by side, each written as its first stored example (bottoms aligned)"""
         glyphs = []
-        for ch in str(value):
-            example = next((e for e in self.examples if e['meaning'] == int(ch)), None)
+        for meaning in meanings:
+            example = next((e for e in self.examples if e['meaning'] == meaning), None)
             if example is None:
                 return None
             glyphs.append(unpack(example['ink']))
@@ -410,3 +563,7 @@ class SymbolMemory:
         for g in glyphs:
             parts += [np.pad(g, ((h - g.shape[0], 0), (0, 0))), np.zeros((h, 2), int)]
         return np.hstack(parts[:-1])
+
+    def draw_number(self, value: int) -> Optional[np.ndarray]:
+        """A panel showing value, written with the first stored example of each digit"""
+        return self.draw([int(ch) for ch in str(value)])

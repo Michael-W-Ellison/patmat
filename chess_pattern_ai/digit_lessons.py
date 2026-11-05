@@ -19,18 +19,17 @@ Sheets, in teaching order:
   groups and five numerals on a sheet, to be paired (matching lessons).
 
 Results (as committed): the tracing sheets teach 0-9 in one type style
-(0 by place value from the 10 sheet); the K5 sheets confirm or add 2nd and
-3rd styles of 1-6 and 8 (one 4 and one 1 learned by elimination); the
-handwritten-style cards stay undecided (nothing in them is recognised
-confidently), and two scenes whose counts were wrong (touching pictures)
-end in contradictions and teach nothing. Read with the learned examples,
-the 61 digits of the worksheetfun number-sequence sheet (a type style not
-among the lessons) are all right (smallest margin over the nearest wrong
-digit 0.02, on distances of about 0.1); with the tracing sheets' examples
-alone, 46/61.
+(0 by place value from the 10 sheet); the K5 sheets confirm 2nd styles of
+2-6 and 8 and teach one 4 by elimination; the handwritten-style cards stay
+undecided (nothing in them is recognised strictly enough to rule it out),
+and scenes whose counts may be wrong (one picture, uneven pictures) are
+skipped. Read with the learned examples, the 35 numbers of the
+worksheetfun number-sequence sheet (a type style not among the lessons) are
+all right; with the tracing sheets' examples alone, 26/35.
 
 A scene is not taught from when its count is unsure (pictures of uneven
-size: two touching pictures read as one, or one picture in two parts) or
+size: two touching pictures read as one, or one picture in two parts; a
+single picture blob, which may be touching copies) or
 it has an unexpected number of numerals.
 
 Run: python digit_lessons.py [cache directory]  (downloads the sheets once, teaches a new memory, saves it to
@@ -106,6 +105,8 @@ def _doubt(pictures, numerals, numerals_wanted) -> str:
         return f'{len(numerals)} numerals, not {numerals_wanted}'
     if not pictures:
         return 'no pictures'
+    if len(pictures) == 1:
+        return 'one picture: one, or touching copies of it, cannot be told apart'
     sizes = [int(p.sum()) for p in pictures]
     if max(sizes) > UNEVEN * min(sizes):
         return f'pictures of uneven size ({min(sizes)} to {max(sizes)} cells of ink): count unsure'
