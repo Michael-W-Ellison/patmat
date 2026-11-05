@@ -36,6 +36,29 @@ Rule families:
   step are those of the step before, each moved by its own fixed amount (a
   caterpillar's new segments one segment further along; a tower's new floor
   on top). Needs three panels.
+- numbers: each panel read as a number with symbols the program has
+  learned (symbol_learning, digit_lessons; pass symbols=SymbolMemory), the
+  numbers going up or down by a fixed step; the next numbers are written
+  with the learned digits, and given as 'values' too. Rule size 2.
+  Read in context: of each symbol's 3 likeliest meanings (within REJECT),
+  the reading of the row that goes by a fixed step at the smallest total
+  distance (a 7 read as 1 is put right by its neighbours). The rule's size
+  is 2 plus that distance, so a row read as letters and as numbers is taken
+  as the one it reads as better.
+- letters: as numbers, with each panel read as a letter (all capitals or
+  all lower case) and its place in the alphabet going up or down by a fixed
+  step; the next letters are given as 'values'.
+Panels may be missing within the row (None: "fill in the missing
+letters"); only numbers and letters fill them in, and the missing panels'
+values come first in 'values', then the blanks'.
+- shapes: each panel read as the name of its shape (learned: shape_lessons),
+  so copies of a shape drawn a little differently (cut from a page) are the
+  same; the names repeat as in repeat (rule size + 1 + reading distance).
+  Panels of one name must be copies of one drawing (alike in ink, size and
+  colours: SAME_DRAWING, SAME_SIZE): names do not merge two pictures, sizes
+  or colours that the panels tell apart.
+- colours: panels in colour (cut from a page, RGB) read as the names of
+  their colours (learned: colour_lessons); the names repeat as in repeat.
 - arc_step: each step from a panel to the next as a training pair for the
   ARC pattern solver (arc_pattern_solver); the last panel is the test input.
   Slow (seconds to minutes), so tried only when the families above predict
@@ -52,26 +75,34 @@ import numpy as np
 
 Array = np.ndarray
 MAX_PREFIX = 1          # repeat: panels before the cycle starts (a train's engine)
-FAMILIES = ('repeat', 'runs', 'growth', 'arc_step', 'repeat_all')
+SAME_DRAWING = 0.1      # shapes: panels of one name differ in normalised ink by at most this (copies on a page: 0.094)
+SAME_SIZE = 0.15        # shapes: ... and in height and width by at most this share
+FIRST_CHOICES = 1 / 3   # numbers, letters: share of given panels to be read in context as their likeliest reading
+                        # (chosen on validation items of training writers: handwriting_lessons)
+FAMILIES = ('repeat', 'runs', 'growth', 'numbers', 'letters', 'shapes', 'colours', 'arc_step', 'repeat_all')
 SLOW = ('arc_step',)
 
 
 @dataclass
 class SequencePuzzle:
-    """panels: the given panels in order; blanks: how many panels come next; choices: candidates for 1 blank"""
-    panels: List[Array]
+    """
+    panels: the given panels in order, None for a missing one ("fill in the missing letters"); blanks: how many
+    panels come next (may be 0 when panels are missing); choices: candidates for 1 blank
+    """
+    panels: List[Optional[Array]]
     blanks: int = 1
     choices: List[Array] = field(default_factory=list)
 
     def __post_init__(self):
-        self.panels = [np.asarray(p, dtype=int) for p in self.panels]
+        self.panels = [None if p is None else np.asarray(p, dtype=int) for p in self.panels]
         self.choices = [np.asarray(c, dtype=int) for c in self.choices]
-        if not self.panels or self.blanks < 1:
-            raise ValueError('a sequence puzzle has at least one panel and one blank')
+        self.missing = [i for i, p in enumerate(self.panels) if p is None]
+        if not self.panels or self.blanks < 0 or (self.blanks == 0 and not self.missing):
+            raise ValueError('a sequence puzzle has at least one panel and something to fill in')
 
 
-def _same(a: Array, b: Array) -> bool:
-    return a.shape == b.shape and np.array_equal(a, b)
+def _same(a: Optional[Array], b: Optional[Array]) -> bool:
+    return a is not None and b is not None and a.shape == b.shape and np.array_equal(a, b)
 
 
 def _symbols(panels: Sequence[Array]) -> List[int]:
@@ -261,25 +292,224 @@ def arc_step(panels: List[Array], count: int) -> List[Tuple[str, List[Array]]]:
     return [('ARC: ' + names[0], seq[len(panels):], None)]
 
 
-FAMILY_FUNCTIONS = {'repeat': repeat, 'runs': runs, 'growth': growth, 'arc_step': arc_step,
+def _ordered(panels, count, positions, draw, name):
+    """
+    positions: each given panel's place in an order (a number's value, a letter's place in the alphabet), None
+    for a missing panel; they must go up or down by a fixed step (not 0) from panel to panel. Fills the missing
+    panels and the count next ones: (rule, panels drawn, size 2, places)
+    """
+    known = [(i, v) for i, v in enumerate(positions) if v is not None]
+    if len(known) < 2:
+        return []
+    (i0, v0), (i1, v1) = known[0], known[1]
+    if (v1 - v0) % (i1 - i0):
+        return []
+    step = (v1 - v0) // (i1 - i0)
+    if step == 0 or any(v != v0 + step * (i - i0) for i, v in known):
+        return []
+    wanted = [i for i, v in enumerate(positions) if v is None] + list(range(len(panels), len(panels) + count))
+    places = [v0 + step * (i - i0) for i in wanted]
+    drawn = [draw(v) for v in places]
+    if any(d is None for d in drawn):
+        return []
+    return [(f'{name} going {"up" if step > 0 else "down"} by {abs(step)}', drawn, 2, places)]
+
+
+def _in_context(options: List[Optional[List[Tuple[int, float]]]]):
+    """
+    Reading in context: options holds, for each panel, its possible places in the order with their reading
+    distances (None for a missing panel). The start and step (not 0) that give every given panel one of its
+    places, at the smallest total distance: the places chosen ([None for missing panels]), or None
+    """
+    known = [i for i, o in enumerate(options) if o is not None]
+    if len(known) < 2 or any(not options[i] for i in known):
+        return None
+    i0, i1 = known[0], known[1]
+    fits = []
+    for v0, c0 in options[i0]:
+        for v1, c1 in options[i1]:
+            if (v1 - v0) % (i1 - i0):
+                continue
+            step = (v1 - v0) // (i1 - i0)
+            if step == 0:
+                continue
+            total, places = c0 + c1, {i0: v0, i1: v1}
+            for i in known[2:]:
+                want = v0 + step * (i - i0)
+                cost = next((c for v, c in options[i] if v == want), None)
+                if cost is None:
+                    break
+                total += cost
+                places[i] = want
+            else:
+                fits.append((total, [places.get(i) for i in range(len(options))]))
+    if not fits:
+        return None
+    fits.sort(key=lambda f: f[0])
+    places = fits[0][1]
+    # most given panels must be read as their likeliest reading: a row put together from second choices is
+    # too unsure to answer
+    firsts = sum(places[i] == options[i][0][0] for i in known)
+    if firsts < FIRST_CHOICES * len(known):
+        return None
+    return places, fits[0][0]
+
+
+def numbers(panels: List[Optional[Array]], count: int, symbols=None) -> List[tuple]:
+    """
+    Each panel read as a number with the learned symbols (symbol_learning.SymbolMemory); the numbers go up or
+    down by a fixed step (not 0: equal numbers are a repeat); missing panels are filled in too. Panels are
+    read in context: of each symbol's few likeliest readings, those that make the row go by a fixed step
+    """
+    given = [p for p in panels if p is not None]
+    if symbols is None or len(given) < 2 or (len(given) < 3 and len(given) == len(panels)):
+        return []
+    options = []
+    for p in panels:
+        if p is None:
+            options.append(None)
+            continue
+        seen = {}
+        for meanings, cost in symbols.readings(p, 'digit'):
+            value = int(''.join(str(m) for m in meanings))
+            seen.setdefault(value, cost)
+        options.append(sorted(seen.items(), key=lambda e: e[1]))
+    fit = _in_context(options)
+    if fit is None:
+        return []
+    values, cost = fit
+    return [(rule, drawn, size + cost, at) for rule, drawn, size, at in
+            _ordered(panels, count, values, lambda v: symbols.draw_number(v) if v >= 0 else None, 'numbers')]
+
+
+def letters(panels: List[Optional[Array]], count: int, symbols=None) -> List[tuple]:
+    """
+    Each panel read as a letter with the learned symbols, all capitals or all lower case; their places in the
+    alphabet go up or down by a fixed step; missing panels are filled in too; read in context as numbers are.
+    Values: the letters
+    """
+    from symbol_learning import UPPER, LOWER
+    given = [p for p in panels if p is not None]
+    if symbols is None or len(given) < 2 or (len(given) < 3 and len(given) == len(panels)):
+        return []
+    out = []
+    for domain, alphabet in (('upper', UPPER), ('lower', LOWER)):
+        options = []
+        for p in panels:
+            if p is None:
+                options.append(None)
+                continue
+            options.append([(alphabet.index(r[0]), c) for r, c in symbols.readings(p, domain) if len(r) == 1])
+        fit = _in_context(options)
+        if fit is None:
+            continue
+        places, cost = fit
+        found = _ordered(panels, count, places,
+                         lambda v, a=alphabet: symbols.draw([a[v]]) if 0 <= v < len(a) else None, 'letters')
+        out += [(rule, drawn, size + cost, [alphabet[v] for v in at]) for rule, drawn, size, at in found]
+    return sorted(out, key=lambda e: e[2])[:1]          # capitals or lower case: the better reading
+
+
+def shapes(panels: List[Optional[Array]], count: int, symbols=None) -> List[tuple]:
+    """
+    Each panel read as the name of its shape with the learned symbols (domain 'shape': by silhouette, so
+    copies of a shape need not be drawn alike); the names repeat as in repeat. Values: the next names
+    """
+    if symbols is None or any(p is None for p in panels):
+        return []
+    names, cost = [], 0.0
+    for p in panels:
+        alts = symbols.alternatives(p, 'shape', 1)
+        if not alts:
+            return []
+        names.append(alts[0][0])
+        cost += alts[0][1]
+    # panels given one name must be copies of one drawing: alike in ink, size and colours (else the names would
+    # merge what the panels themselves tell apart: two pictures, two sizes, two colours)
+    from symbol_learning import ink, normalise
+    looks = [normalise(ink(p)) for p in panels]
+    for i in range(len(panels)):
+        for j in range(i + 1, len(panels)):
+            if names[i] != names[j]:
+                continue
+            a, b = panels[i], panels[j]
+            if np.abs(looks[i] - looks[j]).mean() > SAME_DRAWING or \
+                    any(abs(x - y) > SAME_SIZE * max(x, y) for x, y in zip(a.shape, b.shape)) or \
+                    set(np.unique(a)) != set(np.unique(b)):
+                return []
+    stand_ins = [np.full((1, 1), sorted(set(names)).index(n) + 1) for n in names]
+    found = repeat(stand_ins, count)
+    if not found:
+        return []
+    rule, nxt, size = found[0]
+    values = [sorted(set(names))[int(p[0, 0]) - 1] for p in nxt]
+    drawn = [symbols.draw([v]) for v in values]
+    return [(f'shapes: {rule}', drawn, size + 1 + cost, values)]
+
+
+def colours(panels: List[Optional[Array]], count: int, symbols=None) -> List[tuple]:
+    """
+    Panels in colour (RGB or RGBA images) read as the names of their colours with the learned symbols; the
+    names repeat as in repeat. Panels of one name must be alike in outline and size (the same picture in one
+    colour). Values: the next names
+    """
+    if symbols is None or any(p is None or p.ndim != 3 for p in panels):
+        return []
+    names, cost = [], 0.0
+    for p in panels:
+        alts = symbols.alternatives(p, 'colour', 1)
+        if not alts:
+            return []
+        names.append(alts[0][0])
+        cost += alts[0][1] / 100
+    outlines = [p[..., 3] > 0 if p.shape[-1] == 4 else np.ones(p.shape[:2], bool) for p in panels]
+    from symbol_learning import normalise
+    looks = [normalise(o) for o in outlines]
+    for i in range(len(panels)):
+        for j in range(i + 1, len(panels)):
+            if names[i] == names[j] and (np.abs(looks[i] - looks[j]).mean() > SAME_DRAWING or any(
+                    abs(x - y) > SAME_SIZE * max(x, y) for x, y in zip(outlines[i].shape, outlines[j].shape))):
+                return []
+    stand_ins = [np.full((1, 1), sorted(set(names)).index(n) + 1) for n in names]
+    found = repeat(stand_ins, count)
+    if not found:
+        return []
+    rule, nxt, size = found[0]
+    values = [sorted(set(names))[int(p[0, 0]) - 1] for p in nxt]
+    return [(f'colours: {rule}', [None] * len(values), size + 1 + cost, values)]
+
+
+FAMILY_FUNCTIONS = {'repeat': repeat, 'runs': runs, 'growth': growth, 'numbers': numbers, 'letters': letters,
+                    'shapes': shapes, 'colours': colours,
+                    'arc_step': arc_step,
                     'repeat_all': repeat_all}
 
 
 def predictions(puzzle: SequencePuzzle, families: Sequence[str] = FAMILIES,
-                use_slow: Optional[bool] = None) -> List[Dict]:
+                use_slow: Optional[bool] = None, symbols=None) -> List[Dict]:
     """
-    Every family's predictions, best-ranked first: [{'family', 'rule', 'panels'}] (panels: one per blank).
-    use_slow: whether to try arc_step (None: only if the families before it predict nothing, or nothing among
-    the choices). repeat_all is only used when nothing before it predicts.
+    Every family's predictions, best-ranked first: [{'family', 'rule', 'panels'}] (panels: one per blank;
+    the numbers family also gives 'values'). use_slow: whether to try arc_step (None: only if the families
+    before it predict nothing, or nothing among the choices). repeat_all is only used when nothing before it
+    predicts. symbols: a SymbolMemory to read numbers with (the numbers family needs one)
     """
     out = []
 
     def run(name):
         try:
-            found = FAMILY_FUNCTIONS[name](puzzle.panels, puzzle.blanks)
+            if name in ('numbers', 'letters', 'shapes', 'colours'):
+                found = FAMILY_FUNCTIONS[name](puzzle.panels, puzzle.blanks, symbols)
+            elif puzzle.missing:
+                found = []                  # the other families continue a complete row
+            else:
+                found = FAMILY_FUNCTIONS[name](puzzle.panels, puzzle.blanks)
         except Exception:
             found = []
-        out.extend({'family': name, 'rule': rule, 'panels': ps, 'size': size} for rule, ps, size in found)
+        for entry in found:
+            e = {'family': name, 'rule': entry[0], 'panels': entry[1], 'size': entry[2]}
+            if len(entry) > 3:
+                e['values'] = entry[3]
+            out.append(e)
 
     def wanted():
         if not out:

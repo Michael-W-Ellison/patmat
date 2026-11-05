@@ -697,5 +697,25 @@ class TestTemplatesAndFitting(unittest.TestCase):
                  A([[0, 0, 0, 2], [4, 2, 0, 0]]), A([[0, 0, 4, 2], [4, 2, 0, 0]]))
         self.assertTrue(right(best(t), t))
 
+class TestSequenceContinuation(unittest.TestCase):
+    def test_columns_continued_over_the_background(self):
+        # a figure repeating every 3 columns, the rest of the grid background: the output continues it
+        import numpy as np
+        from arc_pattern_solver import find_patterns
+
+        def grid(width, shown):
+            unit = np.array([[0, 2, 0], [2, 2, 0], [2, 0, 3]])
+            full = np.tile(unit, (1, width // 3 + 1))[:, :width]
+            out = full.copy()
+            out[:, shown:] = 0
+            return out, full
+        task = {'train': [dict(zip(('input', 'output'), (g.tolist() for g in grid(12, 6)))),
+                          dict(zip(('input', 'output'), (g.tolist() for g in grid(15, 9))))],
+                'test': [{'input': grid(14, 6)[0].tolist()}]}
+        consistent, _ = find_patterns(task, families=('U',), combinations=False)
+        self.assertTrue(any(np.array_equal(np.array(e['preds'][0]), grid(14, 6)[1]) for e in consistent))
+
+
+
 if __name__ == '__main__':
     unittest.main()

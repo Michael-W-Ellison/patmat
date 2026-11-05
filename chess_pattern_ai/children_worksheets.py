@@ -37,17 +37,50 @@ What a child does that is not transcribed: reading the instruction, and for
 with several blanks are scored right only if every blank is right. Choices
 (cut-outs, "circle the answer") are given as panels.
 
-Results (sequence_puzzles as committed with this file):
+Results (sequence_puzzles, symbol_learning and learned_symbols.json as committed with this file):
 - ITEMS, the 21 sheets seen while writing sequence_puzzles: 105/105 right.
-- HELD_OUT, 33 worksheetfun.com sheets transcribed after it was frozen:
-  173/180 right, 7 wrong, 0 unanswered. The 7 wrong are the number
-  sequences (1 3 5 7 9 -> 11): numbers are read as pictures, with no digits
-  or arithmetic, so the last resort (repeat_all) answers them, wrongly.
-  The other 173 are repeats with periods 2 to 4, mostly 2.
+- HELD_OUT, 33 worksheetfun.com sheets transcribed after sequence_puzzles
+  was frozen: first 173/180 (the 7 wrong: the number sequences, numbers
+  read as pictures). Then the program was taught digits from counting
+  worksheets (digit_lessons) and given the numbers family, and the number
+  sequences' panels replaced by the sheet's own cells cut from the page
+  (number_cells): 180/180. The number sheet is no longer held out: it was
+  examined while the digit reading was developed (the cell cutting was
+  fixed on it: slivers of ruled lines left in cells were read as 1s). The
+  digits on it are in a type style the program was never shown; what it
+  reads them with is learned from other sheets only.
+- Without learned symbols (run(..., symbols=None)) the 7 number items are
+  wrong, as before.
+- LETTER_ITEMS, K5 "order of letters" (24 rows, fill in the missing
+  letters), cells cut from the pages (letter_rows), read with letters
+  learned by letter_lessons: 21/24 right, 0 wrong, 3 unanswered (73 of the
+  78 given letters read right; the misses: Arial f read as t, b as h); with
+  the handwriting lessons in the memory and reading in context
+  (sequence_puzzles), 23/24, 0 wrong.
+  With the round-font printing sheets alone: 12/24 (1 wrong). Most of the
+  gain is from the case choice sheet, which is in the same Arial-like style
+  as these sheets: the program learned that style from other sheets, not
+  to read an unseen one.
+- SHAPE_ITEMS, K5 shapes in patterns 1-4 (28 rows, the next 2 shapes), and
+  the K5 identify sheet shapes-3 (7 rows), shapes cut from the pages and
+  read with shapes learned by shape_lessons: patterns 23/28 right, 5 wrong
+  (each holds a cross or a pentagon, which no lesson taught; they are read
+  as the nearest known shape); identify 7/7. The copies of a shape cut from
+  a page are never identical cell for cell, so without learned shapes the
+  pattern rows are not read (the repeat family finds no repeat).
+- colours (run_colours), objects cut from K5 and Math Worksheets 4 Kids pages,
+  read with colours learned by colour_lessons: pairing words and pictures
+  (colors-4, match-colors-to-names-4) 12/12; sorting pictures under 3 colour
+  words (sorting-colors 1-4) 29/36, 2 wrong (a light brown loaf read as
+  yellow, a dark grey tyre as blue), 5 unanswered (3 white: not taught; a
+  magenta balloon and pale pink flowers: too far from the pinks and purples
+  learned); the airplane window colour patterns (color-easy1) 5/5.
 
 Run: python children_worksheets.py  (per sheet and per kind of item; -v for every item)
 """
 
+import json
+import os
 import sys
 import zlib
 from dataclasses import dataclass, field
@@ -327,8 +360,327 @@ def panel(token: str) -> np.ndarray:
     if token.startswith('grow:'):
         _, kind, n = token.split(':')
         return growing(kind, int(n))
+    if token.startswith('scell:'):
+        _, k, r, c = token.split(':')
+        return _shape_cells()['patterns'][int(k)][int(r)][int(c)]
+    if token.startswith('lcell:'):
+        _, k, r, c = token.split(':')
+        return _letter_cells()[int(k)][int(r)][int(c)]
+    if token.startswith('cell:'):
+        _, r, c = token.split(':')
+        return _number_cells()[int(r)][int(c)]
     shape = OUTLINES[token]
     return shape.copy() if isinstance(shape, np.ndarray) else _art(shape)
+
+
+# ------------------------------------------------------------------ cells cut from a rendered page
+
+NUMBER_CELLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'worksheet_number_cells.json')
+NUMBER_SHEET = 'https://www.worksheetfun.com/wp-content/uploads/2016/02/wfun16_number_patterns_7.pdf'
+_cells_cache: List = []
+
+
+def number_cells(pdf_path: str, upright_turns: int = -1) -> List[List[Optional[np.ndarray]]]:
+    """
+    The cells of a sheet printed as a grid of boxes, row by row: the page rendered (scale 2), turned upright
+    (upright_turns quarter turns), its ruled lines found (rows / columns of the page more than half ink), the
+    boxes between them cut out (a band counts as a row of boxes where the vertical lines cross it), the ink
+    touching a box's edge (pieces of the lines) dropped, and each box cropped to its ink (None: empty)
+    """
+    import pypdfium2 as pdfium
+    from symbol_learning import components
+    page = np.array(pdfium.PdfDocument(pdf_path)[0].render(scale=2.0).to_pil().convert('L'))
+    dark = np.rot90(page, upright_turns) < 128
+
+    def runs(index):
+        out = []
+        for i in index:
+            if out and i - out[-1][1] <= 2:
+                out[-1][1] = i
+            else:
+                out.append([i, i])
+        return out
+
+    h = runs(np.nonzero(dark.mean(axis=1) > 0.5)[0])
+    v = runs(np.nonzero(dark.mean(axis=0) > 0.5)[0])
+    col_bands = [(a[1] + 1, b[0]) for a, b in zip(v, v[1:]) if b[0] - a[1] > 40]
+    rows = []
+    for a, b in zip(h, h[1:]):
+        r0, r1 = a[1] + 1, b[0]
+        if r1 - r0 <= 40 or not all(dark[r0:r1, c0 - 1].mean() > 0.9 for c0, _ in col_bands):
+            continue
+        row = []
+        for c0, c1 in col_bands:
+            cell = dark[r0:r1, c0:c1].copy()
+            for rs, cs, m in components(cell):
+                if rs.start == 0 or cs.start == 0 or rs.stop == cell.shape[0] or cs.stop == cell.shape[1]:
+                    cell[rs, cs] &= ~m
+            if not cell.any():
+                row.append(None)
+                continue
+            ys, xs = np.nonzero(cell)
+            row.append(cell[ys.min():ys.max() + 1, xs.min():xs.max() + 1].astype(int))
+        rows.append(row)
+    return rows
+
+
+def save_number_cells(pdf_path: str, path: str = NUMBER_CELLS) -> None:
+    from symbol_learning import pack
+    rows = number_cells(pdf_path)
+    with open(path, 'w') as f:
+        json.dump({'source': NUMBER_SHEET, 'how': 'children_worksheets.number_cells',
+                   'rows': [[None if c is None else pack(c) for c in row] for row in rows]}, f)
+
+
+LETTER_CELLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'worksheet_letter_cells.json')
+LETTER_SHEETS = ['kindergarten-order-of-letters-uppercase-1', 'kindergarten-order-of-letters-uppercase-2',
+                 'kindergarten-order-of-letters-lowercase-1', 'kindergarten-order-of-letters-lowercase-2']
+LETTER_URL = 'https://www.k5learning.com/worksheets/{}.pdf'
+_letter_cache: List = []
+
+
+def letter_rows(pdf_path: str) -> List[List[Optional[np.ndarray]]]:
+    """
+    The rows of an "order of letters" sheet (K5 Learning): the page rendered (scale 2), each row a frame wider
+    than most of the page; in it, the underlines are the rows more than 30% ink, the slots the runs of ink
+    over 60 cells long along them; with the underline rows removed, a slot's letter is the ink in its columns
+    (pieces one above another taken together, so a descender or a dot stays with its letter; the
+    underlines' end marks dropped); None for
+    an empty slot
+    """
+    import pypdfium2 as pdfium
+    from symbol_learning import components, ink, symbols_of
+    page = np.array(pdfium.PdfDocument(pdf_path)[0].render(scale=2.0).to_pil().convert('RGB'))
+    mask = ink(page)
+    rows = []
+    frames = sorted(((rs, cs) for rs, cs, m in components(mask)
+                     if cs.stop - cs.start > 0.6 * mask.shape[1] and rs.stop - rs.start > 100),
+                    key=lambda f: f[0].start)
+    for rs, cs in frames:
+        inner = mask[rs.start + 8:rs.stop - 8, cs.start + 8:cs.stop - 8].copy()
+        line_rows = np.nonzero(inner.mean(axis=1) > 0.3)[0]     # the underlines' rows
+        if not len(line_rows):
+            rows.append([])
+            continue
+        y = int(line_rows[len(line_rows) // 2])
+        slots, start = [], None
+        for x, v in enumerate(list(inner[y]) + [False]):
+            if v and start is None:
+                start = x
+            elif not v and start is not None:
+                if x - start > 60:
+                    slots.append((start, x))
+                start = None
+        letters = inner.copy()
+        letters[line_rows.min():line_rows.max() + 1] = False
+        ends = [x for slot in slots for x in slot]
+        for r, c, m in components(letters):     # the underlines' end marks: specks at the ends of the underlines
+            if r.stop - r.start < 20 and c.stop - c.start < 20 and line_rows.min() - 12 <= r.start <= line_rows.max() + 12 \
+                    and min(abs(c.start - x) for x in ends) < 20:
+                letters[r, c] &= ~m
+        row = []
+        for c0, c1 in slots:
+            found = [m for m in symbols_of(letters[:, c0:c1]) if m.shape[0] >= 20]
+            row.append(found[0].astype(int) if len(found) == 1 else None)
+        rows.append(row)
+    return rows
+
+
+def save_letter_cells(cache: str, path: str = LETTER_CELLS) -> None:
+    from digit_lessons import fetch
+    from symbol_learning import pack
+    sheets = []
+    for name in LETTER_SHEETS:
+        rows = letter_rows(fetch(LETTER_URL.format(name), cache))
+        sheets.append({'sheet': name, 'rows': [[None if c is None else pack(c) for c in row] for row in rows]})
+    with open(path, 'w') as f:
+        json.dump({'source': LETTER_URL, 'how': 'children_worksheets.letter_rows', 'sheets': sheets}, f)
+
+
+def _letter_cells():
+    from symbol_learning import unpack
+    if not _letter_cache:
+        with open(LETTER_CELLS) as f:
+            data = json.load(f)
+        _letter_cache.extend([[[None if c is None else unpack(c) for c in row] for row in sheet['rows']]
+                              for sheet in data['sheets']])
+    return _letter_cache
+
+
+SHAPE_CELLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'worksheet_shape_cells.json')
+SHAPE_PATTERN_SHEETS = ['pattern-shapes-1', 'pattern-shapes-2', 'pattern-shapes-3', 'pattern-shapes-4']
+SHAPE_IDENTIFY_SHEET = 'shapes-3'
+SHAPE_URL = 'https://www.k5learning.com/worksheets/kindergarten/{}.pdf'
+_shape_cache: Dict = {}
+
+
+def save_shape_cells(cache: str, path: str = SHAPE_CELLS) -> None:
+    """The shapes of the K5 shape pattern sheets (6 per row) and of the identify sheet (a name, 4 shapes per
+    row), cut from the pages by shape_lessons.table / shapes_in"""
+    import shape_lessons as S
+    from digit_lessons import fetch
+    from symbol_learning import pack
+    patterns = []
+    for name in SHAPE_PATTERN_SHEETS:
+        rows = S.table(S.page(fetch(SHAPE_URL.format(name), cache)))
+        patterns.append([[pack(m) for m in S.shapes_in(row[0])] for row in rows])
+    identify = []
+    for row in S.table(S.page(fetch(SHAPE_URL.format(SHAPE_IDENTIFY_SHEET), cache))):
+        identify.append({'name': pack(S._dark(row[0])), 'shapes': [pack(m) for m in S.shapes_in(row[1])]})
+    with open(path, 'w') as f:
+        json.dump({'source': SHAPE_URL, 'patterns': patterns, 'identify': identify}, f)
+
+
+def _shape_cells() -> Dict:
+    from symbol_learning import unpack
+    if not _shape_cache:
+        with open(SHAPE_CELLS) as f:
+            data = json.load(f)
+        _shape_cache['patterns'] = [[[unpack(c) for c in row] for row in sheet] for sheet in data['patterns']]
+        _shape_cache['identify'] = [{'name': unpack(r['name']), 'shapes': [unpack(c) for c in r['shapes']]}
+                                    for r in data['identify']]
+    return _shape_cache
+
+
+COLOUR_CELLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'worksheet_colour_cells.json')
+COLOUR_URL = 'https://www.k5learning.com/worksheets/kindergarten/{}.pdf'
+AIRPLANES = 'https://www.mathworksheets4kids.com/patterns/color-easy1.pdf'
+_colour_cache: Dict = {}
+
+
+def _small(sample: np.ndarray, most: int = 24) -> Dict:
+    """An RGBA sample made small for the JSON file (every k-th pixel, k rounded up, so samples of one size stay
+    of one size; its median colour stays), zlib-compressed"""
+    k = max(1, -(-max(sample.shape[:2]) // most))
+    import base64
+    small = np.ascontiguousarray(sample[::k, ::k]).astype(np.uint8)
+    return {'shape': list(small.shape), 'zlib': base64.b64encode(zlib.compress(small.tobytes(), 9)).decode()}
+
+
+def _unsmall(d) -> Optional[np.ndarray]:
+    import base64
+    if d is None:
+        return None
+    return np.frombuffer(zlib.decompress(base64.b64decode(d['zlib'])), np.uint8).reshape(d['shape'])
+
+
+def save_colour_cells(cache: str, path: str = COLOUR_CELLS) -> None:
+    """
+    Cut from the pages: the pairing sheets (K5 colors-4, match-colors-to-names-4: the words, as ink, and the
+    objects), the sorting sheets (sorting-colors 1-4: the 3 words and the 9 pictures) and the Math Worksheets
+    4 Kids airplane windows (color-easy1: 5 rows of 9 coloured windows)
+    """
+    import colour_lessons as C
+    from digit_lessons import fetch
+    from shape_lessons import _bands, _dark, table, words_in
+    from symbol_learning import colourful, components, ink, pack
+    out = {'pairing': [], 'sorting': [], 'airplanes': []}
+    for name, words_left in (('colors-4', True), ('match-colors-to-names-4', True)):
+        p = C.page(fetch(COLOUR_URL.format(name), cache))[C.HEADER:]
+        half = p.shape[1] // 2
+        dark = _dark(p[:, :half])
+        words = [pack(w) for r0, r1 in _bands(dark) for w in words_in(dark[r0:r1])]
+        objects = [_small(o['sample']) for o in C.objects_in(p[:, half:])]
+        out['pairing'].append({'sheet': name, 'words': words, 'objects': objects})
+    for k in (1, 2, 3, 4):
+        p = C.page(fetch(COLOUR_URL.format(f'sorting-colors-{k}'), cache))
+        words = [pack(_dark(r[0])) for r in table(p)]
+        # the cut-out grid: the second ruled table on the page, below the first
+        mask = ink(p)
+        grids = sorted(components(mask), key=lambda c: -(c[0].stop - c[0].start) * (c[1].stop - c[1].start))
+        second = grids[1]
+        cells = table(p[second[0], second[1]])
+        pictures = []
+        for row in cells:
+            for cell in row:
+                objs = C.objects_in(cell, least=20)
+                pictures.append(_small(max(objs, key=lambda o: o['mask'].sum())['sample']) if objs else None)
+        out['sorting'].append({'sheet': f'sorting-colors-{k}', 'words': words, 'pictures': pictures})
+    p = C.page(fetch(AIRPLANES, cache))
+    tint = colourful(p) & ink(p)
+    windows = [(rs.start, cs.start, np.dstack([p[rs, cs, :3], (m * 255).astype(np.uint8)]))
+               for rs, cs, m in components(tint) if 30 < rs.stop - rs.start < 90 and 30 < cs.stop - cs.start < 90]
+    rows = []
+    for top, left, w in sorted(windows, key=lambda e: e[0]):
+        if rows and abs(top - rows[-1][0][0]) < 40:
+            rows[-1].append((top, left, w))
+        else:
+            rows.append([(top, left, w)])
+    # the windows are small: kept whole (their outlines are compared, colours: SAME_DRAWING)
+    out['airplanes'] = [[_small(w, most=100) for _, _, w in sorted(r, key=lambda e: e[1])] for r in rows]
+    with open(path, 'w') as f:
+        json.dump(out, f)
+
+
+def _colour_cells() -> Dict:
+    from symbol_learning import unpack
+    if not _colour_cache:
+        with open(COLOUR_CELLS) as f:
+            data = json.load(f)
+        arr = _unsmall
+        _colour_cache['pairing'] = [dict(sheet=d['sheet'], words=[unpack(w) for w in d['words']],
+                                         objects=[arr(o) for o in d['objects']]) for d in data['pairing']]
+        _colour_cache['sorting'] = [dict(sheet=d['sheet'], words=[unpack(w) for w in d['words']],
+                                         pictures=[arr(o) for o in d['pictures']]) for d in data['sorting']]
+        _colour_cache['airplanes'] = [[arr(w) for w in row] for row in data['airplanes']]
+    return _colour_cache
+
+
+# the answers (mine): each object's colour, in the order cut (top to bottom, left to right)
+COLOUR_PAIRING_ANSWERS = {'colors-4': 'green red grey orange blue black',
+                          'match-colors-to-names-4': 'blue yellow orange red green pink'}
+COLOUR_SORTING_ANSWERS = {
+    'sorting-colors-1': 'brown yellow brown yellow yellow purple purple purple brown',
+    'sorting-colors-2': 'blue pink blue black blue black pink black pink',
+    'sorting-colors-3': 'red brown grey red grey brown grey brown red',
+    'sorting-colors-4': 'white green white green orange orange orange white green'}
+AIRPLANE_ANSWERS = ['orange', 'blue', 'brown', 'orange', 'yellow']
+
+
+def run_colours(symbols='learned') -> Dict:
+    """
+    The colour sheets: on the pairing and sorting sheets each object is given the nearest learned colour of
+    those the sheet's words name (read by the program); the airplane rows are sequence puzzles (the
+    colours family). Returns {kind: [right, wrong, no answer, items]}
+    """
+    from sequence_puzzles import SequencePuzzle, solve
+    from symbol_learning import COLOURS, SymbolMemory
+    if symbols == 'learned':
+        from digit_lessons import LEARNED
+        symbols = SymbolMemory(LEARNED)
+    cells = _colour_cells()
+    out = {}
+
+    def score(kind, answer, truth):
+        t = out.setdefault(kind, [0, 0, 0, 0])
+        t[3] += 1
+        t[0 if answer == truth else 2 if answer is None else 1] += 1
+
+    def choose(sample, names):
+        if sample is None:
+            return None
+        keep, d = symbols._distances(sample, 'colour')
+        best = [(d[j], symbols.examples[i]['meaning']) for j, i in enumerate(keep) if symbols.examples[i]['meaning'] in names]
+        return min(best)[1] if best and min(best)[0] <= 40 else None
+
+    for sheet, answers in (('pairing', COLOUR_PAIRING_ANSWERS), ('sorting', COLOUR_SORTING_ANSWERS)):
+        for d in cells[sheet]:
+            names = {symbols.read_word(w, COLOURS) for w in d['words']} - {None}
+            for sample, truth in zip(d['objects' if sheet == 'pairing' else 'pictures'], answers[d['sheet']].split()):
+                score(f'{sheet} ({d["sheet"]})', choose(sample, names), truth)
+    for row, truth in zip(cells['airplanes'], AIRPLANE_ANSWERS):
+        answer = solve(SequencePuzzle(list(row), 1), symbols=symbols, use_slow=False)
+        score('airplane windows', answer['values'][0] if answer and answer.get('values') else None, truth)
+    return out
+
+
+def _number_cells() -> List[List[Optional[np.ndarray]]]:
+    from symbol_learning import unpack
+    if not _cells_cache:
+        with open(NUMBER_CELLS) as f:
+            data = json.load(f)
+        _cells_cache.extend([[None if c is None else unpack(c) for c in row] for row in data['rows']])
+    return _cells_cache
 
 
 # ------------------------------------------------------------------ the items
@@ -518,11 +870,12 @@ HELD_OUT += _shapes('WSF what comes next 1 (trace)', _TRACE_1)
 HELD_OUT += _shapes('WSF what comes next 2 (trace)', _TRACE_2)
 HELD_OUT += _shapes('WSF what comes next circle 1', _TRACE_1)
 HELD_OUT += _shapes('WSF what comes next circle 2', _TRACE_2)
+# The number sequences are not transcribed: their panels are the sheet's own cells, cut from the rendered page
+# by number_cells() and kept in NUMBER_CELLS; the program reads them with what it learned (digit_lessons). The
+# answers are values (value:<n>), compared with the value the program gives.
 HELD_OUT += _shapes('WSF number patterns 7', [
-    'num:1 num:3 num:5 num:7 num:9 | num:11', 'num:2 num:4 num:6 num:8 num:10 | num:12',
-    'num:26 num:24 num:22 num:20 num:18 | num:16', 'num:27 num:24 num:21 num:18 num:15 | num:12',
-    'num:17 num:19 num:21 num:23 num:25 | num:27', 'num:36 num:32 num:28 num:24 num:20 | num:16',
-    'num:15 num:16 num:17 num:18 num:19 | num:20'], kind='number')
+    ' '.join(f'cell:{r}:{c}' for c in range(5)) + f' | value:{v}'
+    for r, v in enumerate([11, 12, 16, 12, 27, 16, 20])], kind='number')
 HELD_OUT += _shapes('WSF pattern T200 1', [
     'pic:face_sad pic:face_happy pic:face_sad pic:face_happy pic:face_sad | pic:face_happy',
     'pic:face_zigzag pic:face_o pic:face_zigzag pic:face_o pic:face_zigzag | pic:face_o',
@@ -589,6 +942,69 @@ HELD_OUT += _shapes('WSF trace T35 8', [
     'ellipse tri ellipse tri | ellipse | tri ellipse', 'wrect heart wrect heart | wrect | wrect heart',
     'pentagon circle pentagon circle | pentagon | circle pentagon',
     'octagon rhombus octagon rhombus | octagon | rhombus octagon'])
+# "Order of letters" (K5 Learning, uppercase 1-2, lowercase 1-2): fill in the missing letters of each row. The
+# cells are the sheet's own, cut from the page by letter_rows() and kept in LETTER_CELLS; the answers (the
+# missing letters, left to right) are mine, the alphabet's. Sheets 3 of each case have other layouts, not used.
+_LETTER_ROWS = [
+    ['ABC_E_', 'DEF__I', 'J_LMN_', 'UVW__Z', 'PQ__TU', 'G__JKL'],
+    ['A_C__F', '_EF___', 'R____W', '___XYZ', '_Q__T_', '_H_J__'],
+    ['abc__f', 'jklm__', 'rs__vw', 'e_gh_j', 'lm_o_q', 'tuv__y'],
+    ['ab___f', '__mn_p', 't___xy', '_ef___', 'ij_l__', 'q_s___']]
+LETTER_ITEMS: List[Item] = []
+for _k, (_sheet, _rows) in enumerate(zip(['K5 order of letters upper 1', 'K5 order of letters upper 2',
+                                          'K5 order of letters lower 1', 'K5 order of letters lower 2'], _LETTER_ROWS)):
+    for _r, _row in enumerate(_rows):
+        _alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' if _row.strip('_').isupper() else 'abcdefghijklmnopqrstuvwxyz'
+        _first = next(i for i, ch in enumerate(_row) if ch != '_')
+        _start = _alphabet.index(_row[_first]) - _first
+        LETTER_ITEMS.append(Item(_sheet, _r + 1, 'letters',
+                                 ['missing' if ch == '_' else f'lcell:{_k}:{_r}:{i}' for i, ch in enumerate(_row)],
+                                 [f'value:{_alphabet[_start + i]}' for i, ch in enumerate(_row) if ch == '_']))
+# "Shapes in patterns" (K5 Learning, 1-4): draw the 2 shapes that come next. The shapes are the sheet's own,
+# cut from the pages (save_shape_cells); the answers (the next two shapes' names) are mine.
+_SHAPE_ROWS = [
+    ['circle triangle', 'diamond square', 'oval triangle', 'star square', 'heart diamond', 'triangle rectangle',
+     'rectangle circle'],
+    ['triangle cross', 'square star', 'circle pentagon', 'hexagon diamond', 'oval triangle', 'square circle',
+     'circle hexagon'],
+    ['square diamond', 'oval circle', 'pentagon star', 'triangle cross', 'rectangle heart', 'star hexagon',
+     'oval rectangle'],
+    ['oval triangle', 'rectangle diamond', 'heart square', 'rectangle star', 'circle cross', 'square heart',
+     'triangle hexagon']]
+SHAPE_ITEMS: List[Item] = [
+    Item(f'K5 shapes in patterns {k + 1}', r + 1, 'shape pattern', [f'scell:{k}:{r}:{i}' for i in range(6)],
+         [f'value:{n}' for n in names.split()])
+    for k, rows in enumerate(_SHAPE_ROWS) for r, names in enumerate(rows)]
+# "Identifying shapes" (K5 shapes-3): a name and four shapes; the answer (mine) is the named shape's place (1-4)
+SHAPE_IDENTIFY_ANSWERS = [2, 2, 4, 1, 3, 1, 4]
+
+
+def run_identify(symbols='learned') -> Dict:
+    """The identify rows: the name read (SymbolMemory.read_word), the answer the shape nearest to that name's
+    examples among those read as it (None if none is)"""
+    from symbol_learning import SHAPES, SymbolMemory
+    if symbols == 'learned':
+        from digit_lessons import LEARNED
+        symbols = SymbolMemory(LEARNED)
+    out = {'right': 0, 'wrong': 0, 'unanswered': 0, 'items': 0, 'results': []}
+    for row, truth in zip(_shape_cells()['identify'], SHAPE_IDENTIFY_ANSWERS):
+        out['items'] += 1
+        name = symbols.read_word(row['name'], SHAPES)
+        answer = None
+        if name is not None:
+            fits = []
+            for i, shape in enumerate(row['shapes']):
+                alts = symbols.alternatives(shape, 'shape', 1)
+                if alts and alts[0][0] == name:
+                    fits.append((alts[0][1], i + 1))
+            if fits:
+                answer = min(fits)[1]
+        outcome = 'no answer' if answer is None else 'right' if answer == truth else 'wrong'
+        out['right' if outcome == 'right' else 'wrong' if outcome == 'wrong' else 'unanswered'] += 1
+        out['results'].append((name, answer, truth, outcome))
+    return out
+
+
 _BUGS = ['ladybug', 'snail', 'sunflower', 'butterfly', 'flower', 'bee', 'spider']
 _TOYS = ['ball', 'drum', 'zebra', 'van', 'turtle', 'top', 'rocket', 'car']
 HELD_OUT += _pics('WSF picture cut and paste 1', ['butterfly flower butterfly flower butterfly | flower',
@@ -650,16 +1066,26 @@ HELD_OUT += _shapes('WSF shape cut and paste 8', [r + ' | ' + _CUT_B for r in [
 
 # ------------------------------------------------------------------ running
 
-def run(items: List[Item] = ITEMS, verbose: bool = False, **solve_kwargs) -> Dict:
+def run(items: List[Item] = ITEMS, verbose: bool = False, symbols='learned', **solve_kwargs) -> Dict:
+    """symbols: the SymbolMemory to read symbols with ('learned': the one digit_lessons saved, None: none)"""
     from sequence_puzzles import SequencePuzzle, solve
+    if symbols == 'learned':
+        from digit_lessons import LEARNED
+        from symbol_learning import SymbolMemory
+        symbols = SymbolMemory(LEARNED) if os.path.exists(LEARNED) else None
     results = []
     for item in items:
-        truth = [panel(t) for t in item.answer]
+        values = [int(t[6:]) if t[6:].isdigit() else t[6:] for t in item.answer if t.startswith('value:')]
+        truth = [] if values else [panel(t) for t in item.answer]
         choices = [panel(c) for c in item.choices]
-        puzzle = SequencePuzzle([panel(t) for t in item.given], len(truth), choices)
-        answer = solve(puzzle, **solve_kwargs)
+        given = [None if t == 'missing' else panel(t) for t in item.given]
+        blanks = len(item.answer) - sum(g is None for g in given)
+        puzzle = SequencePuzzle(given, blanks, choices)
+        answer = solve(puzzle, symbols=symbols, **solve_kwargs)
         if answer is None:
             outcome = 'no answer'
+        elif values:
+            outcome = 'right' if answer.get('values') == values else 'wrong'
         elif all(a.shape == t.shape and np.array_equal(a, t) for a, t in zip(answer['panels'], truth)):
             outcome = 'right'
         else:
@@ -691,6 +1117,13 @@ def report(summary: Dict):
 
 if __name__ == '__main__':
     for title, items in (('Sheets seen while writing sequence_puzzles (K5 Learning, Math Worksheets 4 Kids)', ITEMS),
-                         ('Held out (worksheetfun.com)', HELD_OUT)):
+                         ('Held out (worksheetfun.com)', HELD_OUT),
+                         ('Missing letters (K5 Learning order of letters), read with learned letters', LETTER_ITEMS),
+                         ('Shapes in patterns (K5 Learning), read with learned shapes', SHAPE_ITEMS)):
         print(f'== {title}')
         report(run(items, verbose='-v' in sys.argv))
+    for kind, (r, w, u, n) in run_colours().items():
+        print(f'== Colours, {kind}: right {r}/{n}, wrong {w}, no answer {u}')
+    found = run_identify()
+    print(f'== Identifying shapes (K5 shapes-3): right {found["right"]}/{found["items"]}, wrong {found["wrong"]}, '
+          f'no answer {found["unanswered"]}')

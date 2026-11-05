@@ -94,6 +94,7 @@ FAMILY_ELEMENTS = {
     'R': ('repetition',),                               # tilings repaired, continued, reduced; repeats removed
     'S': ('repetition', 'alignment'),                   # recoloured by parity; by the first colour in the row
     'T': ('shape_match', 'rotation', 'reflection'),     # templates copied and fitted, possibly turned or mirrored
+    'U': ('repetition',),                               # columns or rows continued as a sequence (sequence_puzzles)
 }
 
 # words in an ARC pattern's name that show an element

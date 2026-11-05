@@ -79,6 +79,38 @@ class TestChoices(unittest.TestCase):
         self.assertEqual(answer['choice'], 1)
 
 
+class TestLetters(unittest.TestCase):
+    def test_missing_letters_filled_in_from_the_alphabet(self):
+        from symbol_learning import SymbolMemory
+        m = SymbolMemory()
+        shapes = {}
+        for i, ch in enumerate('ABCDEF'):
+            g = np.zeros((7, 5), int)
+            g[i % 7, :] = 1
+            g[:, i % 5] = 1
+            g[6 - i % 7, (i + 2) % 5] = 1
+            shapes[ch] = np.kron(g, np.ones((4, 4), int))
+            m.learn(shapes[ch], ch)
+        answer = solve(SequencePuzzle([shapes['A'], None, shapes['C'], None, shapes['E']], 1), symbols=m)
+        self.assertEqual(answer['family'], 'letters')
+        self.assertEqual(answer['values'], ['B', 'D', 'F'])
+
+
+class TestReadingInContext(unittest.TestCase):
+    def test_a_doubtful_symbol_read_as_its_neighbours_require(self):
+        from sequence_puzzles import _in_context
+        # panel 2 reads likelier as 7 than as 3, but only 3 makes 1 2 3 4 5 go by a fixed step
+        options = [[(1, 0.05)], [(2, 0.06)], [(7, 0.10), (3, 0.12)], [(4, 0.05)], [(5, 0.07)]]
+        places, cost = _in_context(options)
+        self.assertEqual(places, [1, 2, 3, 4, 5])
+        self.assertAlmostEqual(cost, 0.35)
+
+    def test_a_row_of_second_choices_is_not_answered(self):
+        from sequence_puzzles import _in_context
+        options = [[(9, 0.05), (1, 0.06)], [(8, 0.05), (2, 0.06)], [(6, 0.05), (3, 0.07)], [(5, 0.05), (4, 0.08)]]
+        self.assertIsNone(_in_context(options))
+
+
 class TestWorksheets(unittest.TestCase):
     def test_the_sheets_seen_while_writing_the_reader(self):
         from children_worksheets import ITEMS, run
@@ -87,12 +119,41 @@ class TestWorksheets(unittest.TestCase):
         self.assertEqual(wrong, [])
 
     def test_the_held_out_sheets(self):
-        # every held-out item is answered; only the number sequences (arithmetic) are not read
+        # with the digits learned from counting worksheets (digit_lessons), the number sequences are read too
         from children_worksheets import HELD_OUT, run
         summary = run(HELD_OUT, use_slow=False)
-        wrong = {i.kind for i, o, _ in summary['results'] if o != 'right'}
-        self.assertEqual(wrong, {'number'})
-        self.assertEqual(summary['unanswered'], 0)
+        self.assertEqual([(i.sheet, i.number) for i, o, _ in summary['results'] if o != 'right'], [])
+
+    def test_the_missing_letters_sheets(self):
+        from children_worksheets import LETTER_ITEMS, run
+        summary = run(LETTER_ITEMS, use_slow=False)
+        self.assertEqual(summary['wrong'], 0)
+        self.assertGreaterEqual(summary['right'], 23)
+
+    def test_the_shape_sheets(self):
+        from children_worksheets import SHAPE_ITEMS, _SHAPE_ROWS, run, run_identify
+        self.assertEqual(run_identify()['right'], 7)
+        summary = run(SHAPE_ITEMS, use_slow=False)
+        self.assertGreaterEqual(summary['right'], 23)
+        # every row answered wrongly holds a shape no lesson taught
+        for item, outcome, _ in summary['results']:
+            if outcome != 'right':
+                row = _SHAPE_ROWS[int(item.sheet[-1]) - 1][item.number - 1].split()
+                self.assertTrue({'cross', 'pentagon'} & set(row), (item.sheet, item.number))
+
+    def test_the_colour_sheets(self):
+        from children_worksheets import run_colours
+        found = run_colours()
+        self.assertEqual(found['airplane windows'][0], 5)
+        self.assertEqual(sum(v[0] for k, v in found.items() if k.startswith('pairing')), 12)
+        sorting = [v for k, v in found.items() if k.startswith('sorting')]
+        self.assertGreaterEqual(sum(v[0] for v in sorting), 29)
+        self.assertLessEqual(sum(v[1] for v in sorting), 2)
+
+    def test_without_learned_symbols_the_number_sequences_are_not_read(self):
+        from children_worksheets import HELD_OUT, run
+        summary = run([i for i in HELD_OUT if i.kind == 'number'], symbols=None, use_slow=False)
+        self.assertEqual(summary['right'], 0)
 
 
 if __name__ == '__main__':
