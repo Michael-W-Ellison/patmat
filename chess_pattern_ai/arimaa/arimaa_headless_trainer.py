@@ -128,7 +128,7 @@ class ArimaaHeadlessTrainer:
             explore_step = random.choice(legal_steps)
             if all(step is not explore_step for step, _ in candidates):
                 candidates.append((explore_step, 0.0))
-        analysis = analyze_candidates(self.adapter, game, game.current_player,
+        analysis = self.general.analyze(self.adapter, game, game.current_player,
                                       [step for step, _ in candidates])
         # A win now, or a loss the opponent can force at once, decides first;
         # otherwise the existing score plus the general-pattern value
@@ -141,7 +141,7 @@ class ArimaaHeadlessTrainer:
         else:
             # Highest priority plus general-pattern value
             chosen = max(scored, key=lambda x: x[1])
-        self.last_general_features = chosen[2]
+        self.last_general_features = self.general.note_move(self.adapter, game, game.current_player, chosen[0], chosen[2])
         return chosen[0]
 
     def execute_turn(self, game: ArimaaGame, max_steps: int = 4, verbose: bool = False) -> Tuple[ArimaaGame, List[dict], List[str]]:

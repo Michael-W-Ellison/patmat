@@ -148,7 +148,7 @@ class GoHeadlessTrainer:
             explore_move = random.choice(legal_moves)
             if all(move is not explore_move for move, _ in candidates):
                 candidates.append((explore_move, 0.0))
-        analysis = analyze_candidates(self.adapter, game, ai_color,
+        analysis = self.general.analyze(self.adapter, game, ai_color,
                                       [move for move, _ in candidates])
         # A win now, or a loss the opponent can force at once, decides first;
         # otherwise the existing score plus the general-pattern value
@@ -162,7 +162,7 @@ class GoHeadlessTrainer:
         else:
             # Choose move with highest priority plus general patterns
             chosen = max(scored, key=lambda x: x[1])
-        self.last_general_features = chosen[2]
+        self.last_general_features = self.general.note_move(self.adapter, game, ai_color, chosen[0], chosen[2])
         return chosen[0]
 
     def play_game(self, ai_color: Color, verbose: bool = False) -> Tuple[str, float, int]:

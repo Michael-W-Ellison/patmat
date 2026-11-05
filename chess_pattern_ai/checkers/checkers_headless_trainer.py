@@ -74,7 +74,7 @@ class CheckersHeadlessTrainer:
 
         # One-ply lookahead over every opponent reply: material, progress toward
         # the winning condition, and finished games valued by their result
-        analysis = analyze_candidates(self.adapter, game, ai_color, legal_moves,
+        analysis = self.general.analyze(self.adapter, game, ai_color, legal_moves,
                                       max_replies=float('inf'))
 
         # Score each move using learned patterns
@@ -129,7 +129,7 @@ class CheckersHeadlessTrainer:
         else:
             # Choose move with highest priority plus lookahead evaluation and general patterns
             chosen = max(scored, key=lambda x: x[1])
-        self.last_general_features = chosen[2]
+        self.last_general_features = self.general.note_move(self.adapter, game, ai_color, chosen[0], chosen[2])
         return chosen[0]
 
     def play_game(self, ai_color: Color, verbose: bool = False) -> Tuple[str, float, int]:

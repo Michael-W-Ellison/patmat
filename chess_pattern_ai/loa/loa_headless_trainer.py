@@ -35,6 +35,14 @@ from loa.loa_adapter import LOAAdapter
 class LOAHeadlessTrainer:
     """Trains Lines of Action AI through self-play with pattern learning"""
 
+    # The general patterns also learn from a 3-ply search's rating of each of Black's moves (move_judges): over
+    # 2 x 300 games against this trainer's opponent, 96.5% of games won with it against 68.8% without
+    # (0: off; judging makes a game several times slower)
+    JUDGE_DEPTH = 3
+    # The general patterns get tactical parts (tactical_patterns: the threats left after the opponent's best
+    # answer): over 2 x 300 games with the judge, 99.2% of games won with them against 96.5% without
+    TACTICS = True
+
     def __init__(self, db_path: str = 'loa_training.db'):
         """Initialize trainer"""
         self.db_path = db_path
@@ -47,6 +55,10 @@ class LOAHeadlessTrainer:
         self.general = GeneralPatternLearner(universal_db_path(db_path), 'loa',
                                              import_cross_game=False)
         self.adapter = LOAAdapter()
+        if self.JUDGE_DEPTH > 0:
+            from move_judges import SearchJudge
+            self.general.judge = SearchJudge(self.adapter, self.JUDGE_DEPTH)
+        self.general.TACTICS = self.TACTICS
         self.last_general_features = None
 
         # Statistics
@@ -120,7 +132,7 @@ class LOAHeadlessTrainer:
             explore_move = random.choice(legal_moves)
             if all(move is not explore_move for move, _ in candidates):
                 candidates.append((explore_move, 0.0))
-        analysis = analyze_candidates(self.adapter, game, game.current_player,
+        analysis = self.general.analyze(self.adapter, game, game.current_player,
                                       [move for move, _ in candidates])
         # A win now, or a loss the opponent can force at once, decides first;
         # otherwise the existing score plus the general-pattern value
@@ -133,7 +145,7 @@ class LOAHeadlessTrainer:
         else:
             # Highest priority plus general-pattern value
             chosen = max(scored, key=lambda x: x[1])
-        self.last_general_features = chosen[2]
+        self.last_general_features = self.general.note_move(self.adapter, game, game.current_player, chosen[0], chosen[2])
         return chosen[0]
 
     def play_game(self, verbose: bool = False) -> Tuple[str, float, int]:

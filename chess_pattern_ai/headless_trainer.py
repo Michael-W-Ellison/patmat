@@ -17,20 +17,85 @@ import random
 from datetime import datetime
 from game_scorer import GameScorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
-from general_move_patterns import GeneralPatternLearner, analyze_candidates, evaluate, universal_db_path
+from general_move_patterns import GeneralPatternLearner, evaluate, universal_db_path
 from chess_adapter import ChessAdapter
+from mate_patterns import MatePatternLearner
+from position_patterns import PositionPatternLearner
+from sequence_patterns import SequencePatternLearner
+from pattern_search import PatternSearch
 
 
 class HeadlessTrainer:
     """Command-line chess AI trainer"""
 
-    def __init__(self, db_path='headless_training.db'):
+    use_sequences = True        # multi-move patterns (sequence_patterns) in move choice
+    SEQUENCE_WEIGHT = 20        # score per material unit a move's sequence patterns expect (a pawn is 10)
+    SEQUENCE_EXTRA = 5          # moves the sequence patterns rate best, considered beyond the 15 by priority
+    use_search = True           # choose moves by a look-ahead guided by the sequence patterns (pattern_search)
+    SEARCH_SECONDS = 0.5        # time for that look-ahead per move
+    use_position_values = True  # the look-ahead values positions by learned position patterns (position_patterns)
+    SEARCH_SELECTIVE = True     # look-ahead reads forcing moves + a few others below the root (pattern_search)
+    SEARCH_DEPTH = 3            # plies the look-ahead goes to (None: as deep as its time allows)
+    SEARCH_BONUS_CAP = 3.0      # limit on the pattern bonus added to the look-ahead's value of a move
+    SEARCH_THREATS = False      # look-ahead recognises threats: considers escapes, a second threat costs (pattern_search)
+    use_mate_values = False     # the look-ahead values kings' surroundings by how often they preceded mate
+    use_mobility_values = False # root moves get the learned value of their mobility class (general patterns)
+    MOBILITY_WEIGHT = 1.0       # material units (a pawn is 10) per point of that value (scale -50..+50)
+    SELF_PLAY_RANDOM_PLIES = 4  # self-play: plies played at random from the start, so that games differ
+    use_judge = False           # Stockfish judges every agent move; the general patterns learn from it (move_judges)
+    JUDGE_DEPTH = 12            # the judge's search depth
+    judge_positions = False     # with the judge: position patterns learn the judge's evaluations (position_patterns)
+    use_general_values = False  # root moves get the learned value of their general pattern (general_move_patterns)
+    GENERAL_WEIGHT = 0.2        # material units (a pawn is 10) per point of that value (scale -50..+50)
+    use_refutations = False     # learn (with the judge) which replies refute blunders; the search reads them
+    use_move_history = False    # the search orders moves by killer moves and history scores (move_history)
+    use_tactics = False         # general patterns get tactical parts: threats left after the best reply
+                                # (tactical_patterns)
+
+    def __init__(self, db_path='headless_training.db', opponent='random', stockfish_level=0,
+                 stockfish_path='/usr/games/stockfish', stockfish_time=0.1):
         self.scorer = GameScorer()
         self.prioritizer = LearnableMovePrioritizer(db_path)
+        # Multi-move patterns, learned from both players' moves
+        self.sequences = SequencePatternLearner(db_path)
+        # Position values, learned from every position of every game, whichever player is to move
+        self.positions = PositionPatternLearner(db_path, self.sequences.pieces)
+        # Kings' surroundings before mate, learned from both players' mates
+        self.mates = MatePatternLearner(db_path)
+        self.search = PatternSearch(self.sequences, self.SEARCH_SECONDS,
+                                    positions=self.positions if self.use_position_values else None,
+                                    selective=self.SEARCH_SELECTIVE, max_depth=self.SEARCH_DEPTH,
+                                    bonus_cap=self.SEARCH_BONUS_CAP,
+                                    mates=self.mates if self.use_mate_values else None,
+                                    threats=self.SEARCH_THREATS)
+        # Opponent: 'random' (capture-biased), 'stockfish' at a skill level (0-20), or 'self' (the agent's own
+        # search; self_play can also be switched per game when a Stockfish opponent is configured)
+        self.self_play = opponent == 'self'
+        self.learn = True                   # False: games are played but nothing is recorded (evaluation)
+        self.engine = None
+        self.stockfish_time = stockfish_time
+        if opponent == 'stockfish':
+            import chess.engine
+            self.engine = chess.engine.SimpleEngine.popen_uci(stockfish_path)
+            self.engine.configure({'Skill Level': stockfish_level})
         # Game-independent patterns, shared with the other games' trainers
         self.general = GeneralPatternLearner(universal_db_path(db_path), 'chess')
         self.adapter = ChessAdapter()
         self.last_general_features = None
+        self.judge = None
+        if self.use_judge:
+            from move_judges import StockfishJudge
+            self.judge = StockfishJudge(stockfish_path, self.JUDGE_DEPTH)
+            self.general.judge = self.judge
+        if self.use_refutations:
+            self.general.LEARN_REFUTATIONS = True
+            self.search.refutations = self.general.refutations
+            self.search.adapter = self.adapter
+        if self.use_tactics:
+            self.general.TACTICS = True
+        if self.use_move_history:
+            from move_history import MoveHistory
+            self.search.move_history = MoveHistory()
 
         self.games_played = 0
         self.wins = 0
@@ -54,6 +119,26 @@ class HeadlessTrainer:
         if board.is_game_over():
             return None
 
+        if self.use_search:
+            # the game-independent patterns of every legal move, each compared with the others (described
+            # alone, a move's gain and mobility classes would compare it with nothing)
+            moves = list(board.legal_moves)
+            features = {m: a['features'] for m, a in
+                        zip(moves, self.general.analyze(self.adapter, board, ai_color, moves,
+                                                        max_replies=float('inf')))}
+            extra = {m: 0.0 for m in moves}
+            if self.use_mobility_values:
+                # e.g. 'mob=restricts': whether the move leaves the opponent fewer replies than most moves
+                for m, f in features.items():
+                    extra[m] += self.MOBILITY_WEIGHT * self.general.part_value(f.split('|')[2])
+            if self.use_general_values:
+                for m, f in features.items():
+                    extra[m] += self.GENERAL_WEIGHT * self.general.value(f)
+            move = self.search.choose(board, extra)
+            # (the game-independent patterns learn from the move chosen)
+            self.last_general_features = self.general.note_move(self.adapter, board, ai_color, move, features[move])
+            return move
+
         legal_moves = list(board.legal_moves)
         legal_moves = self.prioritizer.sort_moves_by_priority(board, legal_moves)
 
@@ -62,10 +147,16 @@ class HeadlessTrainer:
         best_score = float('-inf')
 
         candidates = legal_moves[:15]
+        sequence_values = {}
+        if self.use_sequences:
+            context = self.sequences.context(board)
+            sequence_values = {m: self.sequences.value(board, m, context) for m in legal_moves}
+            extra = sorted(legal_moves[15:], key=lambda m: -sequence_values[m])[:self.SEQUENCE_EXTRA]
+            candidates = candidates + extra
         # One-ply lookahead over every opponent reply: material, progress toward
         # checkmate, and finished games valued by their result (see ChessAdapter)
-        analysis = analyze_candidates(self.adapter, board, ai_color, candidates,
-                                      max_replies=float('inf'))
+        analysis = self.general.analyze(self.adapter, board, ai_color, candidates,
+                                        max_replies=float('inf'))
         value_now = evaluate(self.adapter, board, ai_color)
 
         for move, result in zip(candidates, analysis):
@@ -88,17 +179,29 @@ class HeadlessTrainer:
             # Priority scaled by 20 means a priority-72 move gets +1440 bonus
             score = position_score + (priority * 20)
 
+            # Multi-move patterns: the material this move has been followed by, over the next plies
+            score += self.SEQUENCE_WEIGHT * sequence_values.get(move, 0.0)
+
             if score > best_score:
                 best_score = score
                 best_move = move
                 self.last_general_features = features
 
+        self.general.note_move(self.adapter, board, ai_color, best_move, self.last_general_features)
         return best_move
 
     def play_opponent_move(self, board):
-        """Random opponent with 30% capture bias"""
+        """The agent's own search in self-play, else Stockfish if configured, else a random opponent with 30%
+        capture bias"""
         if board.is_game_over():
             return None
+
+        if self.self_play:
+            return self.search.choose(board)
+
+        if self.engine is not None:
+            import chess.engine
+            return self.engine.play(board, chess.engine.Limit(time=self.stockfish_time)).move
 
         legal_moves = list(board.legal_moves)
         captures = [m for m in legal_moves if board.is_capture(m)]
@@ -114,6 +217,10 @@ class HeadlessTrainer:
         game_moves = []
         general_features = []
         move_count = 0
+        if self.self_play:
+            # the search is deterministic: without random first plies, self-play games would repeat
+            for _ in range(self.SELF_PLAY_RANDOM_PLIES):
+                board.push(random.choice(list(board.legal_moves)))
 
         # Play until game naturally ends (checkmate, stalemate, etc.)
         # No artificial move limit - let games reach their conclusion
@@ -190,9 +297,15 @@ class HeadlessTrainer:
 
         self.score_history.append(final_score)
 
-        # Record for learning
-        self.prioritizer.record_game_moves(game_moves, ai_color, result, final_score)
-        self.general.record_game(general_features, result, 'chess')
+        # Record for learning (sequences, positions and mates learn from both players' moves, so a self-play game
+        # is learned from both colours)
+        if self.learn:
+            self.prioritizer.record_game_moves(game_moves, ai_color, result, final_score)
+            self.general.record_game(general_features, result, 'chess')
+            self.sequences.record_game(board.move_stack, ai_color, result)
+            self.positions.record_game(board.move_stack, ai_color, result,
+                                       judge=self.judge if self.judge_positions else None)
+            self.mates.record_game(board.move_stack)
 
         # Store result details
         self.game_results.append({
@@ -314,12 +427,33 @@ class HeadlessTrainer:
             piece, category, dist, seen, win_rate, conf, priority = row
             print(f"{piece:<10} {category:<14} {dist:<10} {seen:<6} {win_rate:<7.1%} {conf:<6.2f} {priority:<8.1f}")
 
+        for title, avoid in (('PURSUE', False), ('AVOID', True)):
+            print(f"\nMULTI-MOVE PATTERNS TO {title} (value: expected material gain, a pawn = 10)")
+            for pattern, value, seen in self.sequences.top_patterns(limit, avoid=avoid):
+                print(f"  {value:+7.1f}  seen {seen:6.1f}  {pattern}")
+
+        for title, worst in (('BEST', False), ('WORST', True)):
+            print(f"\nPOSITION PATTERNS, {title} FOR THE SIDE TO MOVE (m: its piece, t: the other side's)")
+            for pattern, weight, seen in self.positions.top_patterns(limit, worst=worst):
+                print(f"  {weight:+7.1f}  seen {seen:7.0f}  {pattern}")
+
+        print("\nKING SURROUNDINGS MOST OFTEN FOLLOWED BY MATE (free/blocked/attacked/off-board squares, + check)")
+        for pattern, rate, seen in self.mates.top_patterns(limit):
+            print(f"  {rate:6.1%}  seen {seen:7.0f}  {pattern}")
+
         print("=" * 70)
 
     def close(self):
         """Clean up resources"""
         self.prioritizer.close()
         self.general.close()
+        self.mates.close()
+        self.positions.close()
+        self.sequences.close()
+        if self.engine is not None:
+            self.engine.quit()
+        if self.judge is not None:
+            self.judge.close()
 
 
 def main():
@@ -333,10 +467,16 @@ def main():
     parser.add_argument('--export-json', action='store_true', help='Export results to JSON')
     parser.add_argument('--export-csv', action='store_true', help='Export results to CSV')
     parser.add_argument('--show-patterns', type=int, default=0, metavar='N', help='Show top N patterns after training')
+    parser.add_argument('--opponent', choices=['random', 'stockfish', 'self'], default='random',
+                        help="Opponent: 'self' is the agent's own search (default: random)")
+    parser.add_argument('--level', type=int, default=0, help='Stockfish skill level 0-20 (default: 0)')
+    parser.add_argument('--stockfish-path', default='/usr/games/stockfish', help='Stockfish binary')
+    parser.add_argument('--db', default='headless_training.db', help='Training database (default: headless_training.db)')
 
     args = parser.parse_args()
 
-    trainer = HeadlessTrainer()
+    trainer = HeadlessTrainer(args.db, opponent=args.opponent, stockfish_level=args.level,
+                              stockfish_path=args.stockfish_path)
 
     try:
         trainer.train(args.num_games, verbose=args.verbose, progress_interval=args.progress)

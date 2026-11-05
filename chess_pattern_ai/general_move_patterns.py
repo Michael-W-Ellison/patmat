@@ -59,6 +59,8 @@ import statistics
 from typing import Dict, List, Sequence
 
 import win_lift
+from refutation_patterns import (BLUNDER_MEDIANS, EXTENSION_DEPTH, REPLIES_EXTENDED, RefutationLearner,
+                                 reply_features)
 
 DB_NAME = 'universal_move_patterns.db'
 MAX_REPLIES = 30       # opponent replies examined per candidate (sampled above this)
@@ -96,10 +98,24 @@ def evaluate(adapter, state, color) -> float:
 
 def analyze_candidates(adapter, state, color, candidates: Sequence,
                        rng: random.Random = random,
-                       max_replies: int = MAX_REPLIES) -> List[Dict]:
+                       max_replies: int = MAX_REPLIES, refutations=None, tactics: bool = False,
+                       move_history=None) -> List[Dict]:
     """
     Evaluate each candidate move one ply deep and describe it with
     game-independent features.
+
+    With refutations (a refutation_patterns.RefutationLearner), each
+    candidate's REPLIES_EXTENDED replies whose patterns most often refuted
+    blunders are searched EXTENSION_DEPTH plies further, and 'net' becomes
+    the lower of the two values (the features are those of the one-ply look).
+
+    With move_history (a move_history.MoveHistory, kept between calls by the
+    caller), where the opponent's replies are sampled the killer replies
+    (opp's best against earlier candidates here) and the replies with the
+    highest history scores fill REPLIES_KEPT of the sample first.
+
+    With tactics, each feature string gets the tactical parts of
+    tactical_patterns appended: 'gain|net|mob|threat|tac=<t>|top=<u>'.
 
     Returns:
         One dict per candidate, in the same order:
@@ -126,9 +142,24 @@ def analyze_candidates(adapter, state, color, candidates: Sequence,
         if in_place:
             adapter.pop(current)
 
+    if tactics:
+        import tactical_patterns
+        now_summary = tactical_patterns.summary(
+            tactical_patterns.gains(adapter, state, color, play, unplay, rng, max_replies)[0])
+
+    def follow_ups(current):
+        values, wins = tactical_patterns.gains(adapter, current, color, play, unplay, rng, max_replies, value_now)
+        if not values:
+            return None
+        share, best = tactical_patterns.summary(values)
+        return share, best, sum(v > EPSILON for v in values), wins
+
+    if move_history is not None:
+        move_history.new_search()
+
     for move in candidates:
         after = play(state, move)
-        entry = {'replies': None, 'threat': 'safe', 'mob': None}
+        entry = {'replies': None, 'threat': 'safe', 'mob': None, 'tactics': None}
 
         if adapter.is_over(after):
             winner = adapter.winner(after)
@@ -140,13 +171,16 @@ def analyze_candidates(adapter, state, color, candidates: Sequence,
             entry['gain'] = entry['net'] = adapter.advantage(after, color) - value_now
             if adapter.to_move(after) == color:
                 entry['mob'] = 'extra_turn'
+                if tactics:
+                    entry['tactics'] = follow_ups(after)
             else:
                 replies = adapter.legal_moves(after, opp)
                 entry['replies'] = len(replies)
                 if len(replies) > max_replies:
-                    replies = rng.sample(list(replies), max_replies)
+                    replies = _sample_replies(list(replies), opp, max_replies, rng, move_history)
 
                 worst = None
+                answer = None       # the reply rated best for opp
                 for reply in list(replies):
                     after_reply = play(after, reply)
                     if adapter.is_over(after_reply):
@@ -162,10 +196,23 @@ def analyze_candidates(adapter, state, color, candidates: Sequence,
                             value = WIN_VALUE
                     else:
                         value = adapter.advantage(after_reply, color)
-                    worst = value if worst is None else min(worst, value)
+                    if worst is None or value < worst:
+                        worst, answer = value, reply
                     unplay(after_reply)
                 if worst is not None:
                     entry['net'] = worst - value_now
+                    if move_history is not None:
+                        move_history.record(1, opp, answer, 1)
+                entry['net_plain'] = entry['net']
+                if tactics and answer is not None:
+                    after_answer = play(after, answer)
+                    if not adapter.is_over(after_answer) and adapter.to_move(after_answer) == color:
+                        entry['tactics'] = follow_ups(after_answer)
+                    unplay(after_answer)
+                if refutations is not None and replies:
+                    extended = _extend_refutations(adapter, after, color, opp, list(replies), refutations)
+                    if extended is not None:
+                        entry['net'] = min(entry['net'], extended - value_now)
         unplay(after)
         info.append(entry)
 
@@ -188,8 +235,55 @@ def analyze_candidates(adapter, state, color, candidates: Sequence,
             else:
                 mob = 'neutral'
 
-        e['features'] = f"gain={gain_class}|net={_sign_class(e['net'])}|mob={mob}|threat={e['threat']}"
+        e['features'] = (f"gain={gain_class}|net={_sign_class(e.get('net_plain', e['net']))}|mob={mob}"
+                         f"|threat={e['threat']}")
+        if tactics:
+            e['features'] += '|' + tactical_patterns.classify(now_summary, e['tactics'])
     return [{'features': e['features'], 'gain': e['gain'], 'net': e['net']} for e in info]
+
+
+def _sample_replies(replies: list, opp, count: int, rng, move_history) -> list:
+    """count of replies: at random, or with move_history its killers and best-scored first (REPLIES_KEPT)"""
+    if move_history is None:
+        return rng.sample(replies, count)
+    from move_history import REPLIES_KEPT
+    first = [r for r in move_history.order(replies, 1, opp)[:max(1, int(count * REPLIES_KEPT))]
+             if move_history.is_killer(1, r) or move_history.score(opp, r) > 0]
+    taken = {id(r) for r in first}
+    rest = [r for r in replies if id(r) not in taken]
+    return first + rng.sample(rest, count - len(first))
+
+
+def _extend_refutations(adapter, after, color, opp, replies, refutations):
+    """
+    color's lowest value after the replies (opp's, in after) rated likeliest to refute, each searched
+    EXTENSION_DEPTH plies further; None if none is rated above average
+    """
+    from move_judges import SearchJudge
+    chosen = refutations.ranked(reply_features(adapter, after, opp, replies), REPLIES_EXTENDED)
+    if not chosen:
+        return None
+    search = SearchJudge(adapter, EXTENSION_DEPTH)
+    worst = None
+    for i in chosen:
+        state = search._play(after, replies[i])
+        try:
+            v = search._search(state, color, EXTENSION_DEPTH, -float('inf'), float('inf'), False)
+        finally:
+            search._unplay(state)
+        worst = v if worst is None else min(worst, v)
+    return worst
+
+
+BASE_PARTS = 4      # gain, net, mob, threat; analyze_candidates(tactics=True) appends more
+
+
+def split_patterns(features: str) -> List[str]:
+    """The patterns a feature string is learned as: itself, or its four-part pattern and its tactical parts"""
+    parts = features.split('|')
+    if len(parts) <= BASE_PARTS:
+        return [features]
+    return ['|'.join(parts[:BASE_PARTS]), '|'.join(parts[BASE_PARTS:])]
 
 
 def decisive_value(net: float) -> float:
@@ -249,11 +343,38 @@ class GeneralPatternLearner:
     With no imported evidence this is the plain win lift (see win_lift.py).
     A game created with import_cross_game=False uses only its own evidence
     (its evidence is still recorded and available to the other games).
+
+    Judged evidence: with a judge (move_judges; self.judge, or JUDGE_DEPTH > 0
+    for a SearchJudge over the trainer's adapter), every move passed to
+    note_move() is also rated by the judge's loss for it: quality
+    q = 1 - min(2, loss / m), where m is a running median of the game's
+    nonzero losses, so the judge's best move is +1, a median loss 0 and twice
+    the median or more -1 (a scale-free rating, comparable between games).
+    A pattern's judged lift is its moves' mean quality minus the game's,
+    shrunk toward 0 by JUDGED_PRIOR moves, with other games' evidence as a
+    prior worth at most CROSS_GAME_MOVES moves (as for the win lift). Where
+    any judged evidence is loaded, a pattern's value is the weighted mean
+    of its win lift and judged lift (JUDGED_WEIGHT), each a dense signal for
+    the other's sparse one: a game result rates all of a game's moves at once,
+    the judge rates each move.
     """
 
     TABLE = 'general_pattern_evidence'
     LEGACY_TABLE = 'general_move_patterns'   # summed over games; imported as game ''
     CROSS_GAME_GAMES = 10.0
+    LEARN_REFUTATIONS = False   # with a judge: learn which replies refute the agent's blunders (refutation_patterns)
+    USE_REFUTATIONS = False     # analyze(): search the replies likeliest to refute further
+    USE_MOVE_HISTORY = False    # killer moves and history scores (move_history): analyze() samples replies
+                                # with them, and a SearchJudge orders its moves by them
+    TACTICS = False             # analyze(): append the tactical parts (tactical_patterns), learned as a pattern
+                                # of their own whose value is added to the four-part pattern's
+    JUDGED_TABLE = 'general_judged_evidence'
+    JUDGE_SCALE_TABLE = 'general_judge_scale'
+    JUDGE_DEPTH = 0             # > 0: note_move() judges moves by a SearchJudge this deep (unless judge is set)
+    JUDGED_PRIOR = 30.0         # moves at quality lift 0 that a pattern's judged lift is shrunk toward
+    CROSS_GAME_MOVES = 300.0    # most moves other games' judged evidence counts as
+    JUDGED_WEIGHT = 1.0         # weight of the judged lift against the win lift in value()
+    SCALE_STEP = 1.05           # running median of nonzero losses: factor per move
 
     def __init__(self, db_path: str = DB_NAME, game_name: str = '',
                  import_cross_game: bool = True):
@@ -264,6 +385,9 @@ class GeneralPatternLearner:
         self.conn = sqlite3.connect(db_path, timeout=60)
         self.cursor = self.conn.cursor()
         self.values: Dict[str, float] = {}
+        self.judge = None                   # a move judge (move_judges); see note_move
+        self.pending: List[tuple] = []      # (features, judged loss) of moves noted since the last record_game
+        self.last_loss = None               # the judged loss of the last move noted
 
         self.cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS {self.TABLE} (
@@ -278,9 +402,28 @@ class GeneralPatternLearner:
             )
         ''')
         win_lift.ensure_columns(self.cursor, self.TABLE)
+        self.cursor.execute(f'''
+            CREATE TABLE IF NOT EXISTS {self.JUDGED_TABLE} (
+                features TEXT NOT NULL,
+                game TEXT NOT NULL,
+                moves REAL DEFAULT 0.0,         -- moves judged
+                lift_sum REAL DEFAULT 0.0,      -- sum over them of (quality - the game's mean quality then)
+                PRIMARY KEY (features, game)
+            )
+        ''')
+        self.cursor.execute(f'''
+            CREATE TABLE IF NOT EXISTS {self.JUDGE_SCALE_TABLE} (
+                game TEXT PRIMARY KEY,
+                median_loss REAL,               -- running median of the game's nonzero judged losses
+                moves REAL DEFAULT 0.0,         -- moves judged
+                quality_sum REAL DEFAULT 0.0
+            )
+        ''')
         self._import_legacy()
         self.conn.commit()
         self._load_values()
+        self.refutations = RefutationLearner(self.conn, game_name, import_cross_game)
+        self.move_history = None    # a move_history.MoveHistory, made by analyze() when USE_MOVE_HISTORY is set
 
     def _import_legacy(self):
         """
@@ -312,32 +455,158 @@ class GeneralPatternLearner:
                 target = imported
             else:
                 continue
-            totals = target.setdefault(features, [0.0, 0.0])
-            totals[0] += games
-            totals[1] += lift_sum
+            # the whole pattern, and each of its parts ('mob=restricts', ...) over all patterns that have it
+            for key in [features] + features.split('|'):
+                totals = target.setdefault(key, [0.0, 0.0])
+                totals[0] += games
+                totals[1] += lift_sum
 
+        judged_own: Dict[str, List[float]] = {}
+        judged_imported: Dict[str, List[float]] = {}
+        for features, game, moves, lift_sum in self.cursor.execute(
+                f"SELECT features, game, moves, lift_sum FROM {self.JUDGED_TABLE}"):
+            if game == self.game_name:
+                target = judged_own
+            elif self.import_cross_game:
+                target = judged_imported
+            else:
+                continue
+            for key in [features] + features.split('|'):
+                totals = target.setdefault(key, [0.0, 0.0])
+                totals[0] += moves
+                totals[1] += lift_sum
+
+        def combined(own_totals, imported_totals, key, cap, prior_n):
+            own_n, own_sum = own_totals.get(key, (0.0, 0.0))
+            imp_n, imp_sum = imported_totals.get(key, (0.0, 0.0))
+            k = min(imp_n, cap)
+            prior = (imp_sum / imp_n) * k if imp_n > 0 else 0.0
+            return (own_sum + prior) / (own_n + k + prior_n)
+
+        judged = bool(judged_own or judged_imported)
         self.values = {}
-        for features in own.keys() | imported.keys():
-            own_games, own_sum = own.get(features, (0.0, 0.0))
-            imp_games, imp_sum = imported.get(features, (0.0, 0.0))
-            k = min(imp_games, self.CROSS_GAME_GAMES)
-            prior = (imp_sum / imp_games) * k if imp_games > 0 else 0.0
-            lift = (own_sum + prior) / (own_games + k + win_lift.PRIOR_GAMES)
-            self.values[features] = 50.0 * lift
+        self.part_values = {}
+        for key in own.keys() | imported.keys() | judged_own.keys() | judged_imported.keys():
+            lift = combined(own, imported, key, self.CROSS_GAME_GAMES, win_lift.PRIOR_GAMES)
+            if judged:
+                judged_lift = combined(judged_own, judged_imported, key, self.CROSS_GAME_MOVES, self.JUDGED_PRIOR)
+                lift = (lift + self.JUDGED_WEIGHT * judged_lift) / (1.0 + self.JUDGED_WEIGHT)
+            (self.values if '|' in key else self.part_values)[key] = 50.0 * lift
+
+    def part_value(self, part: str) -> float:
+        """
+        Learned value of one part of the general patterns (e.g. 'mob=restricts'), from the evidence of every
+        pattern that has it, weighted between games as for whole patterns; same scale as value()
+        """
+        return self.part_values.get(part, 0.0)
 
     def value(self, features: str) -> float:
         """
         Learned value of a general pattern for this game, on the game-specific
-        priority scale (50 * win lift, -50..+50, 0 = no evidence either way)
+        priority scale (50 * win lift, -50..+50, 0 = no evidence either way); a pattern with tactical parts is
+        worth the sum of its two halves' values (split_patterns)
         """
-        return self.values.get(features, 0.0)
+        return sum(self.values.get(p, 0.0) for p in split_patterns(features))
+
+    def note_move(self, adapter, state, color, move, features: str) -> str:
+        """
+        A trainer's move, before it is played, with its general pattern (returned unchanged). With a judge
+        (self.judge, or a SearchJudge over adapter when JUDGE_DEPTH > 0) the move's judged loss is kept, and the
+        next record_game() learns from it (except where the judge sees the position as lost whatever is
+        played: last_loss is then None).
+        """
+        if self.judge is None and self.JUDGE_DEPTH > 0:
+            from move_judges import SearchJudge
+            self.judge = SearchJudge(adapter, self.JUDGE_DEPTH)
+        if self.USE_MOVE_HISTORY and getattr(self.judge, 'move_history', False) is None:
+            from move_history import MoveHistory
+            self.judge.move_history = MoveHistory()
+        if self.judge is not None and features is not None:
+            self.last_loss = self.judge.move_loss(state, color, move)
+            if self.last_loss is not None:          # (None: the judge sees the position as lost already)
+                self.pending.append((features, self.last_loss))
+                if self.LEARN_REFUTATIONS:
+                    row = self.cursor.execute(f"SELECT median_loss FROM {self.JUDGE_SCALE_TABLE} WHERE game = ?",
+                                              (self.game_name,)).fetchone()
+                    if row and row[0] and self.last_loss >= BLUNDER_MEDIANS * row[0]:
+                        self.learn_refutation(adapter, state, color, move)
+        return features
+
+    def learn_refutation(self, adapter, state, color, move):
+        """The judge rated color's move a blunder: learn the patterns of the replies and of its best reply"""
+        in_place = hasattr(adapter, 'push') and hasattr(adapter, 'pop')
+        if in_place:
+            adapter.push(state, move)
+            after = state
+        else:
+            after = adapter.apply(state, move)
+        try:
+            opp = adapter.opponent(color)
+            if not adapter.is_over(after) and adapter.to_move(after) == opp:
+                replies = list(adapter.legal_moves(after, opp))
+                if len(replies) > 1:
+                    features = reply_features(adapter, after, opp, replies)
+                    self.refutations.record(features, self.judge.best_reply(after, color, replies))
+        finally:
+            if in_place:
+                adapter.pop(state)
+
+    def analyze(self, adapter, state, color, candidates: Sequence, **kwargs) -> List[Dict]:
+        """analyze_candidates(), with this game's refutation patterns when USE_REFUTATIONS is set"""
+        if self.USE_REFUTATIONS and self.refutations.has_evidence():
+            kwargs['refutations'] = self.refutations
+        if self.TACTICS:
+            kwargs['tactics'] = True
+        if self.USE_MOVE_HISTORY:
+            if self.move_history is None:
+                from move_history import MoveHistory
+                self.move_history = MoveHistory()
+            kwargs['move_history'] = self.move_history
+        return analyze_candidates(adapter, state, color, candidates, **kwargs)
+
+    def record_judged(self, judged: List[tuple], game_name: str = None):
+        """Learn from judged moves of one game: [(features, judged loss)] (see the class docstring)"""
+        game = self.game_name if game_name is None else game_name
+        row = self.cursor.execute(
+            f"SELECT median_loss, moves, quality_sum FROM {self.JUDGE_SCALE_TABLE} WHERE game = ?",
+            (game,)).fetchone()
+        median, moves, quality_sum = row if row else (None, 0.0, 0.0)
+        totals: Dict[str, List[float]] = {}
+        for features, loss in [(p, loss) for f, loss in judged for p in split_patterns(f)]:
+            if loss > EPSILON:
+                if median is None:
+                    median = loss
+                else:
+                    median = median * self.SCALE_STEP if loss > median else median / self.SCALE_STEP
+            quality = 1.0 - min(2.0, loss / median) if median else 1.0
+            mean = quality_sum / moves if moves else 0.0
+            entry = totals.setdefault(features, [0.0, 0.0])
+            entry[0] += 1.0
+            entry[1] += quality - mean
+            moves += 1.0
+            quality_sum += quality
+        self.cursor.executemany(f'''
+            INSERT INTO {self.JUDGED_TABLE} (features, game, moves, lift_sum) VALUES (?, ?, ?, ?)
+            ON CONFLICT(features, game) DO UPDATE SET
+                moves = moves + excluded.moves, lift_sum = lift_sum + excluded.lift_sum
+        ''', [(f, game, n, l) for f, (n, l) in totals.items()])
+        self.cursor.execute(f"INSERT OR REPLACE INTO {self.JUDGE_SCALE_TABLE} VALUES (?, ?, ?, ?)",
+                            (game, median, moves, quality_sum))
+        self.conn.commit()
 
     def record_game(self, features_used: List[str], result: str, game_name: str = None):
-        """Credit the general patterns used in one game of game_name (default: this learner's game)"""
+        """
+        Credit the general patterns used in one game of game_name (default: this learner's game), and learn
+        from the moves judged since the last call (note_move)
+        """
         game = self.game_name if game_name is None else game_name
+        if self.pending:
+            self.record_judged(self.pending, game)
+            self.pending = []
         counts: Dict[str, int] = {}
         for features in features_used:
-            counts[features] = counts.get(features, 0) + 1
+            for pattern in split_patterns(features):
+                counts[pattern] = counts.get(pattern, 0) + 1
 
         ids = []
         for features, count in counts.items():
