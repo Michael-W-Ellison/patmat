@@ -68,6 +68,13 @@ Results (sequence_puzzles, symbol_learning and learned_symbols.json as committed
   as the nearest known shape); identify 7/7. The copies of a shape cut from
   a page are never identical cell for cell, so without learned shapes the
   pattern rows are not read (the repeat family finds no repeat).
+- colours (run_colours), objects cut from K5 and Math Worksheets 4 Kids pages,
+  read with colours learned by colour_lessons: pairing words and pictures
+  (colors-4, match-colors-to-names-4) 12/12; sorting pictures under 3 colour
+  words (sorting-colors 1-4) 29/36, 2 wrong (a light brown loaf read as
+  yellow, a dark grey tyre as blue), 5 unanswered (3 white: not taught; a
+  magenta balloon and pale pink flowers: too far from the pinks and purples
+  learned); the airplane window colour patterns (color-easy1) 5/5.
 
 Run: python children_worksheets.py  (per sheet and per kind of item; -v for every item)
 """
@@ -535,6 +542,138 @@ def _shape_cells() -> Dict:
     return _shape_cache
 
 
+COLOUR_CELLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'worksheet_colour_cells.json')
+COLOUR_URL = 'https://www.k5learning.com/worksheets/kindergarten/{}.pdf'
+AIRPLANES = 'https://www.mathworksheets4kids.com/patterns/color-easy1.pdf'
+_colour_cache: Dict = {}
+
+
+def _small(sample: np.ndarray, most: int = 24) -> Dict:
+    """An RGBA sample made small for the JSON file (every k-th pixel, k rounded up, so samples of one size stay
+    of one size; its median colour stays), zlib-compressed"""
+    k = max(1, -(-max(sample.shape[:2]) // most))
+    import base64
+    small = np.ascontiguousarray(sample[::k, ::k]).astype(np.uint8)
+    return {'shape': list(small.shape), 'zlib': base64.b64encode(zlib.compress(small.tobytes(), 9)).decode()}
+
+
+def _unsmall(d) -> Optional[np.ndarray]:
+    import base64
+    if d is None:
+        return None
+    return np.frombuffer(zlib.decompress(base64.b64decode(d['zlib'])), np.uint8).reshape(d['shape'])
+
+
+def save_colour_cells(cache: str, path: str = COLOUR_CELLS) -> None:
+    """
+    Cut from the pages: the pairing sheets (K5 colors-4, match-colors-to-names-4: the words, as ink, and the
+    objects), the sorting sheets (sorting-colors 1-4: the 3 words and the 9 pictures) and the Math Worksheets
+    4 Kids airplane windows (color-easy1: 5 rows of 9 coloured windows)
+    """
+    import colour_lessons as C
+    from digit_lessons import fetch
+    from shape_lessons import _bands, _dark, table, words_in
+    from symbol_learning import colourful, components, ink, pack
+    out = {'pairing': [], 'sorting': [], 'airplanes': []}
+    for name, words_left in (('colors-4', True), ('match-colors-to-names-4', True)):
+        p = C.page(fetch(COLOUR_URL.format(name), cache))[C.HEADER:]
+        half = p.shape[1] // 2
+        dark = _dark(p[:, :half])
+        words = [pack(w) for r0, r1 in _bands(dark) for w in words_in(dark[r0:r1])]
+        objects = [_small(o['sample']) for o in C.objects_in(p[:, half:])]
+        out['pairing'].append({'sheet': name, 'words': words, 'objects': objects})
+    for k in (1, 2, 3, 4):
+        p = C.page(fetch(COLOUR_URL.format(f'sorting-colors-{k}'), cache))
+        words = [pack(_dark(r[0])) for r in table(p)]
+        # the cut-out grid: the second ruled table on the page, below the first
+        mask = ink(p)
+        grids = sorted(components(mask), key=lambda c: -(c[0].stop - c[0].start) * (c[1].stop - c[1].start))
+        second = grids[1]
+        cells = table(p[second[0], second[1]])
+        pictures = []
+        for row in cells:
+            for cell in row:
+                objs = C.objects_in(cell, least=20)
+                pictures.append(_small(max(objs, key=lambda o: o['mask'].sum())['sample']) if objs else None)
+        out['sorting'].append({'sheet': f'sorting-colors-{k}', 'words': words, 'pictures': pictures})
+    p = C.page(fetch(AIRPLANES, cache))
+    tint = colourful(p) & ink(p)
+    windows = [(rs.start, cs.start, np.dstack([p[rs, cs, :3], (m * 255).astype(np.uint8)]))
+               for rs, cs, m in components(tint) if 30 < rs.stop - rs.start < 90 and 30 < cs.stop - cs.start < 90]
+    rows = []
+    for top, left, w in sorted(windows, key=lambda e: e[0]):
+        if rows and abs(top - rows[-1][0][0]) < 40:
+            rows[-1].append((top, left, w))
+        else:
+            rows.append([(top, left, w)])
+    # the windows are small: kept whole (their outlines are compared, colours: SAME_DRAWING)
+    out['airplanes'] = [[_small(w, most=100) for _, _, w in sorted(r, key=lambda e: e[1])] for r in rows]
+    with open(path, 'w') as f:
+        json.dump(out, f)
+
+
+def _colour_cells() -> Dict:
+    from symbol_learning import unpack
+    if not _colour_cache:
+        with open(COLOUR_CELLS) as f:
+            data = json.load(f)
+        arr = _unsmall
+        _colour_cache['pairing'] = [dict(sheet=d['sheet'], words=[unpack(w) for w in d['words']],
+                                         objects=[arr(o) for o in d['objects']]) for d in data['pairing']]
+        _colour_cache['sorting'] = [dict(sheet=d['sheet'], words=[unpack(w) for w in d['words']],
+                                         pictures=[arr(o) for o in d['pictures']]) for d in data['sorting']]
+        _colour_cache['airplanes'] = [[arr(w) for w in row] for row in data['airplanes']]
+    return _colour_cache
+
+
+# the answers (mine): each object's colour, in the order cut (top to bottom, left to right)
+COLOUR_PAIRING_ANSWERS = {'colors-4': 'green red grey orange blue black',
+                          'match-colors-to-names-4': 'blue yellow orange red green pink'}
+COLOUR_SORTING_ANSWERS = {
+    'sorting-colors-1': 'brown yellow brown yellow yellow purple purple purple brown',
+    'sorting-colors-2': 'blue pink blue black blue black pink black pink',
+    'sorting-colors-3': 'red brown grey red grey brown grey brown red',
+    'sorting-colors-4': 'white green white green orange orange orange white green'}
+AIRPLANE_ANSWERS = ['orange', 'blue', 'brown', 'orange', 'yellow']
+
+
+def run_colours(symbols='learned') -> Dict:
+    """
+    The colour sheets: on the pairing and sorting sheets each object is given the nearest learned colour of
+    those the sheet's words name (read by the program); the airplane rows are sequence puzzles (the
+    colours family). Returns {kind: [right, wrong, no answer, items]}
+    """
+    from sequence_puzzles import SequencePuzzle, solve
+    from symbol_learning import COLOURS, SymbolMemory
+    if symbols == 'learned':
+        from digit_lessons import LEARNED
+        symbols = SymbolMemory(LEARNED)
+    cells = _colour_cells()
+    out = {}
+
+    def score(kind, answer, truth):
+        t = out.setdefault(kind, [0, 0, 0, 0])
+        t[3] += 1
+        t[0 if answer == truth else 2 if answer is None else 1] += 1
+
+    def choose(sample, names):
+        if sample is None:
+            return None
+        keep, d = symbols._distances(sample, 'colour')
+        best = [(d[j], symbols.examples[i]['meaning']) for j, i in enumerate(keep) if symbols.examples[i]['meaning'] in names]
+        return min(best)[1] if best and min(best)[0] <= 40 else None
+
+    for sheet, answers in (('pairing', COLOUR_PAIRING_ANSWERS), ('sorting', COLOUR_SORTING_ANSWERS)):
+        for d in cells[sheet]:
+            names = {symbols.read_word(w, COLOURS) for w in d['words']} - {None}
+            for sample, truth in zip(d['objects' if sheet == 'pairing' else 'pictures'], answers[d['sheet']].split()):
+                score(f'{sheet} ({d["sheet"]})', choose(sample, names), truth)
+    for row, truth in zip(cells['airplanes'], AIRPLANE_ANSWERS):
+        answer = solve(SequencePuzzle(list(row), 1), symbols=symbols, use_slow=False)
+        score('airplane windows', answer['values'][0] if answer and answer.get('values') else None, truth)
+    return out
+
+
 def _number_cells() -> List[List[Optional[np.ndarray]]]:
     from symbol_learning import unpack
     if not _cells_cache:
@@ -983,6 +1122,8 @@ if __name__ == '__main__':
                          ('Shapes in patterns (K5 Learning), read with learned shapes', SHAPE_ITEMS)):
         print(f'== {title}')
         report(run(items, verbose='-v' in sys.argv))
+    for kind, (r, w, u, n) in run_colours().items():
+        print(f'== Colours, {kind}: right {r}/{n}, wrong {w}, no answer {u}')
     found = run_identify()
     print(f'== Identifying shapes (K5 shapes-3): right {found["right"]}/{found["items"]}, wrong {found["wrong"]}, '
           f'no answer {found["unanswered"]}')

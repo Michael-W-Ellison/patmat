@@ -33,6 +33,10 @@ Lessons (each returns what it learned, or why it learned nothing):
 - case lessons: lower case letters to be matched with capitals (one of
   several, or a column of them, shuffled): once the capitals are recognised,
   as choice and matching lessons with the capitals' lower case names.
+- across lessons (learn_across): two matching lessons left undecided, each
+  with symbols unknown and names left over: a symbol of one that looks the
+  same as one of the other (a black tyre, a black swatch) is the same
+  thing, so it is the one name both have left, when there is exactly one.
 Lessons that cannot yet be decided are kept (teach) and tried again once
 other lessons have taught more, so knowledge spreads from symbols known in
 one style to the same symbols in other styles.
@@ -57,7 +61,11 @@ lessons shaped like practice sheets (handwriting_lessons). read_word(panel,
 vocabulary) reads a printed word in context: the vocabulary word its
 letters' likeliest readings spell with the fewest changes. Shapes (domain
 'shape', names in SHAPES) are compared by silhouette (an outline filled in),
-and learned from shape worksheets (shape_lessons).
+and learned from shape worksheets (shape_lessons). Colours (domain
+'colour', names in COLOURS) are samples of objects (RGBA: alpha the object),
+compared by their median colour in CIELAB (colour_of), learned from colour
+worksheets (colour_lessons); in a matching lesson an object is compared only
+with the colours the sheet names.
 
 Blobs (blobs): ink is dark (luminance below DARK) or coloured (saturation
 above COLOURED); connected ink is grouped into blobs (parts whose boxes
@@ -288,6 +296,31 @@ SHAPES = ('circle', 'oval', 'square', 'rectangle', 'triangle', 'diamond', 'star'
           'hexagon', 'octagon', 'parallelogram', 'cross', 'trapezoid')
 
 
+# the names of colours, known beforehand as words; a colour sample is an RGBA image (alpha: the object)
+COLOURS = ('red', 'orange', 'yellow', 'green', 'blue', 'purple', 'pink', 'brown', 'black', 'white', 'grey')
+COLOUR_REJECT = 40.0    # colours: a sample further than this (CIELAB) from every example is unknown
+COLOUR_CONFIDENT = 20.0  # colours: recognised with confidence when nearer than this (chosen on the labelled
+                        # objects of colors 1-3, recognised among the sheet's names: 13 of 18, all right),
+COLOUR_MARGIN = 15.0    # ... or nearer by this than any example of another colour
+
+
+def colour_of(sample) -> np.ndarray:
+    """The colour of an object, in CIELAB: the median of its pixels (alpha > 0), so details on it (eyes,
+    spots, a dark outline) do not count"""
+    a = np.asarray(sample).astype(float)
+    rgb = a[..., :3][a[..., 3] > 0] if a.shape[-1] == 4 else a[..., :3].reshape(-1, 3)
+    return _lab(np.median(rgb, axis=0))
+
+
+def _lab(rgb) -> np.ndarray:
+    c = np.asarray(rgb, float) / 255
+    c = np.where(c > 0.04045, ((c + 0.055) / 1.055) ** 2.4, c / 12.92)
+    xyz = np.array([[0.4124, 0.3576, 0.1805], [0.2126, 0.7152, 0.0722], [0.0193, 0.1192, 0.9505]]) @ c
+    xyz = xyz / np.array([0.95047, 1.0, 1.08883])
+    f = np.where(xyz > 0.008856, np.cbrt(xyz), 7.787 * xyz + 16 / 116)
+    return np.array([116 * f[1] - 16, 500 * (f[0] - f[1]), 200 * (f[1] - f[2])])
+
+
 def silhouette(mask: np.ndarray) -> np.ndarray:
     """A shape's ink with its insides filled: an outline and a filled shape (or one with a face drawn on it)
     look alike"""
@@ -306,11 +339,13 @@ def edit_distance(a: str, b: str) -> int:
 
 def in_domain(meaning, domain: Optional[str]) -> bool:
     if domain is None:
-        return True
+        return meaning not in COLOURS              # colour samples are compared only as colours
     if domain == 'digit':
         return isinstance(meaning, int) and not isinstance(meaning, bool) and 0 <= meaning <= 9
     if domain == 'shape':
         return meaning in SHAPES
+    if domain == 'colour':
+        return meaning in COLOURS
     if not isinstance(meaning, str) or len(meaning) != 1:
         return False
     return {'upper': meaning in UPPER, 'lower': meaning in LOWER, 'letter': meaning in UPPER + LOWER}[domain]
@@ -366,6 +401,13 @@ class SymbolMemory:
     # -------------------------------------------------------------- learning
 
     def learn(self, image, meaning, source: str = '') -> None:
+        if meaning in COLOURS:                        # a colour sample: its colour, and the object's outline
+            a = np.asarray(image)
+            mask = a[..., 3] > 0 if a.shape[-1] == 4 else np.ones(a.shape[:2], bool)
+            self.examples.append({'meaning': meaning, 'lab': [round(float(v), 2) for v in colour_of(image)],
+                                  'image': _image_code(np.zeros((SIZE, SIZE))), 'ink': pack(mask), 'source': source})
+            self._cache = None
+            return
         mask = silhouette(image) if meaning in SHAPES else ink(image)
         self.examples.append({'meaning': meaning, 'image': _image_code(normalise(mask)),
                               'ink': pack(mask), 'source': source})
@@ -442,7 +484,7 @@ class SymbolMemory:
         left = list(meanings)
         unknown = []
         for s in symbols:
-            k = self.confident(s, domain, strict=True)
+            k = self.confident(s, domain, strict=True, among=set(meanings))
             if k is not None and k in left:
                 left.remove(k)
             elif k is not None:
@@ -450,9 +492,42 @@ class SymbolMemory:
             else:
                 unknown.append(s)
         if len(unknown) != 1:
-            return {'outcome': 'pending' if unknown else 'confirmed', 'why': f'{len(unknown)} unknown'}
+            return {'outcome': 'pending' if unknown else 'confirmed', 'why': f'{len(unknown)} unknown',
+                    'unknown': unknown, 'left': left}
         self.learn(unknown[0], left[0], source)
         return {'outcome': 'learned', 'learned': [left[0]]}
+
+    def _alike(self, a, b, domain) -> bool:
+        """Whether two samples look the same (nearer than CONFIDENT): the same thing on two sheets"""
+        if domain == 'colour':
+            return float(np.linalg.norm(colour_of(a) - colour_of(b))) <= COLOUR_CONFIDENT
+        f = (lambda x: normalise(silhouette(x))) if domain == 'shape' else (lambda x: normalise(ink(x)))
+        return float(np.abs(f(a) - f(b)).mean()) <= CONFIDENT
+
+    def learn_across(self, pending: Sequence[Tuple[Dict, Dict]]) -> List[Dict]:
+        """
+        Matching lessons left undecided, taken two at a time: an unknown symbol of one that looks the same as
+        an unknown symbol of the other is the same thing, so its name is one both lessons have left; when
+        exactly one name is left in both, both symbols are learned as it
+        """
+        learned = []
+        for i in range(len(pending)):
+            for j in range(i + 1, len(pending)):
+                (la, ra), (lb, rb) = pending[i], pending[j]
+                domain = la.get('domain', 'digit')
+                if lb.get('domain', 'digit') != domain or 'unknown' not in ra or 'unknown' not in rb:
+                    continue
+                shared = set(ra['left']) & set(rb['left'])
+                if len(shared) != 1:
+                    continue
+                pairs = [(x, y) for x in ra['unknown'] for y in rb['unknown'] if self._alike(x, y, domain)]
+                if len(pairs) != 1:
+                    continue
+                name = shared.pop()
+                for sample in pairs[0]:
+                    self.learn(sample, name, f'{la.get("source", "")} + {lb.get("source", "")}')
+                learned.append({'lessons': (la.get('source'), lb.get('source')), 'learned': name})
+        return learned
 
     def _case_meanings(self, capitals: Sequence[np.ndarray]) -> Optional[List[str]]:
         known = [self.confident(c, 'upper') for c in capitals]
@@ -527,6 +602,13 @@ class SymbolMemory:
                 elif r['outcome'] == 'pending':
                     still.append(i)
             todo = still
+            if not progress and todo:
+                # matching lessons still undecided: the same thing on two sheets (learn_across)
+                pending = [(lessons[i], outcomes[i]) for i in todo
+                           if lessons[i]['kind'] in ('matching', 'set matching')]
+                pending = [(dict(l, domain=l.get('domain', 'digit')), r) for l, r in pending]
+                if self.learn_across(pending):
+                    progress = True
             if not progress or not todo:
                 break
         return outcomes
@@ -539,42 +621,61 @@ class SymbolMemory:
                            if self.examples else np.zeros((0, SIZE * SIZE)))
         return self._cache
 
+    def _distances(self, image, domain):
+        """(indices of the examples in domain, their distances to image)"""
+        keep = [i for i, e in enumerate(self.examples) if in_domain(e['meaning'], domain)]
+        if not keep:
+            return keep, np.zeros(0)
+        if domain == 'colour':
+            lab = colour_of(image)
+            return keep, np.array([np.linalg.norm(np.array(self.examples[i]['lab']) - lab) for i in keep])
+        sample = silhouette(image) if domain == 'shape' else ink(image)
+        return keep, np.abs(self._matrix()[keep] - normalise(sample).reshape(1, -1)).mean(axis=1)
+
     def nearest(self, image, domain: Optional[str] = None) -> Tuple[Optional[object], float]:
         """
         (meaning of the nearest example, its distance), among the examples whose meaning is in domain ('digit',
-        'upper', 'lower', 'letter'; None: all); (None, inf) without such examples
+        'upper', 'lower', 'letter', 'shape', 'colour'; None: all but colours); (None, inf) without such examples
         """
-        keep = [i for i, e in enumerate(self.examples) if in_domain(e['meaning'], domain)]
+        keep, d = self._distances(image, domain)
         if not keep:
             return None, float('inf')
-        d = np.abs(self._matrix()[keep] - normalise(silhouette(image) if domain == 'shape' else ink(image)).reshape(1, -1)).mean(axis=1)
         i = int(d.argmin())
         return self.examples[keep[i]]['meaning'], float(d[i])
 
+    @staticmethod
+    def _limits(domain):
+        """(REJECT, CONFIDENT, MARGIN) for domain: colours are compared in CIELAB, the rest as images"""
+        return (COLOUR_REJECT, COLOUR_CONFIDENT, COLOUR_MARGIN) if domain == 'colour' else (REJECT, CONFIDENT, MARGIN)
+
     def recognise(self, image, domain: Optional[str] = None):
         meaning, distance = self.nearest(image, domain)
-        return meaning if distance <= REJECT else None
+        return meaning if distance <= self._limits(domain)[0] else None
 
-    def confident(self, image, domain: Optional[str] = None, strict: bool = False):
+    def confident(self, image, domain: Optional[str] = None, strict: bool = False, among=None):
         """
         The meaning when it is recognised with confidence: its nearest example nearer than CONFIDENT, or (not
         strict) nearer than REJECT and nearer by MARGIN than the nearest example of any other meaning; else
         None. Ruling a symbol out (choice, matching and place value lessons) is strict: a symbol of a new
         style may be nearer to another meaning's examples by a margin; placing symbols in an order (where
-        two or more must agree) and recognising capitals in case lessons are not
+        two or more must agree) and recognising capitals in case lessons are not. among: only these meanings
+        are considered (a matching lesson's names: an object is not taken for a colour the sheet does not name)
         """
-        keep = [i for i, e in enumerate(self.examples) if in_domain(e['meaning'], domain)]
+        reject, confident, margin = self._limits(domain)
+        keep, d = self._distances(image, domain)
+        if among is not None:                        # only the meanings the lesson names (a matching sheet's list)
+            pick = [j for j, i in enumerate(keep) if self.examples[i]['meaning'] in among]
+            keep, d = [keep[j] for j in pick], d[pick]
         if not keep:
             return None
-        d = np.abs(self._matrix()[keep] - normalise(silhouette(image) if domain == 'shape' else ink(image)).reshape(1, -1)).mean(axis=1)
         best = int(d.argmin())
         meaning = self.examples[keep[best]]['meaning']
-        if d[best] <= CONFIDENT:
+        if d[best] <= confident:
             return meaning
         if strict:
             return None
         others = [d[j] for j, i in enumerate(keep) if self.examples[i]['meaning'] != meaning]
-        if d[best] <= REJECT and (not others or min(others) - d[best] >= MARGIN):
+        if d[best] <= reject and (not others or min(others) - d[best] >= margin):
             return meaning
         return None
 
@@ -596,13 +697,10 @@ class SymbolMemory:
 
     def alternatives(self, image, domain: Optional[str] = None, k: int = 3) -> List[Tuple[object, float]]:
         """The k nearest distinct meanings in domain within REJECT, each with its nearest example's distance"""
-        keep = [i for i, e in enumerate(self.examples) if in_domain(e['meaning'], domain)]
-        if not keep:
-            return []
-        d = np.abs(self._matrix()[keep] - normalise(silhouette(image) if domain == 'shape' else ink(image)).reshape(1, -1)).mean(axis=1)
+        keep, d = self._distances(image, domain)
         out, seen = [], set()
         for j in np.argsort(d):
-            if d[j] > REJECT or len(out) == k:
+            if d[j] > self._limits(domain)[0] or len(out) == k:
                 break
             meaning = self.examples[keep[j]]['meaning']
             if meaning not in seen:
@@ -626,11 +724,12 @@ class SymbolMemory:
             out = [(r + [a], c + d) for r, c in out for a, d in alts]
         return sorted(out, key=lambda e: e[1])
 
-    def read_word(self, panel, vocabulary: Sequence[str], most: int = 2) -> Optional[str]:
+    def read_word(self, panel, vocabulary: Sequence[str], most: Optional[int] = None) -> Optional[str]:
         """
         A printed word, read in context: each letter's few likeliest readings (capitals or lower case, without
         case), and the word of vocabulary that needs the fewest changes to be spelt by them (a letter counts as
-        spelt when it is among its symbol's readings): at most most changes, and fewer than any other word needs
+        spelt when it is among its symbol's readings): at most most changes (default: one per 3 letters of the
+        word, 1 to 2), and fewer than any other word needs
         """
         symbols = symbols_of(panel)
         if not symbols:
@@ -649,7 +748,8 @@ class SymbolMemory:
                     prev, row[j] = row[j], min(row[j] + 1, row[j - 1] + 1, prev + (ch not in options))
             return row[-1]
         scored = sorted((changes(w), w) for w in vocabulary)
-        if scored[0][0] > most or (len(scored) > 1 and scored[1][0] == scored[0][0]):
+        allowed = most if most is not None else max(1, min(2, len(scored[0][1]) // 3))
+        if scored[0][0] > allowed or (len(scored) > 1 and scored[1][0] == scored[0][0]):
             return None
         return scored[0][1]
 

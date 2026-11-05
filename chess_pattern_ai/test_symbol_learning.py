@@ -142,6 +142,40 @@ class TestShapesAndWords(unittest.TestCase):
         self.assertIsNone(m.read_word(word, ['circle']))
 
 
+def swatch(rgb, size=20):
+    a = np.zeros((size, size, 4), np.uint8)
+    a[..., :3] = rgb
+    a[..., 3] = 255
+    return a
+
+
+class TestColours(unittest.TestCase):
+    def test_a_colour_is_learned_and_recognised_by_its_median(self):
+        m = SymbolMemory()
+        m.learn(swatch((220, 30, 40)), 'red')
+        m.learn(swatch((30, 60, 200)), 'blue')
+        spotted = swatch((200, 40, 50))
+        spotted[2:5, 2:5, :3] = 0                    # an eye: not the object's colour
+        self.assertEqual(m.recognise(spotted, 'colour'), 'red')
+        self.assertIsNone(m.recognise(swatch((250, 250, 250)), 'colour'))   # white: far from both
+        self.assertIsNone(m.recognise(swatch((220, 30, 40))))               # colours only as colours
+
+    def test_the_same_thing_on_two_sheets(self):
+        m = SymbolMemory()
+        m.learn(swatch((220, 30, 40)), 'red')
+        # sheet 1: red, black, grey (black and grey unknown); sheet 2: red, black, white (black and white unknown)
+        lessons = [{'kind': 'set matching', 'domain': 'colour', 'names': ['red', 'black', 'grey'],
+                    'symbols': [swatch((215, 35, 45)), swatch((5, 5, 5)), swatch((150, 150, 150))]},
+                   {'kind': 'set matching', 'domain': 'colour', 'names': ['red', 'black', 'white'],
+                    'symbols': [swatch((225, 25, 35)), swatch((0, 0, 0)), swatch((255, 255, 255))]}]
+        m.teach(lessons)
+        # black is the one name both have left, and the two black swatches look the same: learned; then each
+        # sheet has one unknown left: grey and white
+        self.assertEqual(m.recognise(swatch((10, 10, 10)), 'colour'), 'black')
+        self.assertEqual(m.recognise(swatch((150, 150, 150)), 'colour'), 'grey')
+        self.assertEqual(m.recognise(swatch((250, 250, 250)), 'colour'), 'white')
+
+
 class TestScenes(unittest.TestCase):
     def test_a_numeral_and_copies_of_a_picture(self):
         scene = np.zeros((60, 200), int)

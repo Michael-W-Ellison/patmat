@@ -141,6 +141,15 @@ class TestWorksheets(unittest.TestCase):
                 row = _SHAPE_ROWS[int(item.sheet[-1]) - 1][item.number - 1].split()
                 self.assertTrue({'cross', 'pentagon'} & set(row), (item.sheet, item.number))
 
+    def test_the_colour_sheets(self):
+        from children_worksheets import run_colours
+        found = run_colours()
+        self.assertEqual(found['airplane windows'][0], 5)
+        self.assertEqual(sum(v[0] for k, v in found.items() if k.startswith('pairing')), 12)
+        sorting = [v for k, v in found.items() if k.startswith('sorting')]
+        self.assertGreaterEqual(sum(v[0] for v in sorting), 29)
+        self.assertLessEqual(sum(v[1] for v in sorting), 2)
+
     def test_without_learned_symbols_the_number_sequences_are_not_read(self):
         from children_worksheets import HELD_OUT, run
         summary = run([i for i in HELD_OUT if i.kind == 'number'], symbols=None, use_slow=False)

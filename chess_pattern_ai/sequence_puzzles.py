@@ -57,6 +57,8 @@ values come first in 'values', then the blanks'.
   Panels of one name must be copies of one drawing (alike in ink, size and
   colours: SAME_DRAWING, SAME_SIZE): names do not merge two pictures, sizes
   or colours that the panels tell apart.
+- colours: panels in colour (cut from a page, RGB) read as the names of
+  their colours (learned: colour_lessons); the names repeat as in repeat.
 - arc_step: each step from a panel to the next as a training pair for the
   ARC pattern solver (arc_pattern_solver); the last panel is the test input.
   Slow (seconds to minutes), so tried only when the families above predict
@@ -77,7 +79,7 @@ SAME_DRAWING = 0.1      # shapes: panels of one name differ in normalised ink by
 SAME_SIZE = 0.15        # shapes: ... and in height and width by at most this share
 FIRST_CHOICES = 1 / 3   # numbers, letters: share of given panels to be read in context as their likeliest reading
                         # (chosen on validation items of training writers: handwriting_lessons)
-FAMILIES = ('repeat', 'runs', 'growth', 'numbers', 'letters', 'shapes', 'arc_step', 'repeat_all')
+FAMILIES = ('repeat', 'runs', 'growth', 'numbers', 'letters', 'shapes', 'colours', 'arc_step', 'repeat_all')
 SLOW = ('arc_step',)
 
 
@@ -445,8 +447,40 @@ def shapes(panels: List[Optional[Array]], count: int, symbols=None) -> List[tupl
     return [(f'shapes: {rule}', drawn, size + 1 + cost, values)]
 
 
+def colours(panels: List[Optional[Array]], count: int, symbols=None) -> List[tuple]:
+    """
+    Panels in colour (RGB or RGBA images) read as the names of their colours with the learned symbols; the
+    names repeat as in repeat. Panels of one name must be alike in outline and size (the same picture in one
+    colour). Values: the next names
+    """
+    if symbols is None or any(p is None or p.ndim != 3 for p in panels):
+        return []
+    names, cost = [], 0.0
+    for p in panels:
+        alts = symbols.alternatives(p, 'colour', 1)
+        if not alts:
+            return []
+        names.append(alts[0][0])
+        cost += alts[0][1] / 100
+    outlines = [p[..., 3] > 0 if p.shape[-1] == 4 else np.ones(p.shape[:2], bool) for p in panels]
+    from symbol_learning import normalise
+    looks = [normalise(o) for o in outlines]
+    for i in range(len(panels)):
+        for j in range(i + 1, len(panels)):
+            if names[i] == names[j] and (np.abs(looks[i] - looks[j]).mean() > SAME_DRAWING or any(
+                    abs(x - y) > SAME_SIZE * max(x, y) for x, y in zip(outlines[i].shape, outlines[j].shape))):
+                return []
+    stand_ins = [np.full((1, 1), sorted(set(names)).index(n) + 1) for n in names]
+    found = repeat(stand_ins, count)
+    if not found:
+        return []
+    rule, nxt, size = found[0]
+    values = [sorted(set(names))[int(p[0, 0]) - 1] for p in nxt]
+    return [(f'colours: {rule}', [None] * len(values), size + 1 + cost, values)]
+
+
 FAMILY_FUNCTIONS = {'repeat': repeat, 'runs': runs, 'growth': growth, 'numbers': numbers, 'letters': letters,
-                    'shapes': shapes,
+                    'shapes': shapes, 'colours': colours,
                     'arc_step': arc_step,
                     'repeat_all': repeat_all}
 
@@ -463,7 +497,7 @@ def predictions(puzzle: SequencePuzzle, families: Sequence[str] = FAMILIES,
 
     def run(name):
         try:
-            if name in ('numbers', 'letters', 'shapes'):
+            if name in ('numbers', 'letters', 'shapes', 'colours'):
                 found = FAMILY_FUNCTIONS[name](puzzle.panels, puzzle.blanks, symbols)
             elif puzzle.missing:
                 found = []                  # the other families continue a complete row
