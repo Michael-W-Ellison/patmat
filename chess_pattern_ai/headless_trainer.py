@@ -53,8 +53,16 @@ class HeadlessTrainer:
                                 # (tactical_patterns)
 
     def __init__(self, db_path='headless_training.db', opponent='random', stockfish_level=0,
-                 stockfish_path='/usr/games/stockfish', stockfish_time=0.1):
+                 stockfish_path='/usr/games/stockfish', stockfish_time=0.1, screen=None):
         self.scorer = GameScorer()
+        # screen: a screen_reading.ScreenMemory (or True: a new one): the agent then knows the game only from
+        # the screen (screen_reading.render of the board, the opponent's last move shown), followed in
+        # context from the starting screen; it decides from its own board (play_game)
+        self.screen = None
+        if screen is not None and screen is not False:
+            from screen_reading import ScreenMemory
+            self.screen = ScreenMemory() if screen is True else screen
+            self.screen_stats = {'turns': 0, 'true board': 0, 'lost': 0, 'read alone': 0, 'illegal': 0}
         self.prioritizer = LearnableMovePrioritizer(db_path)
         # Multi-move patterns, learned from both players' moves
         self.sequences = SequencePatternLearner(db_path)
@@ -211,6 +219,30 @@ class HeadlessTrainer:
 
         return random.choice(legal_moves)
 
+    def _follow_screen(self, board, seen, ai_color):
+        """
+        The agent's board before its move: the screen shown now (the true board drawn, the opponent's last
+        move highlighted), followed in context from the agent's board (the opponent's one move since); if it
+        cannot be followed, the screen read alone, square by square (the agent keeps its side to move and
+        castling rights as it knows them)
+        """
+        from screen_reading import board_fen, render
+        stats = self.screen_stats
+        stats['turns'] += 1
+        if len(seen.move_stack) < len(board.move_stack):          # the opponent has moved since
+            shown = render(board, lastmove=board.peek())
+            moves = self.screen.follow(seen, shown, plies=1)
+            if moves is not None:
+                seen.push(moves[0])
+            else:
+                stats['lost'] += 1
+                stats['read alone'] += 1
+                seen = seen.copy()
+                seen.set_board_fen(board_fen(self.screen.read(shown)))
+                seen.turn = ai_color
+        stats['true board'] += seen.board_fen() == board.board_fen() and seen.turn == board.turn
+        return seen
+
     def play_game(self, ai_color, verbose=False):
         """Play a complete game until natural conclusion"""
         board = chess.Board()
@@ -224,11 +256,27 @@ class HeadlessTrainer:
 
         # Play until game naturally ends (checkmate, stalemate, etc.)
         # No artificial move limit - let games reach their conclusion
+        if self.screen is not None:
+            from screen_reading import render
+            assert not self.self_play, 'screen play is for games against an opponent'
+            if not self.screen.examples:
+                self.screen.learn_start(render(chess.Board()), 'the starting screen')
+            seen = chess.Board()            # the agent's own board: what it has made of the screens
+
         while not board.is_game_over():
             fen_before = board.fen()
 
             if board.turn == ai_color:
-                move = self.play_ai_move(board, ai_color)
+                if self.screen is not None:
+                    seen = self._follow_screen(board, seen, ai_color)
+                    move = self.play_ai_move(seen, ai_color)
+                    if move is not None:
+                        seen.push(move)
+                        if move not in board.legal_moves:      # decided from a board read wrong
+                            self.screen_stats['illegal'] += 1
+                            move = random.choice(list(board.legal_moves))
+                else:
+                    move = self.play_ai_move(board, ai_color)
                 if move:
                     move_san = board.san(move)
                     board.push(move)
@@ -472,11 +520,13 @@ def main():
     parser.add_argument('--level', type=int, default=0, help='Stockfish skill level 0-20 (default: 0)')
     parser.add_argument('--stockfish-path', default='/usr/games/stockfish', help='Stockfish binary')
     parser.add_argument('--db', default='headless_training.db', help='Training database (default: headless_training.db)')
+    parser.add_argument('--screen', action='store_true',
+                        help='The agent knows the game only from the screen (screen_reading), read from the start')
 
     args = parser.parse_args()
 
     trainer = HeadlessTrainer(args.db, opponent=args.opponent, stockfish_level=args.level,
-                              stockfish_path=args.stockfish_path)
+                              stockfish_path=args.stockfish_path, screen=True if args.screen else None)
 
     try:
         trainer.train(args.num_games, verbose=args.verbose, progress_interval=args.progress)
