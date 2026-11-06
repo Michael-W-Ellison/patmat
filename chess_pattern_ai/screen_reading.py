@@ -18,8 +18,9 @@ Lessons:
   legal move (or, between the player's own turns, two: the player's and
   the opponent's) from the position known before. Of those positions, the
   one the screen's squares fit best is taken (read in context, as
-  sequence_puzzles reads a row of numbers); when it fits clearly better
-  than the next, the squares it was not read right on are learned as that
+  sequence_puzzles reads a row of numbers); when it misfits by at least
+  CLEAR less than the next (a difference, not a ratio: every piece on the
+  board adds a little to both), the squares it was not read right on are learned as that
   position has them.
 
 Reading (read): the board is found on the screen (the rows and columns
@@ -46,6 +47,25 @@ Results (evaluate_screen_reading; headless_trainer --screen):
   from the screens in context): 20 games against the random opponent and 10
   against Stockfish (level 0), 913 turns: on every turn the board the agent
   decided from was the true board; no screen was lost, no move illegal.
+Flipped boards (black at the bottom): which way up is read from the rank
+labels with the digits learned from worksheets (symbol_learning), in
+context (8 7 ... 1 or 1 2 ... 8 down the board): never wrong; on the own
+screens readable at 320 pixels and up (60/60), at 200 on half, at 260 not.
+Without labels, reading a single screen guesses by the pawns (white's lower
+on average: 59 of 60 boards right at 260 pixels), and following a screen in
+play tries both ways in context.
+- own screens flipped, six styles: as unflipped (3840/3840 but 260 pixels,
+  3800/3840); a program shown only a flipped starting screen learns it the
+  right way round (by its labels) and reads both ways 3840/3840.
+- Lichess from black's side, 8 piece sets, after its starting screen from
+  black's side: every set 640/640.
+- playing from the agent's side (HeadlessTrainer(screen_side=True): flipped
+  when it plays black): 10 games against the random opponent, 6 against
+  Stockfish, 598 turns: the true board every turn, every screen followed.
+  (CLEAR, the gap the best fit must have over the next, was 0.6 as a ratio:
+  it lost 4 screens in such games, captures on flipped boards whose right
+  fit was 0.85 against 1.28; as a difference, 0.1 followed all of 4311 moves
+  of 36 random games, chosen on 12 and checked on 24.)
 
 Playing from the screen (ScreenPlayer): a player that knows only what it
 has read: it keeps its own board, follows each screen it is shown, and
@@ -65,8 +85,12 @@ DIFFERENT = 60          # a pixel is ink when this far (RGB distance) from its s
 EMPTY = 0.03            # a square with less ink than this share of its area is empty
 DARK = 100              # ink darker than this (mean of RGB) is dark ink, the rest light
 CORNER = 0.3            # ink touching a corner region this share of the square wide, and small, is a label
-CLEAR = 0.6             # follow: the best fitting position must fit at most this share of the next's misfit
+CLEAR = 0.1             # follow: the best fitting position must misfit by this much less than the next
 PIECES = 'PNBRQKpnbrqk'
+LABEL_SIDE = 0.45       # rank labels: the margin beside the board looked at, as a share of a square
+LABEL_CORNER = 0.3      # ... and the corner of a square looked at
+LABEL_INK = 60          # ... a label's ink this far (RGB distance) from the spot's colour
+LABEL_CLEAR = 0.8       # ... one way of reading them must cost at most this share of the other
 SQUARE_SHARE = 0.15     # find_board: a board row (column) has at least this share of square colours
 
 
@@ -114,8 +138,11 @@ def find_board(screen: np.ndarray) -> Tuple[int, int, int, int]:
     return r0, c0, r1 - r0, c1 - c0
 
 
-def squares(screen: np.ndarray) -> List[np.ndarray]:
-    """The 64 squares of the board, a8, b8, ... h8, a7, ... h1 (the screen's top row first)"""
+def squares(screen: np.ndarray, flipped: bool = False) -> List[np.ndarray]:
+    """
+    The 64 squares of the board, a8, b8, ... h8, a7, ... h1: the screen's top row first, or, on a flipped
+    board (black at the bottom: the screen's top row is rank 1, from h to a), the screen's squares in reverse
+    """
     top, left, h, w = find_board(screen)
     out = []
     for r in range(8):
@@ -123,7 +150,93 @@ def squares(screen: np.ndarray) -> List[np.ndarray]:
             r0, r1 = top + round(r * h / 8), top + round((r + 1) * h / 8)
             c0, c1 = left + round(c * w / 8), left + round((c + 1) * w / 8)
             out.append(screen[r0:r1, c0:c1, :3])
+    return out[::-1] if flipped else out
+
+
+def rank_labels(screen: np.ndarray) -> List[List[np.ndarray]]:
+    """
+    The rank labels a board may print, top to bottom: for each of four places (the left and right margins
+    beside each rank, and the outer top corners of the left and right columns of squares), the ink that
+    differs from that spot's own colour, in each of the 8 ranks; a place counts only if all 8 have ink
+    """
+    from scipy import ndimage
+    top, left, h, w = find_board(screen)
+    sq = h / 8
+    rgb = screen[..., :3].astype(int)
+    places = {'left margin': (left - LABEL_SIDE * sq, left, 0.0, 1.0),
+              'right margin': (left + w, left + w + LABEL_SIDE * sq, 0.0, 1.0),
+              'left squares': (left, left + LABEL_CORNER * sq, 0.0, LABEL_CORNER),
+              'right squares': (left + w - LABEL_CORNER * sq, left + w, 0.0, LABEL_CORNER)}
+    out = []
+    for c0, c1, f0, f1 in places.values():
+        c0, c1 = max(0, int(round(c0))), min(rgb.shape[1], int(round(c1)))
+        if c1 - c0 < 3:
+            continue
+        labels = []
+        for r in range(8):
+            r0 = int(round(top + (r + f0) * sq))
+            r1 = int(round(top + (r + f1) * sq))
+            region = rgb[r0:r1, c0:c1]
+            keys, counts = np.unique(region.reshape(-1, 3) // 8, axis=0, return_counts=True)
+            colour = keys[int(np.argmax(counts))] * 8 + 4
+            ink = np.sqrt(((region - colour) ** 2).sum(axis=2)) > LABEL_INK
+            lab, n = ndimage.label(ink)
+            if n:      # specks, and lines along the board's edge (as long as the spot), are not labels
+                keep = [i for i, sl in enumerate(ndimage.find_objects(lab), 1)
+                        if (lab[sl] == i).sum() >= 4 and sl[0].stop - sl[0].start < 0.8 * ink.shape[0]
+                        and sl[1].stop - sl[1].start < 0.8 * ink.shape[1]]
+                ink = np.isin(lab, keep)
+            if not ink.any():
+                break
+            rows, cols = np.nonzero(ink)
+            labels.append(ink[rows.min():rows.max() + 1, cols.min():cols.max() + 1])
+        if len(labels) == 8:
+            out.append(labels)
     return out
+
+
+def orientation(screen: np.ndarray, symbols=None) -> Optional[bool]:
+    """
+    Whether the board is flipped (True: black at the bottom), from its rank labels read with the digits the
+    program has learned (symbol_learning, the memory digit_lessons saved): read in context, as 8 7 ... 1 or as
+    1 2 ... 8 down the board, whichever the labels fit clearly better; None when no labels are read
+    """
+    if symbols is None:
+        symbols = _digit_memory()
+    if symbols is None:
+        return None
+    costs = {False: 0.0, True: 0.0}
+    found = False
+    for labels in rank_labels(screen):
+        near = []
+        for m in labels:
+            keep, d = symbols._distances(m, 'digit')
+            best = {}
+            for j, i in enumerate(keep):
+                v = symbols.examples[i]['meaning']
+                best[v] = min(best.get(v, 1.0), float(d[j]))
+            near.append(best)
+        if not all(near):
+            continue
+        found = True
+        costs[False] += sum(near[i].get(8 - i, 1.0) for i in range(8))
+        costs[True] += sum(near[i].get(i + 1, 1.0) for i in range(8))
+    if not found:
+        return None
+    flipped = costs[True] < costs[False]
+    lo, hi = sorted(costs.values())
+    return flipped if lo <= LABEL_CLEAR * hi else None
+
+
+_DIGITS: List = []
+
+
+def _digit_memory():
+    if not _DIGITS:
+        from digit_lessons import LEARNED
+        from symbol_learning import SymbolMemory
+        _DIGITS.append(SymbolMemory(LEARNED) if os.path.exists(LEARNED) else None)
+    return _DIGITS[0]
 
 
 def _resize(mask: np.ndarray, box) -> np.ndarray:
@@ -242,22 +355,56 @@ class ScreenMemory:
         d = self.distances(f)
         return min(d, key=d.get) if d else '?'
 
-    def read(self, screen: np.ndarray) -> List[str]:
-        """The screen's 64 squares read, a8 ... h1"""
-        return [self.read_square(s) for s in squares(screen)]
+    def read(self, screen: np.ndarray, flipped: Optional[bool] = None) -> List[str]:
+        """
+        The screen's 64 squares read, a8 ... h1. flipped: whether black is at the bottom (None: found from the
+        rank labels; if none are read, the way the squares' pieces fit their places better)
+        """
+        if flipped is None:
+            flipped = orientation(screen)
+        if flipped is None:
+            flipped = self._fits_flipped(screen)
+        return [self.read_square(s) for s in squares(screen, flipped)]
+
+    def _fits_flipped(self, screen: np.ndarray) -> bool:
+        """
+        Without labels: pawns stand on ranks 2 to 7 only, and white's pawns start nearer white's side, so a
+        board read the wrong way shows (if it has pawns away from home) white pawns towards the top
+        """
+        read = [self.read_square(s) for s in squares(screen)]
+        rank = lambda i: 8 - i // 8
+        white = [rank(i) for i, p in enumerate(read) if p == 'P']
+        black = [rank(i) for i, p in enumerate(read) if p == 'p']
+        if white and black:
+            return np.mean(white) > np.mean(black)
+        return False
 
     # -------------------------------------------------------------- lessons
 
-    def learn_start(self, screen: np.ndarray, source: str = 'starting screen') -> Dict:
-        """The starting screen: each square is what the starting position has there"""
+    def learn_start(self, screen: np.ndarray, source: str = 'starting screen',
+                    flipped: Optional[bool] = None) -> Dict:
+        """
+        The starting screen: each square is what the starting position has there. flipped: whether black is
+        at the bottom (None: from the rank labels; without them, the way the pieces known fit better; with no
+        pieces known either, the board cannot be told from its flipped self: not a lesson)
+        """
         import chess
+        start = placement(chess.Board())
+        if flipped is None:
+            flipped = orientation(screen)
+        if flipped is None and self.examples:
+            fits = {f: self.misfit([None if (x := square_features(q)) is None else self.distances(x)
+                                    for q in squares(screen, f)], start) for f in (False, True)}
+            flipped = fits[True] < fits[False]
+        if flipped is None:
+            return {'outcome': 'not a lesson', 'why': 'which side is at the bottom is not known'}
         learned = 0
-        for sq, piece in zip(squares(screen), placement(chess.Board())):
+        for sq, piece in zip(squares(screen, flipped), start):
             f = square_features(sq)
             if piece != '.' and f is not None:
                 self.learn(f, piece, source)
                 learned += 1
-        return {'outcome': 'learned', 'squares': learned}
+        return {'outcome': 'learned', 'squares': learned, 'flipped': flipped}
 
     def misfit(self, dists: List[Optional[Dict[str, float]]], expected: List[str]) -> float:
         """How badly squares fit a placement (dists: per square, distances() of its piece, None if empty): per
@@ -274,13 +421,25 @@ class ScreenMemory:
         return total
 
     def follow(self, board, screen: np.ndarray, plies: int = 1, learn: bool = True,
-               source: str = 'play') -> Optional[List]:
+               source: str = 'play', flipped: Optional[bool] = None) -> Optional[List]:
         """
         The moves (plies of them, 1 or 2) that lead from board (the position known) to the position on the
         screen, read in context (module docstring); None when no sequence of moves fits clearly better than
         the next. The squares read wrong are learned (learn) as the position found has them
         """
-        feats = [square_features(s) for s in squares(screen)]
+        if flipped is None:
+            flipped = orientation(screen)
+        if flipped is None:          # neither way known: the way whose best move fits better
+            tried = [(self._follow(board, screen, plies, False, source, f), f) for f in (False, True)]
+            fits = [(cost, f) for (moves, cost), f in tried if moves is not None]
+            if not fits:
+                return None
+            flipped = min(fits)[1]
+        return self._follow(board, screen, plies, learn, source, flipped)[0]
+
+    def _follow(self, board, screen, plies, learn, source, flipped):
+        """(follow's moves, or None; the best fit's misfit)"""
+        feats = [square_features(s) for s in squares(screen, flipped)]
         dists = [None if f is None else self.distances(f) for f in feats]
         options = []
         for m1 in list(board.legal_moves):
@@ -294,10 +453,10 @@ class ScreenMemory:
                     board.pop()
             board.pop()
         if plies == 2 and board.is_game_over():
-            return None
+            return None, float('inf')
         options.sort(key=lambda e: e[1])
         if not options:
-            return None
+            return None, float('inf')
         # several move orders can give one position: they count as one
         best_moves, best = options[0]
         after = board.copy()
@@ -306,13 +465,13 @@ class ScreenMemory:
         target = placement(after)
         rival = next((cost for moves, cost in options[1:]
                       if placement(_after(board, moves)) != target), None)
-        if rival is not None and best > CLEAR * rival:
-            return None
+        if rival is not None and rival - best < CLEAR:
+            return None, best
         if learn:
             for f, d, piece in zip(feats, dists, target):
                 if piece != '.' and d and min(d, key=d.get) != piece:
                     self.learn(f, piece, source)
-        return best_moves
+        return best_moves, best
 
 
 def _after(board, moves):

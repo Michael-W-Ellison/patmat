@@ -53,12 +53,13 @@ class HeadlessTrainer:
                                 # (tactical_patterns)
 
     def __init__(self, db_path='headless_training.db', opponent='random', stockfish_level=0,
-                 stockfish_path='/usr/games/stockfish', stockfish_time=0.1, screen=None):
+                 stockfish_path='/usr/games/stockfish', stockfish_time=0.1, screen=None, screen_side=False):
         self.scorer = GameScorer()
         # screen: a screen_reading.ScreenMemory (or True: a new one): the agent then knows the game only from
         # the screen (screen_reading.render of the board, the opponent's last move shown), followed in
         # context from the starting screen; it decides from its own board (play_game)
         self.screen = None
+        self.screen_side = screen_side      # the screen shows the board from the agent's side (flipped as black)
         if screen is not None and screen is not False:
             from screen_reading import ScreenMemory
             self.screen = ScreenMemory() if screen is True else screen
@@ -230,15 +231,15 @@ class HeadlessTrainer:
         stats = self.screen_stats
         stats['turns'] += 1
         if len(seen.move_stack) < len(board.move_stack):          # the opponent has moved since
-            shown = render(board, lastmove=board.peek())
-            moves = self.screen.follow(seen, shown, plies=1)
+            shown = render(board, lastmove=board.peek(), flipped=self.screen_side and ai_color == chess.BLACK)
+            moves = self.screen.follow(seen, shown, plies=1, flipped=self.screen_flipped)
             if moves is not None:
                 seen.push(moves[0])
             else:
                 stats['lost'] += 1
                 stats['read alone'] += 1
                 seen = seen.copy()
-                seen.set_board_fen(board_fen(self.screen.read(shown)))
+                seen.set_board_fen(board_fen(self.screen.read(shown, self.screen_flipped)))
                 seen.turn = ai_color
         stats['true board'] += seen.board_fen() == board.board_fen() and seen.turn == board.turn
         return seen
@@ -259,8 +260,14 @@ class HeadlessTrainer:
         if self.screen is not None:
             from screen_reading import render
             assert not self.self_play, 'screen play is for games against an opponent'
-            if not self.screen.examples:
-                self.screen.learn_start(render(chess.Board()), 'the starting screen')
+            flip = self.screen_side and ai_color == chess.BLACK
+            first = self.screen.learn_start(render(chess.Board(), flipped=flip), 'the starting screen') \
+                if not self.screen.examples else None
+            # which way the game's screens face: from the rank labels of the starting screen (or, unknown,
+            # found in context on every screen: screen_reading.ScreenMemory.follow)
+            from screen_reading import orientation
+            self.screen_flipped = first['flipped'] if first and 'flipped' in first else \
+                orientation(render(chess.Board(), flipped=flip))
             seen = chess.Board()            # the agent's own board: what it has made of the screens
 
         while not board.is_game_over():
@@ -522,11 +529,14 @@ def main():
     parser.add_argument('--db', default='headless_training.db', help='Training database (default: headless_training.db)')
     parser.add_argument('--screen', action='store_true',
                         help='The agent knows the game only from the screen (screen_reading), read from the start')
+    parser.add_argument('--screen-side', action='store_true',
+                        help='With --screen: the screen shows the board from the agent\'s side (flipped as black)')
 
     args = parser.parse_args()
 
     trainer = HeadlessTrainer(args.db, opponent=args.opponent, stockfish_level=args.level,
-                              stockfish_path=args.stockfish_path, screen=True if args.screen else None)
+                              stockfish_path=args.stockfish_path, screen=True if args.screen else None,
+                              screen_side=args.screen_side)
 
     try:
         trainer.train(args.num_games, verbose=args.verbose, progress_interval=args.progress)

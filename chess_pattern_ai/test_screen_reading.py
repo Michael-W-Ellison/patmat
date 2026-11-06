@@ -70,6 +70,54 @@ class TestFollowing(unittest.TestCase):
         self.assertEqual(memory.read(S.render(b, 300, colors=colours)), S.placement(b))
 
 
+class TestFlipped(unittest.TestCase):
+    def test_the_rank_labels_tell_which_way_up(self):
+        b = random_position(4)
+        self.assertIs(S.orientation(S.render(b, 400)), False)
+        self.assertIs(S.orientation(S.render(b, 400, flipped=True)), True)
+        blank = S.render(b, 400) * 0 + 200           # no labels at all: not known
+        self.assertIsNone(S.orientation(blank))
+
+    def test_a_flipped_screen_is_read(self):
+        memory = S.ScreenMemory()
+        memory.learn_start(S.render(chess.Board(), 400))
+        b = random_position(6)
+        self.assertEqual(memory.read(S.render(b, 400, flipped=True)), S.placement(b))
+
+    def test_learned_from_a_flipped_starting_screen(self):
+        memory = S.ScreenMemory()
+        self.assertEqual(memory.learn_start(S.render(chess.Board(), 400, flipped=True))['flipped'], True)
+        b = random_position(8)
+        self.assertEqual(memory.read(S.render(b, 400)), S.placement(b))
+
+    def test_followed_flipped_without_labels(self):
+        # too small for the labels to be read: the way round is found in context
+        memory = S.ScreenMemory()
+        memory.learn_start(S.render(chess.Board(), 400))
+        b = random_position(9, 16)
+        known = b.copy()
+        move = random.Random(4).choice(list(b.legal_moves))
+        b.push(move)
+        shown = S.render(b, 220, flipped=True, lastmove=move)
+        self.assertIsNone(S.orientation(shown))
+        self.assertEqual(memory.follow(known, shown), [move])
+
+
+class TestScreenPlayFromItsSide(unittest.TestCase):
+    def test_a_game_as_black_from_its_side(self):
+        import os
+        import tempfile
+        from headless_trainer import HeadlessTrainer
+        random.seed(1)
+        t = HeadlessTrainer(os.path.join(tempfile.mkdtemp(), 's.db'), screen=True, screen_side=True)
+        try:
+            t.play_game(chess.BLACK)
+            self.assertIs(t.screen_flipped, True)
+            self.assertEqual(t.screen_stats['true board'], t.screen_stats['turns'])
+        finally:
+            t.close()
+
+
 class TestScreenPlay(unittest.TestCase):
     def test_a_game_played_from_the_screen(self):
         import os
