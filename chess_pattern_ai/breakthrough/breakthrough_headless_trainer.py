@@ -23,6 +23,7 @@ from breakthrough.breakthrough_board import BreakthroughBoard, Color, Move
 from breakthrough.breakthrough_game import BreakthroughGame
 from breakthrough.breakthrough_scorer import BreakthroughScorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
+from board_screens import agent_move
 from general_move_patterns import (GeneralPatternLearner, analyze_candidates,
                                    decisive_value, winning_moves,
                                    universal_db_path, MAX_CANDIDATES)
@@ -37,7 +38,7 @@ class BreakthroughHeadlessTrainer:
     Same philosophy as chess trainer
     """
 
-    def __init__(self, db_path='breakthrough_training.db'):
+    def __init__(self, db_path='breakthrough_training.db', screen=None, screen_side=False):
         self.db_path = db_path
         self.prioritizer = LearnableMovePrioritizer(db_path)
         self.scorer = BreakthroughScorer()
@@ -45,6 +46,11 @@ class BreakthroughHeadlessTrainer:
         # Game-independent patterns, shared with the other games' trainers
         self.general = GeneralPatternLearner(universal_db_path(db_path), 'breakthrough')
         self.adapter = BreakthroughAdapter()
+        # screen: the agent knows the game only from screens, drawn and read by board_screens (True, or a
+        # board_screens.ScreenView): it follows each move from the screens and decides from its own position;
+        # screen_side: the screens show the board from the agent's side
+        from board_screens import screen_view
+        self.screen = screen_view('breakthrough', screen, screen_side)
         self.last_general_features = None
 
         # Statistics
@@ -190,6 +196,8 @@ class BreakthroughHeadlessTrainer:
             (result, score, rounds) where result is 'win', 'loss', or 'draw'
         """
         game = BreakthroughGame()
+        if self.screen is not None:
+            self.screen.new_game(self.adapter, game, ai_color)
         rounds = 0
         max_rounds = 500  # Prevent infinite games
 
@@ -208,7 +216,8 @@ class BreakthroughHeadlessTrainer:
 
             # Select move
             if current_color == ai_color:
-                move = self.select_move(game, ai_color, use_learning=True)
+                move = agent_move(self.screen, game,
+                                  lambda g: self.select_move(g, ai_color, use_learning=True))
                 if move is not None:
                     general_features.append(self.last_general_features)
             else:
@@ -235,6 +244,8 @@ class BreakthroughHeadlessTrainer:
 
             # Make move
             game.make_move(move)
+            if self.screen is not None:
+                self.screen.see(game)
             rounds += 1
 
             if verbose:
@@ -374,9 +385,14 @@ def main():
                        const=10, default=None,
                        help='Show top N learned patterns')
 
+    parser.add_argument('--screen', action='store_true',
+                        help='The agent knows the game only from screens (board_screens), read from the start')
+    parser.add_argument('--screen-side', action='store_true',
+                        help='With --screen: the screens show the board from the agent\'s side')
     args = parser.parse_args()
 
-    trainer = BreakthroughHeadlessTrainer(args.db)
+    trainer = BreakthroughHeadlessTrainer(args.db, screen=True if args.screen else None,
+                                          screen_side=args.screen_side)
 
     if args.show_patterns is not None:
         # Just show patterns and exit
@@ -384,6 +400,8 @@ def main():
     else:
         # Run training
         trainer.train(args.num_games, args.verbose, args.progress)
+        if trainer.screen is not None:     # what the agent made of the screens
+            print('Screens:', trainer.screen.stats)
 
         # Show learned patterns
         trainer.show_learned_patterns(10)

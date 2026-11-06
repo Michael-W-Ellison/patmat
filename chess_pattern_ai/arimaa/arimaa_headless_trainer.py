@@ -30,6 +30,7 @@ from arimaa.arimaa_board import ArimaaBoard, Color
 from arimaa.arimaa_game import ArimaaGame, ArimaaStep
 from arimaa.arimaa_scorer import ArimaaScorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
+from board_screens import agent_move
 from general_move_patterns import (GeneralPatternLearner, analyze_candidates,
                                    decisive_value, winning_moves,
                                    universal_db_path, MAX_CANDIDATES)
@@ -39,7 +40,7 @@ from arimaa.arimaa_adapter import ArimaaAdapter
 class ArimaaHeadlessTrainer:
     """Trains Arimaa AI through self-play with pattern learning"""
 
-    def __init__(self, db_path: str = 'arimaa_training.db'):
+    def __init__(self, db_path: str = 'arimaa_training.db', screen=None, screen_side=False):
         """Initialize trainer"""
         self.db_path = db_path
         self.prioritizer = LearnableMovePrioritizer(db_path)
@@ -51,6 +52,11 @@ class ArimaaHeadlessTrainer:
         self.general = GeneralPatternLearner(universal_db_path(db_path), 'arimaa',
                                              import_cross_game=False)
         self.adapter = ArimaaAdapter()
+        # screen: the agent knows the game only from screens, drawn and read by board_screens (True, or a
+        # board_screens.ScreenView): it follows each move from the screens and decides from its own position;
+        # screen_side: the screens show the board from the agent's side
+        from board_screens import screen_view
+        self.screen = screen_view('arimaa', screen, screen_side)
         self.last_general_features = None
 
         # Statistics
@@ -163,13 +169,19 @@ class ArimaaHeadlessTrainer:
                 break
 
             # Select step
-            step = self.select_step(current_game, legal_steps,
-                                   exploration_rate=0.2 if game.current_player == Color.GOLD else 0.5,
-                                   use_general=game.current_player == Color.GOLD)
+            if game.current_player == Color.GOLD:      # the agent (on its own position, if it sees screens)
+                step = agent_move(self.screen, current_game, lambda g: self.select_step(
+                    g, g.get_legal_steps(), exploration_rate=0.2, use_general=True))
+                if step is None:
+                    break
+            else:
+                step = self.select_step(current_game, legal_steps, exploration_rate=0.5, use_general=False)
 
             # Record step data
             game_before = current_game
             new_game = current_game.make_step(step)
+            if self.screen is not None:
+                self.screen.see(new_game)
 
             if game.current_player == Color.GOLD:
                 category = self.scorer.get_move_category(game_before, new_game, step, Color.GOLD)
@@ -196,6 +208,8 @@ class ArimaaHeadlessTrainer:
         Returns: (result, differential_score, turns)
         """
         game = ArimaaGame()
+        if self.screen is not None:
+            self.screen.new_game(self.adapter, game, Color.GOLD)
         all_steps = []  # Track all steps for learning
         general_features = []  # Gold's general-pattern features
         turns = 0
@@ -343,9 +357,14 @@ def main():
     parser.add_argument('--show-patterns', nargs='?', const=10, type=int,
                         help='Show top N learned patterns and exit')
 
+    parser.add_argument('--screen', action='store_true',
+                        help='The agent knows the game only from screens (board_screens), read from the start')
+    parser.add_argument('--screen-side', action='store_true',
+                        help='With --screen: the screens show the board from the agent\'s side')
     args = parser.parse_args()
 
-    trainer = ArimaaHeadlessTrainer(db_path=args.db)
+    trainer = ArimaaHeadlessTrainer(db_path=args.db, screen=True if args.screen else None,
+                                    screen_side=args.screen_side)
 
     # Show patterns mode
     if args.show_patterns is not None:
@@ -363,6 +382,8 @@ def main():
         verbose=args.verbose,
         progress_interval=args.progress
     )
+    if trainer.screen is not None:     # what the agent made of the screens
+        print('Screens:', trainer.screen.stats)
 
     # Show top patterns after training
     print("\nTop 5 patterns learned:")

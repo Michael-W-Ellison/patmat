@@ -25,6 +25,7 @@ from pentago.pentago_board import PentagoBoard, Color
 from pentago.pentago_game import PentagoGame, PentagoMove
 from pentago.pentago_scorer import PentagoScorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
+from board_screens import agent_move
 from general_move_patterns import (GeneralPatternLearner, analyze_candidates,
                                    decisive_value, winning_moves,
                                    universal_db_path, MAX_CANDIDATES)
@@ -34,7 +35,7 @@ from pentago.pentago_adapter import PentagoAdapter
 class PentagoHeadlessTrainer:
     """Trains Pentago AI through self-play with pattern learning"""
 
-    def __init__(self, db_path: str = 'pentago_training.db'):
+    def __init__(self, db_path: str = 'pentago_training.db', screen=None, screen_side=False):
         """Initialize trainer"""
         self.db_path = db_path
         self.prioritizer = LearnableMovePrioritizer(db_path)
@@ -42,6 +43,11 @@ class PentagoHeadlessTrainer:
         # Game-independent patterns, shared with the other games' trainers
         self.general = GeneralPatternLearner(universal_db_path(db_path), 'pentago')
         self.adapter = PentagoAdapter()
+        # screen: the agent knows the game only from screens, drawn and read by board_screens (True, or a
+        # board_screens.ScreenView): it follows each move from the screens and decides from its own position;
+        # screen_side: the screens show the board from the agent's side
+        from board_screens import screen_view
+        self.screen = screen_view('pentago', screen, screen_side)
         self.last_general_features = None
 
         # Statistics
@@ -142,6 +148,8 @@ class PentagoHeadlessTrainer:
         Returns: (result, differential_score, rounds)
         """
         game = PentagoGame()
+        if self.screen is not None:
+            self.screen.new_game(self.adapter, game, Color.WHITE)
         game_moves = []  # Track moves for learning
         general_features = []  # White's general-pattern features
         rounds = 0
@@ -159,8 +167,10 @@ class PentagoHeadlessTrainer:
 
             # Select move (White uses learning, Black random for now)
             if game.current_player == Color.WHITE:
-                move = self.select_move(game, legal_moves, exploration_rate=0.15,
-                                        use_general=True)
+                move = agent_move(self.screen, game, lambda g: self.select_move(
+                    g, g.get_legal_moves(), exploration_rate=0.15, use_general=True))
+                if move is None:
+                    break
                 general_features.append(self.last_general_features)
             else:
                 # Black plays with some strategy (not purely random)
@@ -169,6 +179,8 @@ class PentagoHeadlessTrainer:
             # Record move data for learning
             board_before = game.board.copy()
             new_game = game.make_move(move)
+            if self.screen is not None:
+                self.screen.see(new_game)
             board_after = new_game.board
 
             if game.current_player == Color.WHITE:
@@ -316,9 +328,14 @@ def main():
     parser.add_argument('--show-patterns', nargs='?', const=10, type=int,
                         help='Show top N learned patterns and exit')
 
+    parser.add_argument('--screen', action='store_true',
+                        help='The agent knows the game only from screens (board_screens), read from the start')
+    parser.add_argument('--screen-side', action='store_true',
+                        help='With --screen: the screens show the board from the agent\'s side')
     args = parser.parse_args()
 
-    trainer = PentagoHeadlessTrainer(db_path=args.db)
+    trainer = PentagoHeadlessTrainer(db_path=args.db, screen=True if args.screen else None,
+                                     screen_side=args.screen_side)
 
     # Show patterns mode
     if args.show_patterns is not None:
@@ -336,6 +353,8 @@ def main():
         verbose=args.verbose,
         progress_interval=args.progress
     )
+    if trainer.screen is not None:     # what the agent made of the screens
+        print('Screens:', trainer.screen.stats)
 
     # Show top patterns after training
     print("\nTop 5 patterns learned:")
