@@ -51,6 +51,12 @@ game-independent reply patterns most often refuted the agent's blunders
 (learned from a judge), so a quiet reply that punishes a move is read even
 when it is not among the QUIET_MOVES best quiet moves.
 
+Learned look-ahead (lookahead set to a lookahead_patterns.LookaheadLearner): at
+the end of a line, a position of a kind that in the agent's own games often
+hid a tactic (a deeper look found a swing a glance did not) is read
+lookahead_patterns.EXTENSION plies further before the capture search, once per
+line. glance() and look() are the two views the lessons compare.
+
 Killer moves and history scores (move_history set to a move_history.MoveHistory):
 below the root, the killer moves of the ply (the last moves that caused a
 cutoff there) are searched besides the usual moves, and the moves searched are
@@ -152,6 +158,9 @@ class PatternSearch:
         self.adapter = None                 # (the game's adapter, for the reply patterns)
         self.refutation_cache: Dict = {}
         self.move_history = None            # a MoveHistory: killers and history scores order the moves below the root
+        self.lookahead = None               # a LookaheadLearner: positions to read further at a line's end
+        self.extend_cache: Dict = {}
+        self.extensions = 0
 
     # ------------------------------------------------------------- ordering
 
@@ -238,6 +247,8 @@ class PatternSearch:
         self.nodes = 0
         self.history = self.game_positions(board)
         self.refutation_cache = {}
+        self.extend_cache = {}
+        self.extensions = 0
         if self.move_history is not None:
             self.move_history.new_search()
         context = self.sequences.context(board) if self.use_patterns else []
@@ -272,6 +283,35 @@ class PatternSearch:
                 break
         return best_move
 
+    def glance(self, board: chess.Board) -> float:
+        """The value of a position for the side to move as a line's end sees it: the capture search alone"""
+        self.deadline = float('inf')
+        context = self.sequences.context(board) if self.use_patterns else []
+        return self.quiesce(board, -float('inf'), float('inf'), context, 0, QUIESCENCE_DEPTH)
+
+    def look(self, board: chess.Board, depth: int, seconds: float) -> Optional[float]:
+        """The value of a position for the side to move searched depth plies (without look-ahead extensions);
+        None if it takes longer than seconds"""
+        saved, self.lookahead = self.lookahead, None
+        self.deadline = time.time() + seconds
+        self.history = self.game_positions(board) - {board._transposition_key()}
+        self.refutation_cache = {}
+        context = self.sequences.context(board) if self.use_patterns else []
+        try:
+            return self.negamax(board, depth, -float('inf'), float('inf'), context, 0)
+        except OutOfTime:
+            return None
+        finally:
+            self.lookahead = saved
+
+    def read_further(self, board: chess.Board) -> bool:
+        """At a line's end: whether the learned look-ahead patterns call for reading this position further"""
+        key = board._transposition_key()
+        hit = self.extend_cache.get(key)
+        if hit is None:
+            hit = self.extend_cache[key] = not board.is_game_over() and self.lookahead.extend(board)
+        return hit
+
     @staticmethod
     def game_positions(board: chess.Board) -> set:
         """The positions (transposition keys) the game has been in, the current one included"""
@@ -286,13 +326,18 @@ class PatternSearch:
     def next_context(context: List[str], tok: Optional[str]) -> List[str]:
         return (context + [tok])[-2:] if tok is not None else context
 
-    def negamax(self, board: chess.Board, depth: int, alpha: float, beta: float, context: List[str], ply: int) -> float:
+    def negamax(self, board: chess.Board, depth: int, alpha: float, beta: float, context: List[str], ply: int,
+                extended: bool = False) -> float:
         self.nodes += 1
         if time.time() > self.deadline:
             raise OutOfTime
         if board._transposition_key() in self.history:
             return 0.0                      # back to a position of the game: a repetition, valued as a draw
         if depth <= 0:
+            if self.lookahead is not None and not extended and self.read_further(board):
+                self.extensions += 1        # a position whose kind often hides a tactic: read further, once
+                from lookahead_patterns import EXTENSION
+                return self.negamax(board, EXTENSION, alpha, beta, context, ply, True)
             return self.quiesce(board, alpha, beta, context, ply, QUIESCENCE_DEPTH)
         moves = self.candidates(board, context, ply)
         if not moves:
@@ -301,7 +346,8 @@ class PatternSearch:
         for move, _, tok in moves:
             board.push(move)
             try:
-                value = -self.negamax(board, depth - 1, -beta, -alpha, self.next_context(context, tok), ply + 1)
+                value = -self.negamax(board, depth - 1, -beta, -alpha, self.next_context(context, tok), ply + 1,
+                                      extended)
             finally:
                 board.pop()
             if value > best:

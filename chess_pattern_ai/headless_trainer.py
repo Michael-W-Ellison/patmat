@@ -51,6 +51,8 @@ class HeadlessTrainer:
     use_move_history = False    # the search orders moves by killer moves and history scores (move_history)
     use_tactics = False         # general patterns get tactical parts: threats left after the best reply
                                 # (tactical_patterns)
+    use_lookahead = False       # learn, in hindsight after each game, which positions hide a tactic; the search
+                                # reads such positions further (lookahead_patterns)
 
     def __init__(self, db_path='headless_training.db', opponent='random', stockfish_level=0,
                  stockfish_path='/usr/games/stockfish', stockfish_time=0.1, screen=None, screen_side=False):
@@ -105,6 +107,11 @@ class HeadlessTrainer:
         if self.use_move_history:
             from move_history import MoveHistory
             self.search.move_history = MoveHistory()
+        self.lookahead = None
+        if self.use_lookahead:
+            from lookahead_patterns import LookaheadLearner
+            self.lookahead = LookaheadLearner(db_path)
+            self.search.lookahead = self.lookahead
 
         self.games_played = 0
         self.wins = 0
@@ -361,6 +368,8 @@ class HeadlessTrainer:
             self.positions.record_game(board.move_stack, ai_color, result,
                                        judge=self.judge if self.judge_positions else None)
             self.mates.record_game(board.move_stack)
+            if self.lookahead is not None:
+                self.lookahead.record_game(board.move_stack, self.search)
 
         # Store result details
         self.game_results.append({
@@ -505,6 +514,8 @@ class HeadlessTrainer:
         self.mates.close()
         self.positions.close()
         self.sequences.close()
+        if self.lookahead is not None:
+            self.lookahead.close()
         if self.engine is not None:
             self.engine.quit()
         if self.judge is not None:
