@@ -57,6 +57,11 @@ hid a tactic (a deeper look found a swing a glance did not) is read
 lookahead_patterns.EXTENSION plies further before the capture search, once per
 line. glance() and look() are the two views the lessons compare.
 
+Episodic memory (episodes set to an episodic_memory.EpisodicMemory): a reply to
+a root move that matches the punishment of a remembered episode is always
+read, first, and episodic_memory.EXTENSION plies further; a root move that
+matches one is read further too.
+
 Killer moves and history scores (move_history set to a move_history.MoveHistory):
 below the root, the killer moves of the ply (the last moves that caused a
 cutoff there) are searched besides the usual moves, and the moves searched are
@@ -159,6 +164,8 @@ class PatternSearch:
         self.refutation_cache: Dict = {}
         self.move_history = None            # a MoveHistory: killers and history scores order the moves below the root
         self.lookahead = None               # a LookaheadLearner: positions to read further at a line's end
+        self.episodes = None                # an EpisodicMemory: remembered punishments, read further
+        self.recalls = 0
         self.extend_cache: Dict = {}
         self.extensions = 0
 
@@ -210,6 +217,12 @@ class PatternSearch:
                     features, REPLIES_EXTENDED, exclude={i for i, e in enumerate(moves) if e[0] in chosen})]
                 self.refutation_cache[key] = extra
             out = out + extra
+        if self.episodes is not None and ply == 1 and len(self.episodes):
+            # remembered punishments: always read, and first
+            recalled = [e for e in moves if self.episodes.recall(board, e[0])]
+            if recalled:
+                first = {e[0] for e in recalled}
+                out = recalled + [e for e in out if e[0] not in first]
         history = self.move_history
         if history is not None:
             chosen = {e[0] for e in out}
@@ -249,6 +262,7 @@ class PatternSearch:
         self.refutation_cache = {}
         self.extend_cache = {}
         self.extensions = 0
+        self.recalls = 0
         if self.move_history is not None:
             self.move_history.new_search()
         context = self.sequences.context(board) if self.use_patterns else []
@@ -266,10 +280,11 @@ class PatternSearch:
                     # a move cut off returns it exactly, so the comparison is on the value, not on
                     # value + bonus (whose rounding could make a cut-off move look better than the best)
                     threshold = best_total - bonus
+                    more = self.recalled(board, move)       # a trick remembered: read further
                     board.push(move)
                     try:
-                        value = -self.negamax(board, depth - 1, -float('inf'), -threshold,
-                                              self.next_context(context, tok), 1)
+                        value = -self.negamax(board, depth - 1 + more, -float('inf'), -threshold,
+                                              self.next_context(context, tok), 1, more > 0)
                     finally:
                         board.pop()
                     scored.append((value + bonus, move, pattern, tok))
@@ -290,9 +305,11 @@ class PatternSearch:
         return self.quiesce(board, -float('inf'), float('inf'), context, 0, QUIESCENCE_DEPTH)
 
     def look(self, board: chess.Board, depth: int, seconds: float) -> Optional[float]:
-        """The value of a position for the side to move searched depth plies (without look-ahead extensions);
-        None if it takes longer than seconds"""
-        saved, self.lookahead = self.lookahead, None
+        """The value of a position for the side to move searched depth plies (without look-ahead extensions,
+        episodes or refutation patterns: what it shows does not depend on what was learned from it); None if it
+        takes longer than seconds"""
+        saved = self.lookahead, self.episodes, self.refutations
+        self.lookahead = self.episodes = self.refutations = None
         self.deadline = time.time() + seconds
         self.history = self.game_positions(board) - {board._transposition_key()}
         self.refutation_cache = {}
@@ -302,7 +319,16 @@ class PatternSearch:
         except OutOfTime:
             return None
         finally:
-            self.lookahead = saved
+            self.lookahead, self.episodes, self.refutations = saved
+
+    def recalled(self, board: chess.Board, move: chess.Move) -> int:
+        """Plies to read a move further because it matches a remembered episode's punishment (episodic memory;
+        counted in recalls whether or not EXTENSION is 0)"""
+        if self.episodes is None or not self.episodes.recall(board, move):
+            return 0
+        from episodic_memory import EXTENSION
+        self.recalls += 1
+        return EXTENSION
 
     def read_further(self, board: chess.Board) -> bool:
         """At a line's end: whether the learned look-ahead patterns call for reading this position further"""
@@ -344,10 +370,11 @@ class PatternSearch:
             return -(MATE - ply) if board.is_check() else 0.0
         best, best_move, cutoff, raised = -float('inf'), None, False, False
         for move, _, tok in moves:
+            more = self.recalled(board, move) if ply == 1 and not extended else 0   # a punishment remembered
             board.push(move)
             try:
-                value = -self.negamax(board, depth - 1, -beta, -alpha, self.next_context(context, tok), ply + 1,
-                                      extended)
+                value = -self.negamax(board, depth - 1 + more, -beta, -alpha, self.next_context(context, tok),
+                                      ply + 1, extended or more > 0)
             finally:
                 board.pop()
             if value > best:

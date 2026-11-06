@@ -3,19 +3,22 @@
 Evaluate lookahead_patterns: does learning which positions hide a tactic, and reading them further, cut
 the agent's blunders?
 
-    python3 evaluate_lookahead.py learn <work dir> <games> [--level N]
+    python3 evaluate_lookahead.py learn <work dir> <games> [--arm A] [--level N]
     python3 evaluate_lookahead.py play <work dir> <arm> <games> [--level N] [--out file.jsonl]
 
-learn: the chess trainer with use_lookahead plays games against Stockfish (skill level N, default 0),
-learning as usual and, after each game, the look-ahead patterns; its database is <work dir>/learned.db.
-play: a copy of that database (<work dir>/<arm>.db) plays games against the same opponent, arm 'plain'
-(the search as before) or 'lookahead' (reading further where the patterns call for it, and still learning
-them); both keep learning everything else as usual. Each of the agent's moves is judged by Stockfish (depth
+Arms (ARMS): 'plain' (the search as before), 'lookahead' (lookahead_patterns: reading further where the
+look-ahead patterns call for it), 'memory' (episodic_memory: episodic and semantic memory of punished moves),
+'memory_first' (the same, remembered punishments read first but not further).
+learn: the chess trainer with arm A's learning on (default lookahead) plays games against Stockfish (skill
+level N, default 0), learning as usual and, after each game, that arm's memory; its database is
+<work dir>/learned.db. play: a copy of that database (<work dir>/<arm>.db) plays games against the same
+opponent with the arm's setting (still learning its memory); every arm keeps learning everything else as
+usual. Each of the agent's moves is judged by Stockfish (depth
 blunder_analysis.JUDGE_DEPTH): centipawns lost, and the blunders (blunder_analysis.BLUNDER or more) as
 blunder_analysis describes them. Printed: results, mean centipawn loss, blunders, the search's mean depth
 reached and positions examined per move, and how often it read a position further.
 
-Results: the lookahead_patterns docstring.
+Results: the lookahead_patterns and episodic_memory docstrings.
 (For the results there, learn was stopped after 70 of 80 games by a time limit; its patterns are saved
 after every game.)
 """
@@ -35,22 +38,39 @@ import chess.engine
 import blunder_analysis as BA
 
 
-def trainer(db, lookahead, level, path):
+ARMS = {'plain': {}, 'lookahead': {'use_lookahead': True}, 'memory': {'use_memory': True},
+        # memory, the remembered punishments read (first) but not further
+        'memory_first': {'use_memory': True, 'extension': 0}}
+
+
+def trainer(db, arm, level, path):
     import logging
     logging.disable(logging.INFO)
     from headless_trainer import HeadlessTrainer
-    HeadlessTrainer.use_lookahead = lookahead
+    for flag in ('use_lookahead', 'use_memory'):
+        setattr(HeadlessTrainer, flag, ARMS[arm].get(flag, False))
+    import episodic_memory
+    episodic_memory.EXTENSION = ARMS[arm].get('extension', 2)
     return HeadlessTrainer(db, opponent='stockfish', stockfish_level=level, stockfish_path=path)
 
 
-def learn(work, games, level, path):
+def learn(work, games, level, path, arm='lookahead'):
     os.makedirs(work, exist_ok=True)
-    t = trainer(os.path.join(work, 'learned.db'), True, level, path)
+    t = trainer(os.path.join(work, 'learned.db'), arm, level, path)
     for i in range(games):
         start = time.time()
         result, _, _ = t.play_game(chess.WHITE if i % 2 == 0 else chess.BLACK)
-        print(f'learn game {i + 1}: {result} ({time.time() - start:.0f} s; {t.lookahead.lessons} lessons, '
-              f'{t.lookahead.overall():.2f} of positions hid a swing)', file=sys.stderr, flush=True)
+        note = (f'{t.lookahead.lessons} lessons, {t.lookahead.overall():.2f} of positions hid a swing'
+                if t.lookahead is not None else f'{len(t.memory)} episodes')
+        print(f'learn game {i + 1}: {result} ({time.time() - start:.0f} s; {note})', file=sys.stderr, flush=True)
+    if t.memory is not None:
+        rows = list(t.memory.conn.execute('SELECT blunderer, COUNT(*), AVG(lost) FROM episodes GROUP BY blunderer'))
+        print('episodes by whose move was punished (count, mean material lost):', rows)
+        print('semantic memory, reply patterns by how many times more often than average they punished:')
+        for f, r in sorted(t.general.refutations.rates.items(), key=lambda e: -e[1]):
+            print(f'  {f:32s} {r:.2f}')
+        t.close()
+        return
     print('signatures (seen >= 20), by rate:')
     rows = [(t.lookahead.rate(s), s, n, h) for s, (n, h) in t.lookahead.counts.items() if n >= 20]
     for r, s, n, h in sorted(rows, reverse=True):
@@ -62,10 +82,10 @@ def learn(work, games, level, path):
 def play(work, arm, games, level, path, out=None):
     db = os.path.join(work, f'{arm}.db')
     shutil.copy(os.path.join(work, 'learned.db'), db)
-    t = trainer(db, arm == 'lookahead', level, path)
+    t = trainer(db, arm, level, path)
     judge = chess.engine.SimpleEngine.popen_uci(path)
     limit = chess.engine.Limit(depth=BA.JUDGE_DEPTH)
-    losses, records, depths, nodes, extended = [], [], [], [], []
+    losses, records, depths, nodes, extended, recalls = [], [], [], [], [], []
     sink = open(out, 'w') if out else None
     play_move = t.play_ai_move
 
@@ -76,6 +96,7 @@ def play(work, arm, games, level, path, out=None):
         depths.append(t.search.depth_reached)
         nodes.append(t.search.nodes)
         extended.append(t.search.extensions)
+        recalls.append(t.search.recalls)
         before = BA.score_of(judge.analyse(board, limit), colour)
         board.push(move)
         after = BA.score_of(judge.analyse(board, limit), colour)
@@ -101,7 +122,10 @@ def play(work, arm, games, level, path, out=None):
     print(f'arm {arm}: results {results}')
     print(f'mean centipawn loss {statistics.mean(losses):.1f} over {len(losses)} moves; '
           f'search depth reached {statistics.mean(depths):.2f}, positions per move {statistics.mean(nodes):.0f}, '
-          f'positions read further per move {statistics.mean(extended):.1f}')
+          f'positions read further per move {statistics.mean(extended):.1f}, '
+          f'remembered moves matched per move {statistics.mean(recalls):.1f}')
+    if t.memory is not None:
+        print(f'episodes remembered at the end: {len(t.memory)}')
     print(BA.report(records, len(losses)))
     judge.quit()
     t.close()
@@ -115,8 +139,9 @@ if __name__ == '__main__':
     ap.add_argument('--level', type=int, default=0)
     ap.add_argument('--stockfish-path', default='/usr/games/stockfish')
     ap.add_argument('--out', default=None)
+    ap.add_argument('--arm', default='lookahead', choices=sorted(ARMS))
     a = ap.parse_args()
     if a.what == 'learn':
-        learn(a.work, int(a.rest[0]), a.level, a.stockfish_path)
+        learn(a.work, int(a.rest[0]), a.level, a.stockfish_path, a.arm)
     else:
         play(a.work, a.rest[0], int(a.rest[1]), a.level, a.stockfish_path, a.out)

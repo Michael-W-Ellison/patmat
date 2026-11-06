@@ -53,6 +53,9 @@ class HeadlessTrainer:
                                 # (tactical_patterns)
     use_lookahead = False       # learn, in hindsight after each game, which positions hide a tactic; the search
                                 # reads such positions further (lookahead_patterns)
+    use_memory = False          # episodic memory of punished moves, found in hindsight after each game, and
+                                # semantic memory of what kinds of reply punish (episodic_memory); the search
+                                # reads remembered punishments further, and the kinds that punish most
 
     def __init__(self, db_path='headless_training.db', opponent='random', stockfish_level=0,
                  stockfish_path='/usr/games/stockfish', stockfish_time=0.1, screen=None, screen_side=False):
@@ -107,6 +110,13 @@ class HeadlessTrainer:
         if self.use_move_history:
             from move_history import MoveHistory
             self.search.move_history = MoveHistory()
+        self.memory = None
+        if self.use_memory:
+            from episodic_memory import EpisodicMemory
+            self.memory = EpisodicMemory(db_path, semantic=self.general.refutations, adapter=self.adapter)
+            self.search.episodes = self.memory
+            self.search.refutations = self.general.refutations
+            self.search.adapter = self.adapter
         self.lookahead = None
         if self.use_lookahead:
             from lookahead_patterns import LookaheadLearner
@@ -370,6 +380,8 @@ class HeadlessTrainer:
             self.mates.record_game(board.move_stack)
             if self.lookahead is not None:
                 self.lookahead.record_game(board.move_stack, self.search)
+            if self.memory is not None:
+                self.memory.record_game(board.move_stack, ai_color, self.search)
 
         # Store result details
         self.game_results.append({
@@ -516,6 +528,8 @@ class HeadlessTrainer:
         self.sequences.close()
         if self.lookahead is not None:
             self.lookahead.close()
+        if self.memory is not None:
+            self.memory.close()
         if self.engine is not None:
             self.engine.quit()
         if self.judge is not None:
