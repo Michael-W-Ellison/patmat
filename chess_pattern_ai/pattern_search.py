@@ -60,7 +60,8 @@ line. glance() and look() are the two views the lessons compare.
 Episodic memory (episodes set to an episodic_memory.EpisodicMemory): a reply to
 a root move that matches the punishment of a remembered episode is always
 read, first, and episodic_memory.EXTENSION plies further; a root move that
-matches one is read further too.
+matches one is read further too. Or (memory_mode 'root') only the
+ROOT_CHECKED best root moves are checked, after the search (check()).
 
 Killer moves and history scores (move_history set to a move_history.MoveHistory):
 below the root, the killer moves of the ply (the last moves that caused a
@@ -85,6 +86,8 @@ QUIESCENCE_DEPTH = 6    # captures followed beyond the search depth
 MAX_DEPTH = 8
 PATTERN_WEIGHT = 0.5    # root moves: search value + PATTERN_WEIGHT * pattern value (both material units)
 QUIET_MOVES = 2         # selective search: non-forcing moves considered at each position below the root
+ROOT_CHECKED = 3        # memory at the root: the search's best moves checked for remembered situations
+ROOT_SECONDS = 0.5      # ... and the time for searching them again
 
 
 def forcing(move: chess.Move, token: Optional[str], board: chess.Board) -> bool:
@@ -166,6 +169,10 @@ class PatternSearch:
         self.lookahead = None               # a LookaheadLearner: positions to read further at a line's end
         self.episodes = None                # an EpisodicMemory: remembered punishments, read further
         self.recalls = 0
+        # where the episodes are used: 'lines' (in every line, at its first reply and at the root) or 'root'
+        # (only the ROOT_CHECKED best root moves, after the search; check())
+        self.memory_mode = 'lines'
+        self.root_flagged = 0               # root mode: searches whose best moves met a remembered situation
         self.extend_cache: Dict = {}
         self.extensions = 0
 
@@ -217,7 +224,7 @@ class PatternSearch:
                     features, REPLIES_EXTENDED, exclude={i for i, e in enumerate(moves) if e[0] in chosen})]
                 self.refutation_cache[key] = extra
             out = out + extra
-        if self.episodes is not None and ply == 1 and len(self.episodes):
+        if self.episodes is not None and self.memory_mode == 'lines' and ply == 1 and len(self.episodes):
             # remembered punishments: always read, and first
             recalled = [e for e in moves if self.episodes.recall(board, e[0])]
             if recalled:
@@ -296,7 +303,48 @@ class PatternSearch:
                 root = [(m, p, t) for _, m, p, t in sorted(scored, key=lambda e: -e[0])]
             except OutOfTime:
                 break
+        if self.memory_mode == 'root' and self.episodes is not None and len(self.episodes):
+            best_move = self.check(board, root, context, extra, best_move)
         return best_move
+
+    def check(self, board: chess.Board, root: List[Tuple], context: List[str],
+              extra: Optional[Dict[chess.Move, float]], best_move: chess.Move) -> chess.Move:
+        """
+        Memory at the root only: after the search, if a reply to one of its ROOT_CHECKED best moves makes a
+        situation remembered from an episode, those moves are searched again (full window, ROOT_SECONDS more):
+        the ones met by a remembered situation EXTENSION plies deeper; the best of them is played
+        """
+        from episodic_memory import EXTENSION
+        top = root[:ROOT_CHECKED]
+        flagged = []
+        for move, _, _ in top:
+            board.push(move)
+            try:
+                flagged.append(any(self.episodes.recall(board, r) for r in board.legal_moves))
+            finally:
+                board.pop()
+        if not any(flagged):
+            return best_move
+        self.root_flagged += 1
+        self.recalls += sum(flagged)
+        self.deadline = time.time() + ROOT_SECONDS
+        depth = max(1, self.depth_reached)
+        best, chosen = -float('inf'), best_move
+        try:
+            for (move, pattern, tok), hit in zip(top, flagged):
+                bonus = self.bonus(pattern) + (extra.get(move, 0.0) if extra else 0.0)
+                more = EXTENSION if hit else 0
+                board.push(move)
+                try:
+                    value = -self.negamax(board, depth - 1 + more, -float('inf'), float('inf'),
+                                          self.next_context(context, tok), 1, True)
+                finally:
+                    board.pop()
+                if value + bonus > best:
+                    best, chosen = value + bonus, move
+        except OutOfTime:
+            return best_move            # not all checked in time: the search's own choice
+        return chosen
 
     def glance(self, board: chess.Board) -> float:
         """The value of a position for the side to move as a line's end sees it: the capture search alone"""
@@ -324,7 +372,7 @@ class PatternSearch:
     def recalled(self, board: chess.Board, move: chess.Move) -> int:
         """Plies to read a move further because it matches a remembered episode's punishment (episodic memory;
         counted in recalls whether or not EXTENSION is 0)"""
-        if self.episodes is None or not self.episodes.recall(board, move):
+        if self.episodes is None or self.memory_mode != 'lines' or not self.episodes.recall(board, move):
             return 0
         from episodic_memory import EXTENSION
         self.recalls += 1

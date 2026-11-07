@@ -8,7 +8,9 @@ the agent's blunders?
 
 Arms (ARMS): 'plain' (the search as before), 'lookahead' (lookahead_patterns: reading further where the
 look-ahead patterns call for it), 'memory' (episodic_memory: episodic and semantic memory of punished moves),
-'memory_first' (the same, remembered punishments read first but not further).
+'memory_first' (the same, remembered punishments read first but not further), 'plain_depth' and
+'memory_depth' (as plain and memory, with time enough for the search to finish its depth), 'memory_root'
+(the memory used only on the search's best root moves).
 learn: the chess trainer with arm A's learning on (default lookahead) plays games against Stockfish (skill
 level N, default 0), learning as usual and, after each game, that arm's memory; its database is
 <work dir>/learned.db. play: a copy of that database (<work dir>/<arm>.db) plays games against the same
@@ -40,7 +42,12 @@ import blunder_analysis as BA
 
 ARMS = {'plain': {}, 'lookahead': {'use_lookahead': True}, 'memory': {'use_memory': True},
         # memory, the remembered punishments read (first) but not further
-        'memory_first': {'use_memory': True, 'extension': 0}}
+        'memory_first': {'use_memory': True, 'extension': 0},
+        # equal depth, not equal time: the 3-ply search always finished (up to DEPTH_SECONDS per move)
+        'plain_depth': {'seconds': 30.0},
+        'memory_depth': {'use_memory': True, 'seconds': 30.0},
+        # memory at the root only: the search's best moves checked after it (pattern_search.PatternSearch.check)
+        'memory_root': {'use_memory': True, 'mode': 'root'}}
 
 
 def trainer(db, arm, level, path):
@@ -51,7 +58,10 @@ def trainer(db, arm, level, path):
         setattr(HeadlessTrainer, flag, ARMS[arm].get(flag, False))
     import episodic_memory
     episodic_memory.EXTENSION = ARMS[arm].get('extension', 2)
-    return HeadlessTrainer(db, opponent='stockfish', stockfish_level=level, stockfish_path=path)
+    HeadlessTrainer.SEARCH_SECONDS = ARMS[arm].get('seconds', 0.5)
+    t = HeadlessTrainer(db, opponent='stockfish', stockfish_level=level, stockfish_path=path)
+    t.search.memory_mode = ARMS[arm].get('mode', 'lines')
+    return t
 
 
 def learn(work, games, level, path, arm='lookahead'):
@@ -79,18 +89,20 @@ def learn(work, games, level, path, arm='lookahead'):
     t.close()
 
 
-def play(work, arm, games, level, path, out=None):
-    db = os.path.join(work, f'{arm}.db')
+def play(work, arm, games, level, path, out=None, seed=None, name=None):
+    db = os.path.join(work, f'{name or arm}.db')
     shutil.copy(os.path.join(work, 'learned.db'), db)
     t = trainer(db, arm, level, path)
     judge = chess.engine.SimpleEngine.popen_uci(path)
     limit = chess.engine.Limit(depth=BA.JUDGE_DEPTH)
-    losses, records, depths, nodes, extended, recalls = [], [], [], [], [], []
+    losses, records, depths, nodes, extended, recalls, seconds = [], [], [], [], [], [], []
     sink = open(out, 'w') if out else None
     play_move = t.play_ai_move
 
     def judged(board, colour):
+        start = time.time()
         move = play_move(board, colour)
+        seconds.append(time.time() - start)
         if move is None:
             return move
         depths.append(t.search.depth_reached)
@@ -114,7 +126,7 @@ def play(work, arm, games, level, path, out=None):
 
     t.play_ai_move = judged
     results = {}
-    random.seed(arm)
+    random.seed(arm if seed is None else f'{arm} {seed}')
     for i in range(games):
         result, _, _ = t.play_game(chess.WHITE if i % 2 == 0 else chess.BLACK)
         results[result] = results.get(result, 0) + 1
@@ -123,7 +135,10 @@ def play(work, arm, games, level, path, out=None):
     print(f'mean centipawn loss {statistics.mean(losses):.1f} over {len(losses)} moves; '
           f'search depth reached {statistics.mean(depths):.2f}, positions per move {statistics.mean(nodes):.0f}, '
           f'positions read further per move {statistics.mean(extended):.1f}, '
-          f'remembered moves matched per move {statistics.mean(recalls):.1f}')
+          f'remembered moves matched per move {statistics.mean(recalls):.1f}, '
+          f'seconds per move {statistics.mean(seconds):.2f} (most {max(seconds):.1f})')
+    if t.search.root_flagged:
+        print(f'moves whose best candidates met a remembered situation: {t.search.root_flagged}')
     if t.memory is not None:
         print(f'episodes remembered at the end: {len(t.memory)}')
     print(BA.report(records, len(losses)))
@@ -140,8 +155,10 @@ if __name__ == '__main__':
     ap.add_argument('--stockfish-path', default='/usr/games/stockfish')
     ap.add_argument('--out', default=None)
     ap.add_argument('--arm', default='lookahead', choices=sorted(ARMS))
+    ap.add_argument('--seed', default=None, help='play: a different seed, to split an arm over processes')
+    ap.add_argument('--name', default=None, help='play: the database copy\'s name (default: the arm)')
     a = ap.parse_args()
     if a.what == 'learn':
         learn(a.work, int(a.rest[0]), a.level, a.stockfish_path, a.arm)
     else:
-        play(a.work, a.rest[0], int(a.rest[1]), a.level, a.stockfish_path, a.out)
+        play(a.work, a.rest[0], int(a.rest[1]), a.level, a.stockfish_path, a.out, a.seed, a.name)

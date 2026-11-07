@@ -97,5 +97,25 @@ class TestRecall(unittest.TestCase):
         self.assertEqual(s.recalls, 0)
 
 
+    def test_memory_at_the_root_only(self):
+        m = memory()
+        m._remember(chess.Board(FORK_WHITE), chess.Move.from_uci('b5c7'))
+        board = chess.Board('4k3/8/8/8/1n6/8/7P/R3K3 w - - 0 1')
+        s = search(1)
+        s.episodes = m
+        s.memory_mode = 'root'
+        s.history, s.depth_reached = set(), 1
+        # suppose the search's best moves were h3 (which allows ...Nc2+, the remembered fork), Kd1 and Ra2
+        h3, kd1, ra2 = (chess.Move.from_uci(u) for u in ('h2h3', 'e1d1', 'a1a2'))
+        root = [(h3, 0.0, None), (kd1, 0.0, None), (ra2, 0.0, None)]
+        chosen = s.check(board, root, [], None, h3)
+        self.assertEqual(s.root_flagged, 1)             # one of them met the remembered situation: searched again
+        self.assertEqual(s.recalls, 1)
+        self.assertNotEqual(chosen, h3)                 # read further, h3 loses the rook
+        # no remembered situation among the best moves: the search's own choice, unchecked
+        s.root_flagged = 0
+        self.assertEqual(s.check(board, [(kd1, 0.0, None), (ra2, 0.0, None)], [], None, kd1), kd1)
+        self.assertEqual(s.root_flagged, 0)
+
 if __name__ == '__main__':
     unittest.main()
