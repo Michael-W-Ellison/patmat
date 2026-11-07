@@ -69,6 +69,23 @@ The cue is now specific (99 of the 267 episodes leave a situation, 93 kinds),
 but such situations (a knight check that also attacks a rook) arise often in
 the lines a search reads, so reading them further still costs the search its
 depth within 0.5 s, and reading them first changed nothing measurable.
+Two further tests, each arm 100 games from the same database (another run,
+so the plain figures differ from those above; plain itself varies between
+runs: another plain run won 14 with 3.1% blunders):
+- equal depth, not equal time (time enough for the 3-ply search to finish):
+  plain_depth:  14 won, 86 lost; 2.5% (113 of 4,462); 65.4; 0.31 s per move
+  memory_depth: 15 won, 84 lost, 1 drawn; 3.3% (146 of 4,465); 71.6; 1.68 s
+                per move (32 remembered situations met per move, read further)
+  With depth equal, the memory still blundered more: its cost is not only time.
+- memory at the root only (PatternSearch.check: the search's best 3 moves
+  checked after it), 0.5 s per move:
+  plain:        10 won, 90 lost; 3.75% (148 of 3,946); 71.3; depth 2.81;
+                0.27 s per move
+  memory_root:  11 won, 89 lost; 2.9% (126 of 4,346); 64.8; depth 2.65; 0.51 s
+                per move (at 2,419 of 4,346 moves a best move met a remembered
+                situation and was searched again)
+  Fewer blunders than this plain run, but within the variation between plain
+  runs, and at about twice the time per move.
 With recall by squares, the cue was too broad: a piece's jump from one square to
 another, from 592 episodes, matches most moves of most positions, so recall
 does not single out the situation remembered; and what the semantic memory
