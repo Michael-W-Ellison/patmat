@@ -89,61 +89,91 @@ def learn(work, games, level, path, arm='lookahead'):
     t.close()
 
 
-def play(work, arm, games, level, path, out=None, seed=None, name=None):
-    db = os.path.join(work, f'{name or arm}.db')
-    shutil.copy(os.path.join(work, 'learned.db'), db)
+def play(work, arm, games, level, path, out=None, seed=None, name=None, resume=False):
+    """
+    Play and judge an arm's games. Every judged move, blunder and game is appended to <work>/<name>.moves.jsonl,
+    .blunders.jsonl and .games.jsonl as it happens; resume: carry on from those (and from the arm's database as
+    it was left), so a run stopped part-way is not lost
+    """
+    name = name or arm
+    db = os.path.join(work, f'{name}.db')
+    files = {k: os.path.join(work, f'{name}.{k}.jsonl') for k in ('moves', 'blunders', 'games')}
+    done = 0
+    if resume and os.path.exists(db) and os.path.exists(files['games']):
+        with open(files['games']) as f:
+            done = sum(1 for _ in f)
+    else:
+        shutil.copy(os.path.join(work, 'learned.db'), db)
+        for f in files.values():
+            open(f, 'w').close()
     t = trainer(db, arm, level, path)
     judge = chess.engine.SimpleEngine.popen_uci(path)
     limit = chess.engine.Limit(depth=BA.JUDGE_DEPTH)
-    losses, records, depths, nodes, extended, recalls, seconds = [], [], [], [], [], [], []
-    sink = open(out, 'w') if out else None
+    sinks = {k: open(f, 'a') for k, f in files.items()}
+    extra_out = open(out, 'a' if done else 'w') if out else None
     play_move = t.play_ai_move
 
     def judged(board, colour):
+        flagged = t.search.root_flagged
         start = time.time()
         move = play_move(board, colour)
-        seconds.append(time.time() - start)
+        took = time.time() - start
         if move is None:
             return move
-        depths.append(t.search.depth_reached)
-        nodes.append(t.search.nodes)
-        extended.append(t.search.extensions)
-        recalls.append(t.search.recalls)
         before = BA.score_of(judge.analyse(board, limit), colour)
         board.push(move)
         after = BA.score_of(judge.analyse(board, limit), colour)
         board.pop()
         loss = max(0, min(before, 1000) - max(after, -1000))
-        losses.append(loss)
+        sinks['moves'].write(json.dumps({'loss': loss, 'depth': t.search.depth_reached, 'nodes': t.search.nodes,
+                                         'extended': t.search.extensions, 'recalls': t.search.recalls,
+                                         'seconds': took, 'flagged': t.search.root_flagged - flagged}) + '\n')
+        sinks['moves'].flush()
         if loss >= BA.BLUNDER:
             rec = BA.analyse_move(judge, board, move, t.search, colour)
             if rec is not None:
-                records.append(rec)
-                if sink:
-                    sink.write(json.dumps(rec) + '\n')
-                    sink.flush()
+                for sink in (sinks['blunders'], extra_out):
+                    if sink:
+                        sink.write(json.dumps(rec) + '\n')
+                        sink.flush()
         return move
 
     t.play_ai_move = judged
-    results = {}
-    random.seed(arm if seed is None else f'{arm} {seed}')
-    for i in range(games):
+    random.seed((arm if seed is None else f'{arm} {seed}') + (f' from {done}' if done else ''))
+    for i in range(done, games):
         result, _, _ = t.play_game(chess.WHITE if i % 2 == 0 else chess.BLACK)
-        results[result] = results.get(result, 0) + 1
-        print(f'{arm} game {i + 1}: {result} ({len(records)} blunders so far)', file=sys.stderr, flush=True)
-    print(f'arm {arm}: results {results}')
-    print(f'mean centipawn loss {statistics.mean(losses):.1f} over {len(losses)} moves; '
-          f'search depth reached {statistics.mean(depths):.2f}, positions per move {statistics.mean(nodes):.0f}, '
-          f'positions read further per move {statistics.mean(extended):.1f}, '
-          f'remembered moves matched per move {statistics.mean(recalls):.1f}, '
-          f'seconds per move {statistics.mean(seconds):.2f} (most {max(seconds):.1f})')
-    if t.search.root_flagged:
-        print(f'moves whose best candidates met a remembered situation: {t.search.root_flagged}')
-    if t.memory is not None:
-        print(f'episodes remembered at the end: {len(t.memory)}')
-    print(BA.report(records, len(losses)))
+        sinks['games'].write(json.dumps({'game': i + 1, 'result': result}) + '\n')
+        sinks['games'].flush()
+        print(f'{name} game {i + 1}: {result}', file=sys.stderr, flush=True)
+    episodes = len(t.memory) if t.memory is not None else None
     judge.quit()
     t.close()
+    for sink in sinks.values():
+        sink.close()
+    summary(work, name, episodes)
+
+
+def summary(work, name, episodes=None):
+    """The results of an arm's run, from its files (see play)"""
+    def rows(kind):
+        with open(os.path.join(work, f'{name}.{kind}.jsonl')) as f:
+            return [json.loads(line) for line in f if line.strip()]
+    games, moves, records = rows('games'), rows('moves'), rows('blunders')
+    results = {}
+    for g in games:
+        results[g['result']] = results.get(g['result'], 0) + 1
+    mean = lambda k: statistics.mean(m[k] for m in moves)
+    print(f'arm {name}: {len(games)} games, results {results}')
+    print(f'mean centipawn loss {mean("loss"):.1f} over {len(moves)} moves; search depth reached {mean("depth"):.2f}, '
+          f'positions per move {mean("nodes"):.0f}, positions read further per move {mean("extended"):.1f}, '
+          f'remembered moves matched per move {mean("recalls"):.1f}, seconds per move {mean("seconds"):.2f} '
+          f'(most {max(m["seconds"] for m in moves):.1f})')
+    flagged = sum(m['flagged'] for m in moves)
+    if flagged:
+        print(f'moves whose best candidates met a remembered situation: {flagged} of {len(moves)}')
+    if episodes is not None:
+        print(f'episodes that can be recalled at the end: {episodes}')
+    print(BA.report(records, len(moves)))
 
 
 if __name__ == '__main__':
@@ -157,8 +187,9 @@ if __name__ == '__main__':
     ap.add_argument('--arm', default='lookahead', choices=sorted(ARMS))
     ap.add_argument('--seed', default=None, help='play: a different seed, to split an arm over processes')
     ap.add_argument('--name', default=None, help='play: the database copy\'s name (default: the arm)')
+    ap.add_argument('--resume', action='store_true', help='play: carry on a run stopped part-way')
     a = ap.parse_args()
     if a.what == 'learn':
         learn(a.work, int(a.rest[0]), a.level, a.stockfish_path, a.arm)
     else:
-        play(a.work, a.rest[0], int(a.rest[1]), a.level, a.stockfish_path, a.out, a.seed, a.name)
+        play(a.work, a.rest[0], int(a.rest[1]), a.level, a.stockfish_path, a.out, a.seed, a.name, a.resume)
