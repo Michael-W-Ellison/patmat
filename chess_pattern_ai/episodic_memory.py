@@ -58,7 +58,18 @@ gain nothing, 0.3 times. Then 100 games per arm from the same database:
 - memory_first: 13 won, 87 lost; 3.5% (150 of 4,303); 65.6; depth 2.62
                 (remembered replies read first, not further; 186 matched per
                 move, counted by recalls)
-Neither helped. The cue is too broad: a piece's jump from one square to
+Neither helped. Those were with recall by the move's squares. Recall by
+situation (as now), from the same database, 100 games per arm:
+- memory:       8 won, 92 lost; 3.6% (144 of 4,033); 71.5; depth 2.00 (12
+                remembered situations met per move, each read further)
+- memory_first: 8 won, 91 lost, 1 drawn; 3.4% (140 of 4,168); 65.8; depth 2.57
+                (26 met per move, read first, not further; working out the
+                situations costs time: 949 positions per move against 1,178)
+The cue is now specific (99 of the 267 episodes leave a situation, 93 kinds),
+but such situations (a knight check that also attacks a rook) arise often in
+the lines a search reads, so reading them further still costs the search its
+depth within 0.5 s, and reading them first changed nothing measurable.
+With recall by squares, the cue was too broad: a piece's jump from one square to
 another, from 592 episodes, matches most moves of most positions, so recall
 does not single out the situation remembered; and what the semantic memory
 learned (the replies that gain most punish) is what the search already reads
