@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Tests for episodic_memory (episodes of punished moves, found in hindsight; consolidated into refutation patterns)"""
+"""Tests for episodic_memory (episodes of punished moves, found in hindsight; recalled by situation;
+consolidated into refutation patterns)"""
 
 import os
 import sqlite3
@@ -14,8 +15,12 @@ from pattern_search import PatternSearch
 from refutation_patterns import RefutationLearner
 from sequence_patterns import SequencePatternLearner
 
-# 2. Bc4?? hangs the bishop to the pawn on d5
+# 2. Bc4?? hangs the bishop to the pawn on d5: an episode, but its punishment takes at once (no situation)
 GAME = ['e2e4', 'd7d5', 'f1c4', 'd5c4', 'g1f3', 'g8f6', 'b1c3', 'b8c6']
+# white's Nc7+ forks the king on e8 and the rook on a8
+FORK_WHITE = 'r3k3/8/8/1N6/8/8/8/4K3 w - - 0 1'
+# black's ...Nc2+ forks the king on e1 and the rook on a1: the same situation elsewhere, for the other side
+FORK_BLACK = '4k3/8/8/8/1n6/8/8/R3K3 b - - 0 1'
 
 
 def search(depth=3, seconds=30):
@@ -29,36 +34,37 @@ def memory():
     return E.EpisodicMemory(os.path.join(tempfile.mkdtemp(), 'e.db'), semantic=semantic, adapter=ChessAdapter())
 
 
-class TestRecallKey(unittest.TestCase):
-    def test_the_same_jump_from_either_side(self):
-        white = chess.Board('4k3/8/8/1N6/8/8/8/4K3 w - - 0 1')
-        black = chess.Board('4k3/8/8/8/1n6/8/8/4K3 b - - 0 1')
-        self.assertEqual(E.key(white, chess.Move.from_uci('b5c7')), E.key(black, chess.Move.from_uci('b4c2')))
-        self.assertNotEqual(E.key(white, chess.Move.from_uci('b5c7')), E.key(white, chess.Move.from_uci('b5d6')))
+class TestSituation(unittest.TestCase):
+    def test_a_fork_described_wherever_it_is(self):
+        fork = E.situation(chess.Board(FORK_WHITE), chess.Move.from_uci('b5c7'))
+        self.assertEqual(fork, (chess.KNIGHT, 0, True, (chess.ROOK,), 1, 0))
+        self.assertEqual(E.situation(chess.Board(FORK_BLACK), chess.Move.from_uci('b4c2')), fork)
+        # a move that leaves nothing a single answer cannot parry is no situation
+        self.assertIsNone(E.situation(chess.Board(FORK_WHITE), chess.Move.from_uci('e1d1')))
+        self.assertIsNone(E.situation(chess.Board(FORK_WHITE), chess.Move.from_uci('b5a7')))   # attacks the rook only
+
+    def test_a_discovered_check(self):
+        # the bishop leaves the rook's line to the king, giving check, and attacks the undefended queen
+        board = chess.Board('3k4/8/8/8/3B3q/8/8/3RK3 w - - 0 1')
+        self.assertEqual(E.situation(board, chess.Move.from_uci('d4f6')),
+                         (chess.BISHOP, 0, True, (chess.QUEEN,), 1, 0))
 
 
 class TestEpisodes(unittest.TestCase):
-    def test_a_hung_piece_is_remembered_with_its_punishment(self):
+    def test_a_hung_piece_is_an_episode(self):
         m = memory()
         found = m.record_game([chess.Move.from_uci(u) for u in GAME], chess.WHITE, search())
         self.assertEqual([(e['move'], e['reply'], e['blunderer']) for e in found], [('f1c4', 'd5c4', 'agent')])
         self.assertEqual(found[0]['lost'], 33)
-        self.assertEqual(len(m), 1)
-        # recalled: the same capture, and the same capture by the other side (d4xc5 for white)
-        after = chess.Board()
-        for u in GAME[:3]:
-            after.push_uci(u)
-        self.assertTrue(m.recall(after, chess.Move.from_uci('d5c4')))
-        self.assertTrue(m.recall(chess.Board('4k3/8/8/2b5/3P4/8/8/4K3 w - - 0 1'), chess.Move.from_uci('d4c5')))
-        self.assertFalse(m.recall(after, chess.Move.from_uci('g8f6')))
-        # consolidated: the semantic memory has evidence of what kind of reply punished
-        self.assertTrue(m.semantic.has_evidence())
+        self.assertEqual(m.episodes, 1)
+        self.assertEqual(len(m), 0)                     # a capture at once: nothing to recall
+        self.assertTrue(m.semantic.has_evidence())      # consolidated all the same
 
     def test_episodes_are_kept_between_runs(self):
         path = os.path.join(tempfile.mkdtemp(), 'e.db')
         E.EpisodicMemory(path).record_game([chess.Move.from_uci(u) for u in GAME], chess.WHITE, search())
         again = E.EpisodicMemory(path)
-        self.assertEqual(len(again), 1)
+        self.assertEqual(again.episodes, 1)
         self.assertEqual(again.games, 1)
 
     def test_a_quiet_game_has_no_episodes(self):
@@ -67,18 +73,24 @@ class TestEpisodes(unittest.TestCase):
         self.assertEqual(m.record_game([chess.Move.from_uci(u) for u in quiet], chess.WHITE, search()), [])
 
 
-class TestRecallInTheSearch(unittest.TestCase):
-    def test_a_remembered_punishment_is_read_further(self):
+class TestRecall(unittest.TestCase):
+    def test_a_remembered_fork_is_recalled_in_another_position(self):
         m = memory()
-        m.record_game([chess.Move.from_uci(u) for u in GAME], chess.WHITE, search())
-        board = chess.Board()
-        for u in GAME[:2]:
-            board.push_uci(u)
+        m._remember(chess.Board(FORK_WHITE), chess.Move.from_uci('b5c7'))
+        self.assertEqual(len(m), 1)
+        other = chess.Board(FORK_BLACK)
+        self.assertTrue(m.recall(other, chess.Move.from_uci('b4c2')))
+        self.assertFalse(m.recall(other, chess.Move.from_uci('b4d5')))         # the same piece, no fork
+        self.assertFalse(m.recall(other, chess.Move.from_uci('e8d7')))
+
+    def test_a_remembered_fork_is_read_in_the_search(self):
+        m = memory()
+        m._remember(chess.Board(FORK_WHITE), chess.Move.from_uci('b5c7'))
+        board = chess.Board('4k3/8/8/8/1n6/8/7P/R3K3 w - - 0 1')              # after h3, ...Nc2+ forks
         s = search(2)
         s.episodes = m
-        move = s.choose(board)
+        s.choose(board)
         self.assertGreater(s.recalls, 0)
-        self.assertNotEqual(move, chess.Move.from_uci('f1c4'))
         # the deeper look used for episodes does not recall
         s.recalls = 0
         s.look(board, 2, 30)

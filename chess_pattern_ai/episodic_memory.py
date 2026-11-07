@@ -18,13 +18,22 @@ reply the opponent played (the punishment), the line that followed (LINE
 plies), the material lost, and whose move it was (the agent's own blunders
 and the opponent's).
 
-Recall (recall): a move matches an episode when the same kind of piece moves
-from the same square to the same square, seen from the side that moves (for
-black the board is turned round), as the punishing reply of an episode did. A
-remembered punishment is a cue: in the search (PatternSearch.episodes), a reply
-to the agent's move that matches one is always read, and EXTENSION plies
-deeper; so is a root move of the agent's that matches one (a trick it has seen
-work).
+Recall (recall), by the situation a move makes, not by its squares: a
+punishing reply is described by the situation it left (situation()): the kind
+of piece that moved, what it took, whether it gave check, which of the other
+side's pieces it left to be won (pattern_search.threatened: attacked and
+undefended, or attacked by a cheaper piece), and of those, how many the moved
+piece attacks itself and how many it uncovered (a discovered attack). Only
+situations one answer cannot parry are remembered: two or more pieces to be
+won, or check and one to be won (a fork, a double or discovered attack, a
+check that wins a piece); a reply that wins material at once the search sees
+anyway. A move recalls an episode when it makes the same situation in the
+position at hand. A remembered situation is a cue: in the search
+(PatternSearch.episodes), a reply to the agent's move that recalls one is
+always read, first, and EXTENSION plies deeper; so is a root move of the
+agent's that recalls one (a trick it has seen work).
+(Recall by the move's squares, the piece and its from and to squares, was
+tried first; see Results.)
 
 Semantic memory (consolidate): each episode is also recorded, game-
 independently, in the refutation patterns (refutation_patterns.RefutationLearner,
@@ -71,14 +80,32 @@ LINE = 6                # plies of the line kept with an episode
 EXTENSION = 2           # plies a recalled move is read further
 
 
-def key(board: chess.Board, move: chess.Move) -> Optional[Tuple[int, int, int]]:
-    """A move as recall sees it: (piece type, from square, to square), seen from the side moving"""
-    piece = board.piece_type_at(move.from_square)
-    if piece is None:
-        return None
-    if board.turn == chess.BLACK:
-        return piece, chess.square_mirror(move.from_square), chess.square_mirror(move.to_square)
-    return piece, move.from_square, move.to_square
+def coarse(board: chess.Board, move: chess.Move) -> Tuple[int, int]:
+    """The first part of a situation, known before the move is played: (piece type moving, piece type taken)"""
+    taken = board.piece_type_at(move.to_square) or (chess.PAWN if board.is_en_passant(move) else 0)
+    return board.piece_type_at(move.from_square) or 0, taken
+
+
+def situation(board: chess.Board, move: chess.Move) -> Optional[Tuple]:
+    """
+    The situation move (by the side to move) leaves (module docstring): (piece type, piece type taken (0: none),
+    check, the kinds of the other side's pieces then to be won (sorted), how many of them the moved piece
+    attacks, how many it uncovered); None when it is not one a single answer cannot parry (board unchanged)
+    """
+    from pattern_search import threatened
+    other = not board.turn
+    piece, taken = coarse(board, move)
+    board.push(move)
+    try:
+        check = board.is_check()
+        won = threatened(board, other)
+        if len(won) < 2 and not (check and won):
+            return None
+        kinds = tuple(sorted(board.piece_type_at(sq) for sq, _ in won))
+        by_piece = sum(1 for sq, _ in won if move.to_square in board.attackers(not board.turn, sq))
+        return piece, taken, check, kinds, by_piece, len(won) - by_piece
+    finally:
+        board.pop()
 
 
 class EpisodicMemory:
@@ -100,19 +127,40 @@ class EpisodicMemory:
         self.conn.commit()
         self.semantic = semantic        # a RefutationLearner (or None)
         self.adapter = adapter          # the game's adapter (for the reply patterns)
-        self.keys: Dict[Tuple[int, int, int], int] = {}
+        self.situations: Dict[Tuple, int] = {}     # remembered situations: how many episodes left each
+        self.coarse = set()
+        self.episodes = 0
+        self._cache: Dict = {}
         for fen, reply in self.conn.execute('SELECT fen, reply FROM episodes'):
-            k = key(chess.Board(fen), chess.Move.from_uci(reply))
-            if k is not None:
-                self.keys[k] = self.keys.get(k, 0) + 1
+            self._remember(chess.Board(fen), chess.Move.from_uci(reply))
         self.games = (self.conn.execute('SELECT MAX(game) FROM episodes').fetchone()[0] or 0)
 
+    def _remember(self, board: chess.Board, reply: chess.Move) -> Optional[Tuple]:
+        self.episodes += 1
+        if reply not in board.legal_moves:
+            return None
+        sit = situation(board, reply)
+        if sit is not None:
+            self.situations[sit] = self.situations.get(sit, 0) + 1
+            self.coarse.add(sit[:2])
+            self._cache = {}
+        return sit
+
     def __len__(self) -> int:
-        return sum(self.keys.values())
+        """Episodes that can be recalled (their situation is remembered)"""
+        return sum(self.situations.values())
 
     def recall(self, board: chess.Board, move: chess.Move) -> bool:
-        """Does move (by the side to move on board) match the punishment of a remembered episode?"""
-        return bool(self.keys) and key(board, move) in self.keys
+        """Does move (by the side to move on board) make a situation remembered from an episode?"""
+        if not self.situations or coarse(board, move) not in self.coarse:
+            return False
+        k = (board._transposition_key(), move)
+        hit = self._cache.get(k)
+        if hit is None:
+            if len(self._cache) > 200_000:
+                self._cache = {}
+            hit = self._cache[k] = situation(board, move) in self.situations
+        return hit
 
     # -------------------------------------------------------------- episodes
 
@@ -157,11 +205,10 @@ class EpisodicMemory:
                           'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
                           (after.fen(), moves[i].uci(), reply.uci(), line, lost, deeper, blunderer, self.games, i))
         self.conn.commit()
-        k = key(after, reply)
-        if k is not None:
-            self.keys[k] = self.keys.get(k, 0) + 1
+        sit = self._remember(after.copy(), reply)
         self.consolidate(after, reply)
-        return {'ply': i, 'move': moves[i].uci(), 'reply': reply.uci(), 'lost': lost, 'blunderer': blunderer}
+        return {'ply': i, 'move': moves[i].uci(), 'reply': reply.uci(), 'lost': lost, 'blunderer': blunderer,
+                'situation': sit}
 
     def consolidate(self, after: chess.Board, reply: chess.Move) -> None:
         """Record the episode in the semantic memory: every legal reply's pattern, and which was the punishment"""
