@@ -63,6 +63,12 @@ read, first, and episodic_memory.EXTENSION plies further; a root move that
 matches one is read further too. Or (memory_mode 'root') only the
 ROOT_CHECKED best root moves are checked, after the search (check()).
 
+Evaluation weights (weights set to a list, one per evaluation_weights.FEATURES):
+a position's value also gets the weighted sum of its features (mobility, king
+safety, loose pieces, pawn structure, ...), as the Tetris agent values its
+pieces' resting places; the weights are learned from game results by the
+cross-entropy method (evaluation_weights.WeightTuner).
+
 Killer moves and history scores (move_history set to a move_history.MoveHistory):
 below the root, the killer moves of the ply (the last moves that caused a
 cutoff there) are searched besides the usual moves, and the moves searched are
@@ -175,6 +181,7 @@ class PatternSearch:
         self.root_flagged = 0               # root mode: searches whose best moves met a remembered situation
         self.extend_cache: Dict = {}
         self.extensions = 0
+        self.weights = None                 # weights of evaluation_weights.FEATURES added to the evaluation
 
     # ------------------------------------------------------------- ordering
 
@@ -257,6 +264,9 @@ class PatternSearch:
             value += self.positions.value(board)
         if self.mates is not None:
             value += self.mates.value(board)
+        if self.weights is not None:
+            from evaluation_weights import value as weighted
+            value += weighted(board, self.weights)
         return value
 
     # --------------------------------------------------------------- search

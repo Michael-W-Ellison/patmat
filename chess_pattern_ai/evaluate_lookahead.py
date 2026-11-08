@@ -10,7 +10,8 @@ Arms (ARMS): 'plain' (the search as before), 'lookahead' (lookahead_patterns: re
 look-ahead patterns call for it), 'memory' (episodic_memory: episodic and semantic memory of punished moves),
 'memory_first' (the same, remembered punishments read first but not further), 'plain_depth' and
 'memory_depth' (as plain and memory, with time enough for the search to finish its depth), 'memory_root'
-(the memory used only on the search's best root moves).
+(the memory used only on the search's best root moves), 'weights' and 'weights_depth' (evaluation_weights:
+learn tunes the weights from game results; play uses their learned mean).
 learn: the chess trainer with arm A's learning on (default lookahead) plays games against Stockfish (skill
 level N, default 0), learning as usual and, after each game, that arm's memory; its database is
 <work dir>/learned.db. play: a copy of that database (<work dir>/<arm>.db) plays games against the same
@@ -47,15 +48,20 @@ ARMS = {'plain': {}, 'lookahead': {'use_lookahead': True}, 'memory': {'use_memor
         'plain_depth': {'seconds': 30.0},
         'memory_depth': {'use_memory': True, 'seconds': 30.0},
         # memory at the root only: the search's best moves checked after it (pattern_search.PatternSearch.check)
-        'memory_root': {'use_memory': True, 'mode': 'root'}}
+        'memory_root': {'use_memory': True, 'mode': 'root'},
+        # evaluation_weights: weighted position features, the weights learned by the cross-entropy method in
+        # learn; play uses the learned mean
+        'weights': {'use_weights': True},
+        'weights_depth': {'use_weights': True, 'seconds': 30.0}}
 
 
-def trainer(db, arm, level, path):
+def trainer(db, arm, level, path, learning=False):
     import logging
     logging.disable(logging.INFO)
     from headless_trainer import HeadlessTrainer
-    for flag in ('use_lookahead', 'use_memory'):
+    for flag in ('use_lookahead', 'use_memory', 'use_weights'):
         setattr(HeadlessTrainer, flag, ARMS[arm].get(flag, False))
+    HeadlessTrainer.tune_weights = learning     # weights: drawn and tuned in learn, the learned mean in play
     import episodic_memory
     episodic_memory.EXTENSION = ARMS[arm].get('extension', 2)
     HeadlessTrainer.SEARCH_SECONDS = ARMS[arm].get('seconds', 0.5)
@@ -66,13 +72,26 @@ def trainer(db, arm, level, path):
 
 def learn(work, games, level, path, arm='lookahead'):
     os.makedirs(work, exist_ok=True)
-    t = trainer(os.path.join(work, 'learned.db'), arm, level, path)
+    t = trainer(os.path.join(work, 'learned.db'), arm, level, path, learning=True)
     for i in range(games):
         start = time.time()
         result, _, _ = t.play_game(chess.WHITE if i % 2 == 0 else chess.BLACK)
-        note = (f'{t.lookahead.lessons} lessons, {t.lookahead.overall():.2f} of positions hid a swing'
-                if t.lookahead is not None else f'{len(t.memory)} episodes')
+        if t.lookahead is not None:
+            note = f'{t.lookahead.lessons} lessons, {t.lookahead.overall():.2f} of positions hid a swing'
+        elif t.memory is not None:
+            note = f'{len(t.memory)} episodes'
+        else:
+            note = (f'generation {t.weights.generations}, mean ' +
+                    ' '.join(f'{m:.1f}' for m in t.weights.mean()))
         print(f'learn game {i + 1}: {result} ({time.time() - start:.0f} s; {note})', file=sys.stderr, flush=True)
+    if t.weights is not None:
+        from evaluation_weights import FEATURES
+        print(f'evaluation weights after {t.weights.episodes} games ({t.weights.generations} generations): '
+              'mean (spread)')
+        for f, m, sd in zip(FEATURES, t.weights.mean(), t.weights.std):
+            print(f'  {f:14s} {m:6.2f} ({sd:.2f})')
+        t.close()
+        return
     if t.memory is not None:
         rows = list(t.memory.conn.execute('SELECT blunderer, COUNT(*), AVG(lost) FROM episodes GROUP BY blunderer'))
         print('episodes by whose move was punished (count, mean material lost):', rows)

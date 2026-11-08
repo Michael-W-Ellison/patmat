@@ -56,6 +56,11 @@ class HeadlessTrainer:
     use_memory = False          # episodic memory of punished moves, found in hindsight after each game, and
                                 # semantic memory of what kinds of reply punish (episodic_memory); the search
                                 # reads remembered punishments further, and the kinds that punish most
+    use_weights = False         # the search's evaluation adds weighted position features, the weights learned
+                                # from game results by the cross-entropy method (evaluation_weights), as the
+                                # Tetris agent learns its weights
+    tune_weights = True         # with use_weights: each game draws its weights and records its score; False:
+                                # play with the learned mean, learning nothing about the weights
 
     def __init__(self, db_path='headless_training.db', opponent='random', stockfish_level=0,
                  stockfish_path='/usr/games/stockfish', stockfish_time=0.1, screen=None, screen_side=False):
@@ -122,6 +127,10 @@ class HeadlessTrainer:
             from lookahead_patterns import LookaheadLearner
             self.lookahead = LookaheadLearner(db_path)
             self.search.lookahead = self.lookahead
+        self.weights = None
+        if self.use_weights:
+            from evaluation_weights import WeightTuner
+            self.weights = WeightTuner(db_path)
 
         self.games_played = 0
         self.wins = 0
@@ -287,6 +296,9 @@ class HeadlessTrainer:
                 orientation(render(chess.Board(), flipped=flip))
             seen = chess.Board()            # the agent's own board: what it has made of the screens
 
+        if self.weights is not None:
+            self.search.weights = self.weights.draw() if self.tune_weights else self.weights.mean()
+
         while not board.is_game_over():
             fen_before = board.fen()
 
@@ -382,6 +394,14 @@ class HeadlessTrainer:
                 self.lookahead.record_game(board.move_stack, self.search)
             if self.memory is not None:
                 self.memory.record_game(board.move_stack, ai_color, self.search)
+            if self.weights is not None and self.tune_weights:
+                from evaluation_weights import episode_score
+                from sequence_patterns import material
+                replay, balances = chess.Board(), []
+                for m in board.move_stack:
+                    replay.push(m)
+                    balances.append(material(replay, ai_color))
+                self.weights.record(self.search.weights, episode_score(result, balances))
 
         # Store result details
         self.game_results.append({
@@ -530,6 +550,8 @@ class HeadlessTrainer:
             self.lookahead.close()
         if self.memory is not None:
             self.memory.close()
+        if self.weights is not None:
+            self.weights.close()
         if self.engine is not None:
             self.engine.quit()
         if self.judge is not None:
