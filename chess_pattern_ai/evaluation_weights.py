@@ -34,7 +34,25 @@ the 0.5 between results).
 The distribution is kept in the training database (table evaluation_weights).
 For playing without learning, mean() gives the distribution's mean.
 
-Results (evaluate_weights): see the end of this docstring once measured.
+Results (evaluate_lookahead, arms weights and weights_depth; against
+Stockfish skill 0, each agent move judged at depth 12): learned in 160 games
+(20 generations) from the database of the episodic_memory results; the mean
+weights then: mobility 2.5, king_danger -2.7, king_shield -1.2, loose -2.5,
+pawn_weakness -4.9, passed 1.5, centre 2.3, undeveloped 0.8 (spreads 0.2 to
+1.1). Wins while learning, per 40 games: 6, 7, 6, 5. Then 100 games per arm
+from the database as learning left it, the four arms at once:
+- plain:         15 won, 85 lost; blunders 2.8% (127 of 4,467 moves); mean
+                 centipawn loss 61.5; depth reached 2.89; 0.24 s per move
+- weights:       17 won, 83 lost; 2.9% (134 of 4,676); 58.2; depth 2.75;
+                 0.29 s per move
+- plain_depth:   14 won, 86 lost; 3.6% (151 of 4,207); 71.2; 0.30 s per move
+- weights_depth: 23 won, 77 lost; 2.6% (123 of 4,814); 61.7; 0.42 s per move
+At 0.5 s per move the weights changed nothing measurable. With the 3-ply
+search always finished they won 23 against 14 (a difference of that size
+arises by chance about one time in ten at 100 games each) and blundered
+less, but the earlier plain_depth run (episodic_memory) blundered 2.5% with
+14 wins, so this plain_depth run may have been a poor one; plain runs at 0.5
+s have won between 10 and 18 of 100. Hence use_weights is off by default.
 """
 
 import json
