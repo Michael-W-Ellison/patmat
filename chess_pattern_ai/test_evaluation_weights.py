@@ -2,6 +2,7 @@
 """Tests for evaluation_weights (weighted position features, tuned by the cross-entropy method)"""
 
 import os
+import random
 import tempfile
 import unittest
 
@@ -33,6 +34,52 @@ class TestFeatures(unittest.TestCase):
         white = W.features(b)
         b.turn = chess.BLACK
         self.assertEqual([round(-x, 9) for x in white], [round(x, 9) for x in W.features(b)])
+
+
+def reference(board):
+    """The features worked out square by square (the first, slower version), for comparison"""
+    def side(color):
+        other, own = not color, board.occupied_co[color]
+        pieces = own & (board.knights | board.bishops | board.rooks | board.queens)
+        mobility = sum(chess.popcount(board.attacks_mask(sq) & ~own) for sq in chess.scan_forward(pieces))
+        loose = sum(1 for sq in chess.scan_forward(pieces) if not board.attackers_mask(color, sq))
+        king = board.king(color)
+        danger = sum(1 for sq in chess.scan_forward(chess.BB_KING_ATTACKS[king]) if board.attackers_mask(other, sq))
+        shield = 0
+        front = king + (8 if color == chess.WHITE else -8)
+        if 0 <= front < 64:
+            for df in (-1, 0, 1):
+                if 0 <= chess.square_file(king) + df < 8 and board.piece_at(front + df) == chess.Piece(chess.PAWN, color):
+                    shield += 1
+        pawns, theirs = board.pawns & own, board.pawns & board.occupied_co[other]
+        files = [chess.popcount(pawns & chess.BB_FILES[f]) for f in range(8)]
+        weak = sum(n - 1 for n in files if n > 1) + sum(
+            n for f, n in enumerate(files) if n and not (f > 0 and files[f - 1]) and not (f < 7 and files[f + 1]))
+        passed = 0
+        for sq in chess.scan_forward(pawns):
+            f, r = chess.square_file(sq), chess.square_rank(sq)
+            ahead = range(r + 1, 8) if color == chess.WHITE else range(0, r)
+            if not any(theirs & chess.BB_SQUARES[chess.square(ff, rr)] for ff in (f - 1, f, f + 1) if 0 <= ff < 8
+                       for rr in ahead):
+                passed += r if color == chess.WHITE else 7 - r
+        centre = sum(1 for sq in W.CENTRE if board.attackers_mask(color, sq)) + chess.popcount(own & int(W.CENTRE))
+        undeveloped = chess.popcount((board.knights | board.bishops) & own & int(W.HOME[color]))
+        return [mobility / 5.0, danger, shield, loose, weak, passed / 3.0, centre, undeveloped]
+    return [a - b for a, b in zip(side(board.turn), side(not board.turn))]
+
+
+class TestFastFeatures(unittest.TestCase):
+    def test_the_same_as_square_by_square(self):
+        rng = random.Random(1)
+        for _ in range(150):
+            b = chess.Board()
+            for _ in range(rng.randint(0, 120)):
+                if b.is_game_over():
+                    break
+                b.push(rng.choice(list(b.legal_moves)))
+            for again in range(2):          # the second time from the cache
+                for x, y in zip(W.features(b), reference(b)):
+                    self.assertAlmostEqual(x, y, msg=b.fen())
 
 
 class TestTuner(unittest.TestCase):

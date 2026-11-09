@@ -85,57 +85,107 @@ HOME = {chess.WHITE: chess.SquareSet([chess.B1, chess.C1, chess.F1, chess.G1]),
         chess.BLACK: chess.SquareSet([chess.B8, chess.C8, chess.F8, chess.G8])}
 
 
-def _side(board: chess.Board, color: chess.Color) -> List[float]:
-    """The features of one side (before the difference)"""
-    other = not color
-    own = board.occupied_co[color]
-    pieces = own & (board.knights | board.bishops | board.rooks | board.queens)
-    mobility = 0
-    loose = 0
-    for sq in chess.scan_forward(pieces):
-        mobility += chess.popcount(board.attacks_mask(sq) & ~own)
-        if not board.attackers_mask(color, sq):
-            loose += 1
-    king = board.king(color)
-    danger = shield = 0
-    if king is not None:
-        for sq in chess.scan_forward(chess.BB_KING_ATTACKS[king]):
-            if board.attackers_mask(other, sq):
-                danger += 1
-        step = 8 if color == chess.WHITE else -8
-        front = king + step
-        if 0 <= front < 64:
-            f = chess.square_file(king)
-            for df in (-1, 0, 1):
-                if 0 <= f + df < 8:
-                    sq = front + df
-                    if board.piece_type_at(sq) == chess.PAWN and board.color_at(sq) == color:
-                        shield += 1
-    pawns = board.pawns & own
-    their_pawns = board.pawns & board.occupied_co[other]
+NOT_A = ~chess.BB_FILE_A & chess.BB_ALL
+NOT_H = ~chess.BB_FILE_H & chess.BB_ALL
+CENTRE_BB = int(CENTRE)
+CACHE_SIZE = 200_000    # positions whose features are kept (by transposition key); the search meets many again
+_cache: dict = {}
+_pawn_cache: dict = {}  # (white pawns, black pawns) -> (white's weak, passed; black's weak, passed)
+
+
+def _pawn_attacks(pawns: int, color: chess.Color) -> int:
+    if color == chess.WHITE:
+        return (((pawns & NOT_A) << 7) | ((pawns & NOT_H) << 9)) & chess.BB_ALL
+    return ((pawns & NOT_A) >> 9) | ((pawns & NOT_H) >> 7)
+
+
+def _south_fill(bb: int) -> int:
+    bb |= bb >> 8
+    bb |= bb >> 16
+    return bb | (bb >> 32)
+
+
+def _north_fill(bb: int) -> int:
+    bb |= (bb << 8) & chess.BB_ALL
+    bb |= (bb << 16) & chess.BB_ALL
+    return bb | ((bb << 32) & chess.BB_ALL)
+
+
+def _pawn_side(pawns: int, theirs: int, color: chess.Color):
+    """(doubled and isolated pawns, passed pawns counted by advance) of one side's pawns"""
     files = [chess.popcount(pawns & chess.BB_FILES[f]) for f in range(8)]
     weak = sum(n - 1 for n in files if n > 1)
     weak += sum(n for f, n in enumerate(files)
                 if n and not (f > 0 and files[f - 1]) and not (f < 7 and files[f + 1]))
+    # the squares from which a pawn of `color` would have an enemy pawn ahead of it on its own or a neighbouring
+    # file: behind (from color's side) the enemy pawns and their neighbouring files
+    spread = theirs | ((theirs & NOT_A) >> 1) | (((theirs & NOT_H) << 1) & chess.BB_ALL)
+    blocked = _south_fill(spread >> 8) if color == chess.WHITE else _north_fill((spread << 8) & chess.BB_ALL)
     passed = 0
-    for sq in chess.scan_forward(pawns):
-        f, r = chess.square_file(sq), chess.square_rank(sq)
-        ahead = range(r + 1, 8) if color == chess.WHITE else range(0, r)
-        block = 0
-        for ff in (f - 1, f, f + 1):
-            if 0 <= ff < 8:
-                for rr in ahead:
-                    block |= chess.BB_SQUARES[chess.square(ff, rr)]
-        if not their_pawns & block:
-            passed += (r if color == chess.WHITE else 7 - r)
-    centre = sum(1 for sq in CENTRE if board.attackers_mask(color, sq)) + chess.popcount(own & int(CENTRE))
+    for sq in chess.scan_forward(pawns & ~blocked):
+        r = sq >> 3
+        passed += r if color == chess.WHITE else 7 - r
+    return weak, passed
+
+
+def _attacks(board: chess.Board, color: chess.Color):
+    """(every square color attacks, its knights', bishops', rooks' and queens' moves to squares not its own)"""
+    own = board.occupied_co[color]
+    seen = _pawn_attacks(board.pawns & own, color)
+    king = board.king(color)
+    if king is not None:
+        seen |= chess.BB_KING_ATTACKS[king]
+    mobility = 0
+    for sq in chess.scan_forward(own & (board.knights | board.bishops | board.rooks | board.queens)):
+        a = board.attacks_mask(sq)
+        seen |= a
+        mobility += chess.popcount(a & ~own)
+    return seen, mobility
+
+
+def _side(board: chess.Board, color: chess.Color, mine, theirs, pawn_part) -> List[float]:
+    """The features of one side (before the difference); mine, theirs: _attacks of the two sides"""
+    own = board.occupied_co[color]
+    seen, mobility = mine
+    loose = chess.popcount(own & (board.knights | board.bishops | board.rooks | board.queens) & ~seen)
+    king = board.king(color)
+    danger = shield = 0
+    if king is not None:
+        near = chess.BB_KING_ATTACKS[king]
+        danger = chess.popcount(near & theirs[0])
+        rank = (king >> 3) + (1 if color == chess.WHITE else -1)
+        if 0 <= rank < 8:
+            shield = chess.popcount(near & chess.BB_RANKS[rank] & board.pawns & own)
+    weak, passed = pawn_part
+    centre = chess.popcount(seen & CENTRE_BB) + chess.popcount(own & CENTRE_BB)
     undeveloped = chess.popcount((board.knights | board.bishops) & own & int(HOME[color]))
     return [mobility / 5.0, danger, shield, loose, weak, passed / 3.0, centre, undeveloped]
 
 
+def _both(board: chess.Board):
+    """(white's features, black's features), kept by the position's transposition key"""
+    key = board._transposition_key()
+    hit = _cache.get(key)
+    if hit is not None:
+        return hit
+    wp, bp = board.pawns & board.occupied_co[chess.WHITE], board.pawns & board.occupied_co[chess.BLACK]
+    pawns = _pawn_cache.get((wp, bp))
+    if pawns is None:
+        if len(_pawn_cache) > CACHE_SIZE:
+            _pawn_cache.clear()
+        pawns = _pawn_cache[(wp, bp)] = (_pawn_side(wp, bp, chess.WHITE), _pawn_side(bp, wp, chess.BLACK))
+    w, b = _attacks(board, chess.WHITE), _attacks(board, chess.BLACK)
+    hit = (_side(board, chess.WHITE, w, b, pawns[0]), _side(board, chess.BLACK, b, w, pawns[1]))
+    if len(_cache) > CACHE_SIZE:
+        _cache.clear()
+    _cache[key] = hit
+    return hit
+
+
 def features(board: chess.Board) -> List[float]:
     """The features (FEATURES) of a position: the side to move's minus the other side's"""
-    mine, theirs = _side(board, board.turn), _side(board, not board.turn)
+    white, black = _both(board)
+    mine, theirs = (white, black) if board.turn == chess.WHITE else (black, white)
     return [a - b for a, b in zip(mine, theirs)]
 
 
