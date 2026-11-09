@@ -52,7 +52,20 @@ search always finished they won 23 against 14 (a difference of that size
 arises by chance about one time in ten at 100 games each) and blundered
 less, but the earlier plain_depth run (episodic_memory) blundered 2.5% with
 14 wins, so this plain_depth run may have been a poor one; plain runs at 0.5
-s have won between 10 and 18 of 100. Hence use_weights is off by default.
+s have won between 10 and 18 of 100.
+Confirmation, 200 more games per equal-depth arm from the same database (two
+processes of 100 per arm, other seeds):
+- plain_depth:   16 and 12 won (2 drawn); 2.8% and 3.7% blunders
+- weights_depth: 26 and 13 won; 2.9% and 3.2% blunders
+Over all 300 games per arm:
+- plain_depth:   42 won, 256 lost, 2 drawn; 3.4% (422 of 12,546); 70.3
+- weights_depth: 62 won, 238 lost; 2.9% (411 of 14,396); 62.1
+The difference in wins would arise by chance about 3 times in 100 (a test of
+two proportions); the blunders, counted per move, about 2 in 100, though
+moves of one game are not independent, so that overstates the certainty.
+So with the search's depth equal, the learned weights help; at 0.5 s per
+move they do not, since working out the features costs depth (0.43 s per
+move against 0.30 at equal depth). Hence use_weights is off by default.
 """
 
 import json
