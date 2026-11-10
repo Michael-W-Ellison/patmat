@@ -83,8 +83,9 @@ positions the time limit costs the weights nothing; the equal-depth plain
 arm played worse than the plain arm at 0.5 s; judged on the same
 positions, the weights' moves lose about 4 centipawns less and blunder 0.4
 times less per 100 moves, at 0.5 s as at full depth). use_weights is on by
-default (headless_trainer); a database without learned weights starts from
-mean 0 and spread START_STD, and learns them as it trains.
+default (headless_trainer). A database without weights of its own starts
+from those learned weights (START_MEAN, START_STD: the mean and spread after
+the 160 learning games above) and goes on tuning them as it trains.
 """
 
 import json
@@ -95,7 +96,10 @@ from typing import List, Optional
 import chess
 
 CE_POPULATION, CE_ELITE, CE_MIN_STD, CE_SMOOTH = 8, 3, 0.2, 0.7     # as the Tetris agent's (object_agent)
-START_STD = 3.0         # the starting spread of each weight (material units per unit of the feature)
+# a new database's starting distribution (material units per unit of each feature, in FEATURES order): the mean
+# and spread learned in the 160 games of the results above (before them: mean 0, spread 3 for every weight)
+START_MEAN = [2.48, -2.68, -1.15, -2.48, -4.93, 1.55, 2.28, 0.79]
+START_STD = [0.23, 0.24, 0.36, 0.20, 1.08, 0.30, 0.20, 0.20]
 
 FEATURES = ('mobility', 'king_danger', 'king_shield', 'loose', 'pawn_weakness', 'passed', 'centre', 'undeveloped')
 CENTRE = chess.SquareSet([chess.D4, chess.E4, chess.D5, chess.E5])
@@ -228,8 +232,8 @@ class WeightTuner:
         row = self.conn.execute('SELECT state FROM evaluation_weights WHERE id = 1').fetchone()
         state = json.loads(row[0]) if row else {}
         n = len(FEATURES)
-        self.mu: List[float] = state.get('mean', [0.0] * n)
-        self.std: List[float] = state.get('std', [START_STD] * n)
+        self.mu: List[float] = state.get('mean', list(START_MEAN))
+        self.std: List[float] = state.get('std', list(START_STD))
         self.done: List = state.get('done', [])         # (score, weights) of this generation's episodes
         self.generations: int = state.get('generations', 0)
         self.episodes: int = state.get('episodes', 0)

@@ -83,6 +83,13 @@ class TestFastFeatures(unittest.TestCase):
 
 
 class TestTuner(unittest.TestCase):
+    def test_a_new_database_starts_from_the_learned_weights(self):
+        t = W.WeightTuner(os.path.join(tempfile.mkdtemp(), 'w.db'))
+        self.assertEqual(t.mean(), W.START_MEAN)
+        self.assertEqual(t.std, W.START_STD)
+        self.assertEqual(len(W.START_MEAN), len(W.FEATURES))
+        self.assertEqual(len(W.START_STD), len(W.FEATURES))
+
     def test_the_mean_moves_toward_the_best_games(self):
         t = W.WeightTuner(os.path.join(tempfile.mkdtemp(), 'w.db'), seed=0)
         n = len(W.FEATURES)
@@ -90,7 +97,8 @@ class TestTuner(unittest.TestCase):
             # the games with the largest first weight score best
             t.record([float(i)] + [0.0] * (n - 1), score=float(i))
         best = list(range(W.CE_POPULATION))[-W.CE_ELITE:]
-        self.assertAlmostEqual(t.mean()[0], W.CE_SMOOTH * sum(best) / W.CE_ELITE)
+        self.assertAlmostEqual(t.mean()[0], W.CE_SMOOTH * sum(best) / W.CE_ELITE
+                               + (1 - W.CE_SMOOTH) * W.START_MEAN[0])
         self.assertEqual(t.generations, 1)
         self.assertEqual(t.done, [])
         self.assertGreaterEqual(min(t.std), W.CE_MIN_STD)
