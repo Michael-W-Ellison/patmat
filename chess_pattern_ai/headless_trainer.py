@@ -56,7 +56,7 @@ class HeadlessTrainer:
     use_memory = False          # episodic memory of punished moves, found in hindsight after each game, and
                                 # semantic memory of what kinds of reply punish (episodic_memory); the search
                                 # reads remembered punishments further, and the kinds that punish most
-    use_weights = False         # the search's evaluation adds weighted position features, the weights learned
+    use_weights = True          # the search's evaluation adds weighted position features, the weights learned
                                 # from game results by the cross-entropy method (evaluation_weights), as the
                                 # Tetris agent learns its weights
     tune_weights = True         # with use_weights: each game draws its weights and records its score; False:

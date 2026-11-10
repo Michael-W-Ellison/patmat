@@ -80,8 +80,11 @@ and the blunder rates are the same; only the mean centipawn loss is lower,
 and the games last longer (51 of the agent's moves against 45). Why the
 gap is smaller than at equal depth: weights_depth_analysis (on the same
 positions the time limit costs the weights nothing; the equal-depth plain
-arm played worse than the plain arm at 0.5 s). Hence use_weights is off by
-default.
+arm played worse than the plain arm at 0.5 s; judged on the same
+positions, the weights' moves lose about 4 centipawns less and blunder 0.4
+times less per 100 moves, at 0.5 s as at full depth). use_weights is on by
+default (headless_trainer); a database without learned weights starts from
+mean 0 and spread START_STD, and learns them as it trains.
 """
 
 import json
