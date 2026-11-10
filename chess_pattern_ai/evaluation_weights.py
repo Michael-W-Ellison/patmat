@@ -77,8 +77,11 @@ same database and weights:
 The weights no longer cost depth, but at 0.5 s their gain is not shown: a
 difference of 44 against 34 wins arises by chance about one time in four,
 and the blunder rates are the same; only the mean centipawn loss is lower,
-and the games last longer (51 of the agent's moves against 45). Hence
-use_weights is off by default.
+and the games last longer (51 of the agent's moves against 45). Why the
+gap is smaller than at equal depth: weights_depth_analysis (on the same
+positions the time limit costs the weights nothing; the equal-depth plain
+arm played worse than the plain arm at 0.5 s). Hence use_weights is off by
+default.
 """
 
 import json

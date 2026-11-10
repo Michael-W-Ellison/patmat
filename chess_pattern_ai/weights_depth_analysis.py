@@ -16,6 +16,26 @@ evaluate_lookahead). One line per position in <work dir>/<name>.positions.jsonl 
 <work dir>/learned.db, which must hold the learned weights; it is not changed).
 report: per variant, the mean centipawn loss and blunders (blunder_analysis.BLUNDER or more), over all
 positions and split by whether the 3-ply search took longer than SLOW seconds.
+
+Results (100 games, four processes at once; 5,472 positions; mean centipawn loss, blunders):
+- plain, 2 plies:   64.8, 3.7%        plain, 3 plies:   58.9, 3.0%
+- weights, 2 plies: 60.2, 3.5%        weights, 3 plies: 55.1, 2.6%
+The weights' moves were better than the plain evaluation's (by the judge) in 1,024 positions and worse in 797
+at 2 plies, 968 and 837 at 3 plies. With a time limit applied to these positions (the 3-ply move where that
+search finished in time, else the 2-ply move):
+- 0.5 s: plain 60.3, 3.18% (4.5% of positions cut to 2 plies); weights 56.6, 2.78% (4.2% cut)
+- 0.2 s: plain 62.8, 3.55% (32% cut); weights 57.9, 3.09% (29% cut)
+So on the same positions the time limit does not take the weights' advantage away: about 4 centipawns and 0.4
+blunders per 100 moves, the same at 0.5 s as with the search finished, and at 2 plies as at 3. (The searches
+here are timed after other searches of the same position, whose cached features and patterns make them
+faster than in a game: 4% of positions took longer than 0.5 s here, against 9 to 13% of moves cut to 2 plies
+in the 0.5 s games. The 0.2 s limit, which cuts more than that, still leaves the gap.)
+The difference between the game comparisons lies elsewhere: the plain arm with time to finish its search
+blundered more than the plain arm at 0.5 s (3.4% of 12,546 moves against 2.7% of 13,521; mean centipawn loss
+70.3 against 64.3), though on the same positions finishing the search is better (3.0% against 3.18%). So
+the larger gap at equal depth came from a weaker plain baseline there, in different games, not from the
+weights needing the full depth; the weights arms themselves won 62 of 300 at equal depth and 44 of 300 at
+0.5 s, a difference that arises by chance about one time in twenty.
 """
 
 import argparse
