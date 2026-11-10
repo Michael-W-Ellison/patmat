@@ -64,8 +64,21 @@ The difference in wins would arise by chance about 3 times in 100 (a test of
 two proportions); the blunders, counted per move, about 2 in 100, though
 moves of one game are not independent, so that overstates the certainty.
 So with the search's depth equal, the learned weights help; at 0.5 s per
-move they do not, since working out the features costs depth (0.43 s per
-move against 0.30 at equal depth). Hence use_weights is off by default.
+move they did not, working out the features cost depth (0.43 s per move
+against 0.30 at equal depth).
+The features were then made faster (from attack maps and pawn bitboards,
+kept by position: about 3 times faster, the same values), and the 0.5 s
+arms played again, 300 games per arm (two processes of 150 each), from the
+same database and weights:
+- plain:   34 won, 265 lost, 1 drawn; 2.7% (371 of 13,521); 64.3; depth
+           reached 2.90; 0.23 s per move
+- weights: 44 won, 255 lost, 1 drawn; 2.9% (440 of 15,213); 60.3; depth
+           reached 2.87; 0.24 s per move
+The weights no longer cost depth, but at 0.5 s their gain is not shown: a
+difference of 44 against 34 wins arises by chance about one time in four,
+and the blunder rates are the same; only the mean centipawn loss is lower,
+and the games last longer (51 of the agent's moves against 45). Hence
+use_weights is off by default.
 """
 
 import json
