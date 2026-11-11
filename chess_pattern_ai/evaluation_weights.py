@@ -225,15 +225,18 @@ def episode_score(result: str, balances: List[float]) -> float:
 class WeightTuner:
     """A normal distribution over the weights, moved toward the best-scoring games' weights (cross-entropy)"""
 
-    def __init__(self, db_path: str, seed: Optional[int] = None):
+    def __init__(self, db_path: str, seed: Optional[int] = None, table: str = 'evaluation_weights',
+                 start_mean: Optional[List[float]] = None, start_std: Optional[List[float]] = None):
+        """table: where the distribution is kept (another table per game: grid_weights); start_mean, start_std:
+        a new database's distribution (default: the chess weights learned, START_MEAN and START_STD)"""
+        self.table = table
         self.conn = sqlite3.connect(db_path)
-        self.conn.execute('CREATE TABLE IF NOT EXISTS evaluation_weights (id INTEGER PRIMARY KEY, state TEXT)')
+        self.conn.execute(f'CREATE TABLE IF NOT EXISTS {table} (id INTEGER PRIMARY KEY, state TEXT)')
         self.conn.commit()
-        row = self.conn.execute('SELECT state FROM evaluation_weights WHERE id = 1').fetchone()
+        row = self.conn.execute(f'SELECT state FROM {table} WHERE id = 1').fetchone()
         state = json.loads(row[0]) if row else {}
-        n = len(FEATURES)
-        self.mu: List[float] = state.get('mean', list(START_MEAN))
-        self.std: List[float] = state.get('std', list(START_STD))
+        self.mu: List[float] = state.get('mean', list(START_MEAN if start_mean is None else start_mean))
+        self.std: List[float] = state.get('std', list(START_STD if start_std is None else start_std))
         self.done: List = state.get('done', [])         # (score, weights) of this generation's episodes
         self.generations: int = state.get('generations', 0)
         self.episodes: int = state.get('episodes', 0)
@@ -265,7 +268,7 @@ class WeightTuner:
     def save(self) -> None:
         state = {'mean': self.mu, 'std': self.std, 'done': self.done, 'generations': self.generations,
                  'episodes': self.episodes}
-        self.conn.execute('INSERT OR REPLACE INTO evaluation_weights VALUES (1, ?)', (json.dumps(state),))
+        self.conn.execute(f'INSERT OR REPLACE INTO {self.table} VALUES (1, ?)', (json.dumps(state),))
         self.conn.commit()
 
     def close(self) -> None:

@@ -23,6 +23,7 @@ from checkers.checkers_game import CheckersGame
 from checkers.checkers_scorer import CheckersScorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
 from board_screens import agent_move
+from grid_weights import GridWeights
 from general_move_patterns import (GeneralPatternLearner, analyze_candidates,
                                    universal_db_path)
 from checkers.checkers_adapter import CheckersAdapter
@@ -36,6 +37,10 @@ class CheckersHeadlessTrainer:
     Same philosophy as chess trainer
     """
 
+    use_weights = False         # grid_weights: the agent's move scores add learned weights of game-independent
+                                # position features, tuned from the game's results (cross-entropy)
+    tune_weights = True         # with use_weights: draw and tune the weights per game; False: their mean
+
     def __init__(self, db_path='checkers_training.db', screen=None, screen_side=False):
         self.db_path = db_path
         self.prioritizer = LearnableMovePrioritizer(db_path)
@@ -43,6 +48,8 @@ class CheckersHeadlessTrainer:
         # Game-independent patterns, shared with the other games' trainers
         self.general = GeneralPatternLearner(universal_db_path(db_path), 'checkers')
         self.adapter = CheckersAdapter()
+        self.weights = GridWeights(db_path, 'checkers', self.adapter, tune=self.tune_weights) \
+            if self.use_weights else None
         # screen: the agent knows the game only from screens, drawn and read by board_screens (True, or a
         # board_screens.ScreenView): it follows each move from the screens and decides from its own position;
         # screen_side: the screens show the board from the agent's side
@@ -127,7 +134,9 @@ class CheckersHeadlessTrainer:
         explore = random.random() < 0.1  # 10% exploration
         if explore:
             explore_move = random.choice(legal_moves)
-        scored = [(move, score + self.general.value(f), f) for move, score, f in move_scores]
+        scored = [(move, score + self.general.value(f)
+                   + (self.weights.value(game, move, ai_color) if self.weights is not None else 0.0), f)
+                  for move, score, f in move_scores]
 
         # Select move based on priorities (with exploration)
         if explore:
@@ -232,6 +241,8 @@ class CheckersHeadlessTrainer:
         # Record game for learning (directly update statistics)
         self.prioritizer.record_game_patterns(game_moves, result, score)
         self.general.record_game(general_features, result, 'checkers')
+        if self.weights is not None:
+            self.weights.end_game(result, score)
 
         return result, score, rounds
 

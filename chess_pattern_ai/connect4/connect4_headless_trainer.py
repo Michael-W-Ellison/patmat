@@ -23,6 +23,7 @@ from connect4.connect4_game import Connect4Game
 from connect4.connect4_scorer import Connect4Scorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
 from board_screens import agent_move
+from grid_weights import GridWeights
 from general_move_patterns import (GeneralPatternLearner, analyze_candidates,
                                    decisive_value, winning_moves,
                                    universal_db_path, MAX_CANDIDATES)
@@ -37,6 +38,10 @@ class Connect4HeadlessTrainer:
     Same philosophy as chess trainer
     """
 
+    use_weights = False         # grid_weights: the agent's move scores add learned weights of game-independent
+                                # position features, tuned from the game's results (cross-entropy)
+    tune_weights = True         # with use_weights: draw and tune the weights per game; False: their mean
+
     def __init__(self, db_path='connect4_training.db', screen=None, screen_side=False):
         self.db_path = db_path
         self.prioritizer = LearnableMovePrioritizer(db_path)
@@ -44,6 +49,8 @@ class Connect4HeadlessTrainer:
         # Game-independent patterns, shared with the other games' trainers
         self.general = GeneralPatternLearner(universal_db_path(db_path), 'connect4')
         self.adapter = Connect4Adapter()
+        self.weights = GridWeights(db_path, 'connect4', self.adapter, tune=self.tune_weights) \
+            if self.use_weights else None
         # screen: the agent knows the game only from screens, drawn and read by board_screens (True, or a
         # board_screens.ScreenView): it follows each move from the screens and decides from its own position;
         # screen_side: the screens show the board from the agent's side
@@ -167,7 +174,8 @@ class Connect4HeadlessTrainer:
                                       [move for move, _ in candidates])
         # A win now, or a loss the opponent can force at once, decides first;
         # otherwise the existing score plus the general-pattern value
-        scored = [(move, score + decisive_value(a['net']) + self.general.value(a['features']),
+        scored = [(move, score + decisive_value(a['net']) + self.general.value(a['features'])
+                   + (self.weights.value(game, move, ai_color) if self.weights is not None else 0.0),
                    a['features'])
                   for (move, score), a in zip(candidates, analysis)]
 
@@ -268,6 +276,8 @@ class Connect4HeadlessTrainer:
         # Record game for learning (directly update statistics)
         self.prioritizer.record_game_patterns(game_moves, result, score)
         self.general.record_game(general_features, result, 'connect4')
+        if self.weights is not None:
+            self.weights.end_game(result, score)
 
         return result, score, rounds
 
