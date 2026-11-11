@@ -34,7 +34,33 @@ games of the same result, as in chess the material balance does).
 Weights start at 0 with spread START_STD (priority points per unit of a
 feature); after each game the next game's weights are drawn.
 
-Results: evaluate_grid_weights.
+Results: evaluate_grid_weights. Each game: 160 games of learning (20
+generations of the cross-entropy method) against the trainer's usual random
+opponent, then 300 games without weights ('plain') and 300 with the learned
+mean ('weights'), each arm from a copy of the learned databases. Win rates
+(p: two-sided test of two proportions):
+
+    game          plain    weights    p
+    arimaa        97.7%    57.0%      0.000   worse
+    breakthrough  96.3%    99.0%      0.031   better
+    checkers      97.7%    94.3%      0.037   worse (13 draws against 2)
+    connect4      96.0%    93.7%      0.197
+    dots_boxes   100.0%   100.0%      1.000
+    go            97.0%    93.3%      0.036   worse
+    gomoku       100.0%   100.0%      1.000
+    hex           87.3%    66.7%      0.000   worse
+    loa           98.7%    99.3%      0.412
+    morris        96.3%    93.0%      0.069
+    othello       73.3%    72.7%      0.854
+    pentago       91.7%    85.7%      0.020   worse
+
+Better in one game (breakthrough), worse in five, no significant
+difference in six. Against a random opponent the plain trainers already win
+87-100% of games in all but othello, so there is little room to gain; the
+learned weights, from 20 generations and a start spread of 3 priority
+points, are large enough to override the learned priorities where they are
+wrong. The weights also cost time: 1.1x to 2.7x the seconds per game.
+use_weights is off in the trainers.
 """
 
 from typing import Dict, List, Optional, Tuple
