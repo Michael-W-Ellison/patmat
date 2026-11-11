@@ -56,10 +56,10 @@ mean ('weights'), each arm from a copy of the learned databases. Win rates
 
 Better in one game (breakthrough), worse in five, no significant
 difference in six. Against a random opponent the plain trainers already win
-87-100% of games in all but othello, so there is little room to gain; the
-learned weights, from 20 generations and a start spread of 3 priority
-points, are large enough to override the learned priorities where they are
-wrong. The weights also cost time: 1.1x to 2.7x the seconds per game.
+87-100% of games in all but othello, so there is little room to gain. Why the
+weights hurt in five games was not measured; one untested possibility is
+that weights from only 20 generations, with a start spread of 3 priority
+points, are large enough to outweigh better learned priorities. The weights also cost time: 1.1x to 2.7x the seconds per game.
 use_weights is off in the trainers.
 """
 
