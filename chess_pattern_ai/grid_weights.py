@@ -61,7 +61,7 @@ weights hurt in four games was not measured; one untested possibility is
 that weights from only 20 generations, with a start spread of 3 priority
 points, are large enough to outweigh better learned priorities. The
 weights also cost time: 1.1x to 2.7x the seconds per game.
-use_weights is off in the trainers.
+use_weights is on in the breakthrough trainer and off in the others.
 
 Hex was first measured with offset rows (HexBoard's neighbours then
 depended on row parity): plain 87.3%, weights 66.7%, p 0.000. The row
