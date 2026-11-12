@@ -48,19 +48,24 @@ mean ('weights'), each arm from a copy of the learned databases. Win rates
     dots_boxes   100.0%   100.0%      1.000
     go            97.0%    93.3%      0.036   worse
     gomoku       100.0%   100.0%      1.000
-    hex           87.3%    66.7%      0.000   worse
+    hex           75.0%    80.3%      0.117   (rhombus layout; see below)
     loa           98.7%    99.3%      0.412
     morris        96.3%    93.0%      0.069
     othello       73.3%    72.7%      0.854
     pentago       91.7%    85.7%      0.020   worse
 
-Better in one game (breakthrough), worse in five, no significant
-difference in six. Against a random opponent the plain trainers already win
-87-100% of games in all but othello, so there is little room to gain. Why the
-weights hurt in five games was not measured; one untested possibility is
+Better in one game (breakthrough), worse in four, no significant
+difference in seven. Against a random opponent the plain trainers already win
+75-100% of games in all but othello, so there is little room to gain. Why the
+weights hurt in four games was not measured; one untested possibility is
 that weights from only 20 generations, with a start spread of 3 priority
-points, are large enough to outweigh better learned priorities. The weights also cost time: 1.1x to 2.7x the seconds per game.
+points, are large enough to outweigh better learned priorities. The
+weights also cost time: 1.1x to 2.7x the seconds per game.
 use_weights is off in the trainers.
+
+Hex was first measured with offset rows (HexBoard's neighbours then
+depended on row parity): plain 87.3%, weights 66.7%, p 0.000. The row
+above is from a new run after the change to the standard rhombus.
 """
 
 from typing import Dict, List, Optional, Tuple
