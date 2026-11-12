@@ -32,7 +32,10 @@ method is its result (1 won, 0.5 drawn, 0 lost) plus less than 0.2 for its
 score margin (0.2 * m / (|m| + 1): a larger margin ranks a game higher among
 games of the same result, as in chess the material balance does).
 Weights start at 0 with spread START_STD (priority points per unit of a
-feature); after each game the next game's weights are drawn.
+feature), except in a game listed in LEARNED, whose new databases start
+from the mean and spread learned there (as chess's new databases start
+from its learned weights); after each game the next game's weights are
+drawn.
 
 Results: evaluate_grid_weights. Each game: 160 games of learning (20
 generations of the cross-entropy method) against the trainer's usual random
@@ -75,6 +78,11 @@ from grid_vocabulary import Grid, adjacent_cells, components, lines
 
 FEATURES = ('pieces', 'largest_group', 'groups', 'longest_line', 'edge', 'liberties', 'centre')
 START_STD = 3.0
+# A new database's start (mean, spread) in these games: the weights learned by evaluate_grid_weights
+# (160 games, 20 generations, against the trainer's usual opponent)
+LEARNED = {
+    'breakthrough': ([4.26, -1.29, 1.05, 5.38, 1.03, 1.37, 1.12], [0.33, 0.20, 0.20, 0.20, 0.20, 0.23, 0.36]),
+}
 OWN, OPP, EMPTY, OTHER = 1, 2, 0, 3
 
 
@@ -138,8 +146,9 @@ class GridWeights:
     def __init__(self, db_path: str, game: str, adapter, tune: bool = True, seed: Optional[int] = None):
         self.adapter = adapter
         self.tune = tune
+        mean, std = LEARNED.get(game, ([0.0] * len(FEATURES), [START_STD] * len(FEATURES)))
         self.tuner = WeightTuner(db_path, seed=seed, table=f'grid_weights_{game}',
-                                 start_mean=[0.0] * len(FEATURES), start_std=[START_STD] * len(FEATURES))
+                                 start_mean=list(mean), start_std=list(std))
         self.current = self._next()
 
     def _next(self) -> List[float]:

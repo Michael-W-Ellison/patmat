@@ -55,6 +55,17 @@ class TestWeights(unittest.TestCase):
         self.assertEqual(again.current, again.tuner.mean())        # not tuning: the learned mean
         self.assertNotEqual(again.current, [0.0] * len(G.FEATURES))
 
+    def test_a_new_breakthrough_database_starts_from_the_learned_weights(self):
+        from breakthrough.breakthrough_adapter import BreakthroughAdapter
+        w = G.GridWeights(os.path.join(tempfile.mkdtemp(), 't.db'), 'breakthrough', BreakthroughAdapter(), tune=False)
+        mean, std = G.LEARNED['breakthrough']
+        self.assertEqual(w.tuner.mean(), mean)
+        self.assertEqual(w.tuner.std, std)
+        self.assertEqual(w.current, mean)
+        self.assertEqual(len(mean), len(G.FEATURES))
+        self.assertEqual(len(std), len(G.FEATURES))
+        w.close()
+
     def test_game_score(self):
         self.assertGreater(G.game_score('loss', 50), G.game_score('loss', -50))
         self.assertGreater(G.game_score('draw', -1e9), G.game_score('loss', 1e9))
