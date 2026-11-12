@@ -23,8 +23,9 @@ or an ARC grid:
 Topologies:
 - 'square': 8 compass directions; connectivity uses 4 neighbours
   (N, S, E, W) unless diagonal=True
-- 'hex': offset rows where odd rows are shifted right (6 neighbours, as in
-  hex/hex_board.py); lines run along the three hex axes
+- 'hex': the Hex rhombus, each row shifted half a cell right of the row
+  above (6 neighbours, as in hex/hex_board.py); lines run along the three
+  hex axes
 - 'graph': explicit adjacency and explicit line sets for boards that are
   not grids of cells (e.g. Nine Men's Morris); cells are positions in a
   grid embedding, other cells marked invalid
@@ -45,11 +46,8 @@ SQUARE_STEPS = {
 SQUARE_ORTHOGONAL = ('N', 'S', 'E', 'W')
 SQUARE_AXES = (('W', 'E'), ('N', 'S'), ('SW', 'NE'), ('NW', 'SE'))
 
-# Odd rows shifted right: steps depend on row parity
-HEX_STEPS = {
-    0: {'E': (0, 1), 'W': (0, -1), 'NE': (-1, 0), 'NW': (-1, -1), 'SE': (1, 0), 'SW': (1, -1)},
-    1: {'E': (0, 1), 'W': (0, -1), 'NE': (-1, 1), 'NW': (-1, 0), 'SE': (1, 1), 'SW': (1, 0)},
-}
+# Each row shifted half a cell right of the row above (the Hex rhombus): the same steps everywhere
+HEX_STEPS = {'E': (0, 1), 'W': (0, -1), 'NE': (-1, 1), 'NW': (-1, 0), 'SE': (1, 0), 'SW': (1, -1)}
 HEX_AXES = (('W', 'E'), ('SW', 'NE'), ('NW', 'SE'))
 OPPOSITE = {'N': 'S', 'S': 'N', 'E': 'W', 'W': 'E', 'NE': 'SW', 'SW': 'NE', 'NW': 'SE', 'SE': 'NW'}
 
@@ -105,7 +103,7 @@ class Grid:
         if self.topology == 'square':
             dr, dc = SQUARE_STEPS[direction]
         elif self.topology == 'hex':
-            dr, dc = HEX_STEPS[r % 2][direction]
+            dr, dc = HEX_STEPS[direction]
         else:
             raise ValueError("graph topology has no directions")
         nxt = (r + dr, c + dc)
@@ -115,7 +113,7 @@ class Grid:
         if self.topology == 'graph':
             return [p for p in self.adjacency.get(pos, []) if self.inside(p)]
         if self.topology == 'hex':
-            names = HEX_STEPS[0].keys()
+            names = HEX_STEPS.keys()
         else:
             names = SQUARE_STEPS.keys() if diagonal else SQUARE_ORTHOGONAL
         return [p for p in (self.step(pos, d) for d in names) if p is not None]

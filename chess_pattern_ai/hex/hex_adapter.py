@@ -122,8 +122,8 @@ class HexAdapter:
 
     def to_grid(self, game) -> Grid:
         """
-        The board as a grid_vocabulary Grid (topology 'hex', odd rows shifted
-        right, the same neighbours as HexBoard.get_neighbors); cell (r, c) is
+        The board as a grid_vocabulary Grid (topology 'hex', each row shifted
+        half a cell right of the row above, the same neighbours as HexBoard.get_neighbors); cell (r, c) is
         board.board[r][c], row 0 = the board's row 0
 
         Values: 0 = empty, 1 = Color.RED stone, 2 = Color.BLUE stone.

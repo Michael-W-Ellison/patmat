@@ -17,7 +17,7 @@ words: each game's rules and starting position (the game's adapter: legal
 moves, the position after a move, the position as a grid of values,
 adapter.to_grid), and the shape of its board: how many rows and columns of
 places it has and how they are laid out (squares or points in rows and
-columns, or hexagons with every other row shifted by half a hexagon); a
+columns, or hexagons with each row shifted half a hexagon right of the row above); a
 board is drawn as a rectangle unlike the page around it, its places evenly
 spaced in it. What a place looks like with each value on it, it learns:
 
@@ -153,7 +153,7 @@ def centres(layout: str, rows: int, cols: int, top: float, left: float, height: 
     """
     (y, x of each place's centre (rows x cols each), a place's height, its width) on a board whose rectangle
     is at (top, left, height, width): rows and columns evenly spaced, half a spacing in from the board's edges;
-    hexagons (pointy-topped, touching) every other row (odd rows) shifted right by half a hexagon, the board
+    hexagons (pointy-topped, touching) each row shifted right by half a hexagon from the row above, the board
     reaching one hexagon's half-height above the top row's centres and below the bottom row's
     """
     r = np.arange(rows).reshape(-1, 1) * np.ones((1, cols))
@@ -161,16 +161,16 @@ def centres(layout: str, rows: int, cols: int, top: float, left: float, height: 
     if layout != 'hex':
         sy, sx = height / rows, width / cols
         return top + (r + 0.5) * sy, left + (c + 0.5) * sx, sy, sx
-    sx = width / (cols + 0.5)
+    sx = width / (cols + 0.5 * (rows - 1))
     rad = sx / math.sqrt(3)
     sy = (height - 2 * rad) / max(1, rows - 1)
-    return top + rad + r * sy, left + (c + 0.5 + 0.5 * (r % 2)) * sx, sy, sx
+    return top + rad + r * sy, left + (c + 0.5 + 0.5 * r) * sx, sy, sx
 
 
 def board_height(layout: str, rows: int, cols: int, width: float) -> float:
     if layout != 'hex':
         return width / cols * rows
-    sx = width / (cols + 0.5)
+    sx = width / (cols + 0.5 * (rows - 1))
     rad = sx / math.sqrt(3)
     return 2 * rad + (rows - 1) * 1.5 * rad
 
