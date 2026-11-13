@@ -41,7 +41,7 @@ class BreakthroughHeadlessTrainer:
 
     use_weights = True          # grid_weights: the agent's move scores add learned weights of game-independent
                                 # position features, tuned from the game's results (cross-entropy)
-    tune_weights = True         # with use_weights: draw and tune the weights per game; False: their mean
+    tune_weights = False        # with use_weights: draw and tune the weights per game; False: their mean
 
     def __init__(self, db_path='breakthrough_training.db', screen=None, screen_side=False):
         self.db_path = db_path
