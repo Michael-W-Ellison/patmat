@@ -71,6 +71,14 @@ everything else as they play), 1000 games each against the random
 opponent: plain 95.1% (951 won, mean margin +1336), weights 99.3% (993 won,
 +1481), p 1e-8; wins per 250 games plain 236, 242, 235, 238, weights 249,
 248, 247, 249; 0.09 against 0.22 s per game.
+The same against a stronger, fixed opponent (breakthrough_opponent.greedy:
+wins at once if it can, avoids moves that let the agent win at once,
+otherwise the best material and advancement; it beat random moves in 39 of
+40 games), 1000 games each from new databases: plain 24.5% (245 won, mean
+margin -712), weights 20.6% (206 won, -922), p 0.037; wins per 250 games
+plain 63, 78, 47, 57, weights 45, 65, 46, 50; 0.17 against 0.39 s per game.
+The weights were learned against random moves; against this opponent they
+did worse than none.
 
 Hex was first measured with offset rows (HexBoard's neighbours then
 depended on row parity): plain 87.3%, weights 66.7%, p 0.000. The row
