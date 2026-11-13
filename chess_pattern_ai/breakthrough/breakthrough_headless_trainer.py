@@ -42,6 +42,7 @@ class BreakthroughHeadlessTrainer:
     use_weights = True          # grid_weights: the agent's move scores add learned weights of game-independent
                                 # position features, tuned from the game's results (cross-entropy)
     tune_weights = False        # with use_weights: draw and tune the weights per game; False: their mean
+    opponent = None             # the opponent's move choice, (game, color) -> Move; None: random moves
 
     def __init__(self, db_path='breakthrough_training.db', screen=None, screen_side=False):
         self.db_path = db_path
@@ -229,9 +230,12 @@ class BreakthroughHeadlessTrainer:
                 if move is not None:
                     general_features.append(self.last_general_features)
             else:
-                # Opponent uses random moves (bootstrapping)
-                legal_moves = game.get_legal_moves(current_color)
-                move = random.choice(legal_moves) if legal_moves else None
+                if self.opponent is not None:
+                    move = self.opponent(game, current_color)
+                else:
+                    # Opponent uses random moves (bootstrapping)
+                    legal_moves = game.get_legal_moves(current_color)
+                    move = random.choice(legal_moves) if legal_moves else None
 
             if move is None:
                 break  # No legal moves

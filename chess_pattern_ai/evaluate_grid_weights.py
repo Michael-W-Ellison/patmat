@@ -4,7 +4,7 @@ Evaluate grid_weights: do learned weights of game-independent position features 
 trainers, as the evaluation weights did in chess?
 
     python3 evaluate_grid_weights.py learn <work dir> <game> <games>
-    python3 evaluate_grid_weights.py play <work dir> <game> <arm> <games> [--seed S]
+    python3 evaluate_grid_weights.py play <work dir> <game> <arm> <games> [--seed S] [--opponent NAME]
     python3 evaluate_grid_weights.py report <work dir> [game ...]
 
 learn: the game's trainer (against its usual opponent) plays games with use_weights on, drawing and tuning
@@ -15,6 +15,10 @@ mean, not tuned); both keep learning everything else as usual. Each game's resul
 appended to <work dir>/<game>/<arm>/games.jsonl as it ends; play carries on from that file if it exists (a
 run stopped part-way is not lost). report: per game, each arm's games, wins, draws, losses and mean margin;
 the difference in win rate with a test of two proportions; the learned weights.
+
+--opponent: the trainer's opponent in play (default: its usual one, random
+moves); OPPONENTS lists the others ('greedy' for breakthrough:
+breakthrough_opponent.greedy).
 
 GAMES: the board games whose trainers take part (not minesweeper: one player, hidden cells).
 """
@@ -39,15 +43,19 @@ GAMES = {
     'hex': 'HexHeadlessTrainer', 'loa': 'LOAHeadlessTrainer', 'morris': 'MorrisHeadlessTrainer',
     'othello': 'OthelloHeadlessTrainer', 'pentago': 'PentagoHeadlessTrainer',
 }
+OPPONENTS = {('breakthrough', 'greedy'): ('breakthrough.breakthrough_opponent', 'greedy')}
 DB = 'training.db'
 ARMS = ('plain', 'weights')
 
 
-def trainer(game, folder, weights, tune):
+def trainer(game, folder, weights, tune, opponent=None):
     logging.disable(logging.INFO)
     module = importlib.import_module(f'{game}.{game}_headless_trainer')
     cls = getattr(module, GAMES[game])
     cls.use_weights, cls.tune_weights = weights, tune
+    if opponent is not None:
+        where, name = OPPONENTS[(game, opponent)]
+        cls.opponent = staticmethod(getattr(importlib.import_module(where), name))
     return cls(os.path.join(folder, DB)), module
 
 
@@ -94,7 +102,7 @@ def learn(work, game, games):
     t.weights.close()
 
 
-def play(work, game, arm, games, seed=None):
+def play(work, game, arm, games, seed=None, opponent=None):
     src = os.path.join(work, game, 'learned')
     folder = os.path.join(work, game, arm + (f'_{seed}' if seed else ''))
     log = os.path.join(folder, 'games.jsonl')
@@ -105,7 +113,7 @@ def play(work, game, arm, games, seed=None):
                 shutil.copy(os.path.join(src, name), folder)
         open(log, 'w').close()
     done = sum(1 for _ in open(log))
-    t, module = trainer(game, folder, arm == 'weights', False)
+    t, module = trainer(game, folder, arm == 'weights', False, opponent)
     random.seed(f'{game} {arm} {seed} {done}')
     with open(log, 'a') as f:
         for i in range(done, games):
@@ -174,10 +182,11 @@ if __name__ == '__main__':
     ap.add_argument('work')
     ap.add_argument('rest', nargs='*')
     ap.add_argument('--seed', default=None)
+    ap.add_argument('--opponent', default=None)
     a = ap.parse_args()
     if a.what == 'learn':
         learn(a.work, a.rest[0], int(a.rest[1]))
     elif a.what == 'play':
-        play(a.work, a.rest[0], a.rest[1], int(a.rest[2]), a.seed)
+        play(a.work, a.rest[0], a.rest[1], int(a.rest[2]), a.seed, a.opponent)
     else:
         report(a.work, a.rest or None)
