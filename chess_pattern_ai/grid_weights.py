@@ -66,6 +66,11 @@ points, are large enough to outweigh better learned priorities. The
 weights also cost time: 1.1x to 2.7x the seconds per game.
 use_weights is on in the breakthrough trainer (tune_weights off: it plays
 the learned mean, as measured) and off in the others.
+Breakthrough with these settings, from new databases (both arms learning
+everything else as they play), 1000 games each against the random
+opponent: plain 95.1% (951 won, mean margin +1336), weights 99.3% (993 won,
++1481), p 1e-8; wins per 250 games plain 236, 242, 235, 238, weights 249,
+248, 247, 249; 0.09 against 0.22 s per game.
 
 Hex was first measured with offset rows (HexBoard's neighbours then
 depended on row parity): plain 87.3%, weights 66.7%, p 0.000. The row
