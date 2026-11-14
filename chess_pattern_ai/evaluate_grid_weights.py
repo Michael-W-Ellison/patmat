@@ -3,7 +3,7 @@
 Evaluate grid_weights: do learned weights of game-independent position features improve the board games'
 trainers, as the evaluation weights did in chess?
 
-    python3 evaluate_grid_weights.py learn <work dir> <game> <games>
+    python3 evaluate_grid_weights.py learn <work dir> <game> <games> [--opponent NAME] [--start zero]
     python3 evaluate_grid_weights.py play <work dir> <game> <arm> <games> [--seed S] [--opponent NAME]
     python3 evaluate_grid_weights.py report <work dir> [game ...]
 
@@ -16,7 +16,11 @@ appended to <work dir>/<game>/<arm>/games.jsonl as it ends; play carries on from
 run stopped part-way is not lost). report: per game, each arm's games, wins, draws, losses and mean margin;
 the difference in win rate with a test of two proportions; the learned weights.
 
---opponent: the trainer's opponent in play (default: its usual one, random
+--start zero (learn): the weights start at 0 with spread START_STD even in a
+game listed in grid_weights.LEARNED (whose new databases otherwise start from
+its learned weights).
+
+--opponent: the trainer's opponent in learn and play (default: its usual one, random
 moves); OPPONENTS lists the others ('greedy' for breakthrough:
 breakthrough_opponent.greedy).
 
@@ -83,10 +87,13 @@ class io_quiet:
         sys.stdout = self.saved
 
 
-def learn(work, game, games):
+def learn(work, game, games, opponent=None, start=None):
     folder = os.path.join(work, game, 'learned')
     os.makedirs(folder, exist_ok=True)
-    t, module = trainer(game, folder, True, True)
+    if start == 'zero':
+        import grid_weights
+        grid_weights.LEARNED.pop(game, None)        # this process only
+    t, module = trainer(game, folder, True, True, opponent)
     log = os.path.join(folder, 'learn.jsonl')
     done = sum(1 for _ in open(log)) if os.path.exists(log) else 0
     random.seed(f'learn {game} {done}')
@@ -183,9 +190,10 @@ if __name__ == '__main__':
     ap.add_argument('rest', nargs='*')
     ap.add_argument('--seed', default=None)
     ap.add_argument('--opponent', default=None)
+    ap.add_argument('--start', default=None, choices=('zero',))
     a = ap.parse_args()
     if a.what == 'learn':
-        learn(a.work, a.rest[0], int(a.rest[1]))
+        learn(a.work, a.rest[0], int(a.rest[1]), a.opponent, a.start)
     elif a.what == 'play':
         play(a.work, a.rest[0], a.rest[1], int(a.rest[2]), a.seed, a.opponent)
     else:
