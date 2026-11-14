@@ -103,8 +103,8 @@ anywhere from 9% to 51%, and the same learned databases gave 34-46%
 rather than 64.8%. What the learning period passed on is in the general
 patterns (universal_move_patterns.db): D against A p 7e-32, C against A
 p 0.21; with them, play is steady from the first 100 games (41-47 wins).
-Of the general patterns, it is those of moves that let the opponent win
-nothing at once (F2 against D p 0.67; F1 alone is worse than none, p 4e-62,
+Of the general patterns, it is those of moves that do not let the
+opponent win at once (F2 against D p 0.67; F1 alone is worse than none, p 4e-62,
 not explained). The learned move priorities lowered it (B against D p
 2e-5). Learning does not reliably reach such patterns (E): a run that
 seldom wins learns almost no differences between patterns (E3 won none of
