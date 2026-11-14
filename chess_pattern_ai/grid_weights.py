@@ -88,6 +88,28 @@ mean margin +362), weights 27.9% (279 won, -460), p 2e-61; wins per 250
 games plain 123, 180, 178, 167, weights 44, 67, 82, 86. Learned weights:
 pieces +1.99, largest_group -0.13, groups -2.43, longest_line -0.55, edge
 +0.27, liberties +0.08, centre +2.78 (final spread 0.20-0.22).
+Why plain play won 64.8% here and 24.5% from new databases (both against
+greedy; plain play, 4 runs of 400 games per condition unless stated):
+    A  new databases                                  26.9% (runs 22.2, 8.8, 25.5, 51.2)
+    B  copies of the learned databases (both files)   39.5% (37.8, 45.8, 33.5, 41.0)
+    C  the learned move priorities only               28.9% (13.8, 21.2, 63.0, 17.8)
+    D  the learned general patterns only              47.0% (44.2, 47.5, 48.8, 47.5)
+    E  three new learning runs (160 games, drawn
+       weights), 400 plain games after each           35.8%, 11.0%, 0.2%
+    F1 D keeping only the threat=allows_loss patterns  5.3%
+    F2 D without the threat=allows_loss patterns      46.2%
+Most of the gap is run-to-run variation: from new databases the runs end
+anywhere from 9% to 51%, and the same learned databases gave 34-46%
+rather than 64.8%. What the learning period passed on is in the general
+patterns (universal_move_patterns.db): D against A p 7e-32, C against A
+p 0.21; with them, play is steady from the first 100 games (41-47 wins).
+Of the general patterns, it is those of moves that let the opponent win
+nothing at once (F2 against D p 0.67; F1 alone is worse than none, p 4e-62,
+not explained). The learned move priorities lowered it (B against D p
+2e-5). Learning does not reliably reach such patterns (E): a run that
+seldom wins learns almost no differences between patterns (E3 won none of
+its 160 learning games; every pattern's win lift -0.01 to -0.03) and stays
+there.
 
 Hex was first measured with offset rows (HexBoard's neighbours then
 depended on row parity): plain 87.3%, weights 66.7%, p 0.000. The row
