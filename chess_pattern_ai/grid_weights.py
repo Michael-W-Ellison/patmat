@@ -89,27 +89,36 @@ games plain 123, 180, 178, 167, weights 44, 67, 82, 86. Learned weights:
 pieces +1.99, largest_group -0.13, groups -2.43, longest_line -0.55, edge
 +0.27, liberties +0.08, centre +2.78 (final spread 0.20-0.22).
 Why plain play won 64.8% here and 24.5% from new databases (both against
-greedy; plain play, 4 runs of 400 games per condition unless stated):
-    A  new databases                                  26.9% (runs 22.2, 8.8, 25.5, 51.2)
-    B  copies of the learned databases (both files)   39.5% (37.8, 45.8, 33.5, 41.0)
-    C  the learned move priorities only               28.9% (13.8, 21.2, 63.0, 17.8)
-    D  the learned general patterns only              47.0% (44.2, 47.5, 48.8, 47.5)
+greedy; plain play, runs of 400 games; each run's win rate):
+    A  new databases (8 runs)                 0.5 8.8 10.3 15.5 22.3 24.0 25.5 51.3
+    B  copies of the learned databases (both files)    33.5 37.8 41.0 45.8
+    C  the learned move priorities only                13.8 17.8 21.2 63.0
+    D  the learned general patterns only               44.3 47.5 47.5 48.8
     E  three new learning runs (160 games, drawn
-       weights), 400 plain games after each           35.8%, 11.0%, 0.2%
-    F1 D keeping only the threat=allows_loss patterns  5.3%
-    F2 D without the threat=allows_loss patterns      46.2%
+       weights), 400 plain games after each            0.2 11.0 35.8
+    F1 D keeping only the threat=allows_loss patterns
+       (8 runs)                               0.0 2.8 3.0 3.8 11.8 25.3 52.3 64.5
+    F2 D without the threat=allows_loss patterns       37.5 44.3 49.0 54.3
+    G1 the learned win-rate baseline only, no patterns
+       (8 runs)                               5.5 7.5 8.3 15.0 47.0 49.3 49.5 56.8
+    G2 F1 without the baseline (8 runs)       0.3 0.8 0.8 1.0 1.3 2.0 3.5 35.5
+Tests compare runs (Mann-Whitney on the run win rates), not games: the
+games of one run are not independent (each run's learning carries from
+game to game), and tests over pooled games gave p values far too small
+(an earlier version of this note had D against A p 7e-32 and F1 against A
+p 4e-62 from pooled games).
 Most of the gap is run-to-run variation: from new databases the runs end
-anywhere from 9% to 51%, and the same learned databases gave 34-46%
-rather than 64.8%. What the learning period passed on is in the general
-patterns (universal_move_patterns.db): D against A p 7e-32, C against A
-p 0.21; with them, play is steady from the first 100 games (41-47 wins).
-Of the general patterns, it is those of moves that do not let the
-opponent win at once (F2 against D p 0.67; F1 alone is worse than none, p 4e-62,
-not explained). The learned move priorities lowered it (B against D p
-2e-5). Learning does not reliably reach such patterns (E): a run that
-seldom wins learns almost no differences between patterns (E3 won none of
-its 160 learning games; every pattern's win lift -0.01 to -0.03) and stays
-there.
+anywhere from 0.5% to 51%, and the same learned databases gave 34-46%
+rather than 64.8%. The general patterns learned (universal_move_patterns.db)
+made play steady: D's four runs 44-49%, steady from the first 100 games
+(41-47 wins); D against A p 0.050. The move priorities alone did not (C
+against A p 0.68). F2 against D p 1.0. F1 is not worse than new databases
+(p 0.72): four more runs gave 0, 25, 52 and 65%. G2 (the allows_loss
+patterns with no baseline) was low in 7 of 8 runs (p 0.052 against A;
+not explained, not significant at 0.05). G1 against A p 0.80. Learning
+does not reliably reach good general patterns (E): a run that seldom wins
+learns almost no differences between patterns (E3 won none of its 160
+learning games; every pattern's win lift -0.01 to -0.03) and stays there.
 
 Hex was first measured with offset rows (HexBoard's neighbours then
 depended on row parity): plain 87.3%, weights 66.7%, p 0.000. The row
