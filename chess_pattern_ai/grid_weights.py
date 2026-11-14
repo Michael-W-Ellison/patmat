@@ -79,6 +79,14 @@ margin -712), weights 20.6% (206 won, -922), p 0.037; wins per 250 games
 plain 63, 78, 47, 57, weights 45, 65, 46, 50; 0.17 against 0.39 s per game.
 The weights were learned against random moves; against this opponent they
 did worse than none.
+Learned against that opponent instead (evaluate_grid_weights learn
+--opponent greedy --start zero: 160 games, 20 generations from 0, spread
+3; it won 4, 11, 13, 9 of each 40 learning games), then 1000 games each
+against it from copies of the learned databases: plain 64.8% (648 won,
+mean margin +362), weights 27.9% (279 won, -460), p 2e-61; wins per 250
+games plain 123, 180, 178, 167, weights 44, 67, 82, 86. Learned weights:
+pieces +1.99, largest_group -0.13, groups -2.43, longest_line -0.55, edge
++0.27, liberties +0.08, centre +2.78 (final spread 0.20-0.22).
 
 Hex was first measured with offset rows (HexBoard's neighbours then
 depended on row parity): plain 87.3%, weights 66.7%, p 0.000. The row
