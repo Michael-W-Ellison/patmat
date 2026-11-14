@@ -39,7 +39,7 @@ class BreakthroughHeadlessTrainer:
     Same philosophy as chess trainer
     """
 
-    use_weights = True          # grid_weights: the agent's move scores add learned weights of game-independent
+    use_weights = False         # grid_weights: the agent's move scores add learned weights of game-independent
                                 # position features, tuned from the game's results (cross-entropy)
     tune_weights = False        # with use_weights: draw and tune the weights per game; False: their mean
     opponent = None             # the opponent's move choice, (game, color) -> Move; None: random moves

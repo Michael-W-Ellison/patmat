@@ -64,9 +64,10 @@ weights hurt in four games was not measured; one untested possibility is
 that weights from only 20 generations, with a start spread of 3 priority
 points, are large enough to outweigh better learned priorities. The
 weights also cost time: 1.1x to 2.7x the seconds per game.
-use_weights is on in the breakthrough trainer (tune_weights off: it plays
-the learned mean, as measured) and off in the others.
-Breakthrough with these settings, from new databases (both arms learning
+use_weights is off in every trainer. It was on for a time in the
+breakthrough trainer (tune_weights off: the learned mean, LEARNED), and
+turned off after the measurements below against a stronger opponent.
+Breakthrough with the weights on (the learned mean, not tuned), from new databases (both arms learning
 everything else as they play), 1000 games each against the random
 opponent: plain 95.1% (951 won, mean margin +1336), weights 99.3% (993 won,
 +1481), p 1e-8; wins per 250 games plain 236, 242, 235, 238, weights 249,
