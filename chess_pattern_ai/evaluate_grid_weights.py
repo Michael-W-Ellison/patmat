@@ -3,7 +3,7 @@
 Evaluate grid_weights: do learned weights of game-independent position features improve the board games'
 trainers, as the evaluation weights did in chess?
 
-    python3 evaluate_grid_weights.py learn <work dir> <game> <games> [--opponent NAME] [--start zero]
+    python3 evaluate_grid_weights.py learn <work dir> <game> <games> [--opponent NAME] [--start zero] [--seed S]
     python3 evaluate_grid_weights.py play <work dir> <game> <arm> <games> [--seed S] [--opponent NAME]
     python3 evaluate_grid_weights.py report <work dir> [game ...]
 
@@ -87,7 +87,7 @@ class io_quiet:
         sys.stdout = self.saved
 
 
-def learn(work, game, games, opponent=None, start=None):
+def learn(work, game, games, opponent=None, start=None, seed=None):
     folder = os.path.join(work, game, 'learned')
     os.makedirs(folder, exist_ok=True)
     if start == 'zero':
@@ -96,7 +96,7 @@ def learn(work, game, games, opponent=None, start=None):
     t, module = trainer(game, folder, True, True, opponent)
     log = os.path.join(folder, 'learn.jsonl')
     done = sum(1 for _ in open(log)) if os.path.exists(log) else 0
-    random.seed(f'learn {game} {done}')
+    random.seed(f'learn {game} {done}' if seed is None else f'learn {game} {seed} {done}')
     with open(log, 'a') as f:
         for i in range(done, games):
             start = time.time()
@@ -193,7 +193,7 @@ if __name__ == '__main__':
     ap.add_argument('--start', default=None, choices=('zero',))
     a = ap.parse_args()
     if a.what == 'learn':
-        learn(a.work, a.rest[0], int(a.rest[1]), a.opponent, a.start)
+        learn(a.work, a.rest[0], int(a.rest[1]), a.opponent, a.start, a.seed)
     elif a.what == 'play':
         play(a.work, a.rest[0], a.rest[1], int(a.rest[2]), a.seed, a.opponent)
     else:
