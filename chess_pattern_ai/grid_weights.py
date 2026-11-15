@@ -37,59 +37,81 @@ from the mean and spread learned there (as chess's new databases start
 from its learned weights); after each game the next game's weights are
 drawn.
 
-Results: evaluate_grid_weights. Each game: 160 games of learning (20
-generations of the cross-entropy method) against the trainer's usual random
-opponent, then 300 games without weights ('plain') and 300 with the learned
-mean ('weights'), each arm from a copy of the learned databases. Win rates
-(p: two-sided test of two proportions):
+Results: evaluate_grid_weights, against the trainer's usual random
+opponent. Each game, 6 replicates; each replicate: 160 games of learning
+from 0 (20 generations of the cross-entropy method, its own seed), then 150
+games without weights ('plain') and 150 with the learned mean ('weights'),
+each arm from a copy of that replicate's learned databases. Win rates
+(mean of the replicates), the weights arm minus the plain arm in each
+replicate (points), and p for those 6 differences (paired t test;
+Wilcoxon signed-rank, whose smallest possible two-sided p with 6 pairs is
+0.031):
 
-    game          plain    weights    p
-    arimaa        97.7%    57.0%      0.000   worse
-    breakthrough  96.3%    99.0%      0.031   better
-    checkers      97.7%    94.3%      0.037   worse (13 draws against 2)
-    connect4      96.0%    93.7%      0.197
-    dots_boxes   100.0%   100.0%      1.000
-    go            97.0%    93.3%      0.036   worse
-    gomoku       100.0%   100.0%      1.000
-    hex           75.0%    80.3%      0.117   (rhombus layout; see below)
-    loa           98.7%    99.3%      0.412
-    morris        96.3%    93.0%      0.069
-    othello       73.3%    72.7%      0.854
-    pentago       91.7%    85.7%      0.020   worse
+    game          plain  weights  differences per replicate        t p    wilcoxon p
+    arimaa        70.9%   51.0%   -30.0 +4.0 -9.3 -20.7 -26.7 -36.7  0.022  0.062  worse
+    breakthrough  96.0%   98.6%   +2.0 +5.3 +3.3 +4.0 -0.7 +1.3      0.032  0.062  better
+    checkers      96.7%   95.7%   0.0 -6.0 +2.7 +4.0 -6.0 -0.7       0.588  0.562
+    connect4      96.1%   96.7%   +3.3 +7.3 +2.0 -7.3 -2.7 +0.7      0.799  0.750
+    dots_boxes    99.2%   97.1%   0.0 +2.0 -14.0 0.0 0.0 -0.7        0.420  0.750
+    go            96.2%   98.6%   +8.0 0.0 +1.3 +2.0 +1.3 +1.3       0.101  0.062
+    gomoku       100.0%  100.0%   0 in all six                       -      -
+    hex           81.8%   84.9%   +12.7 -2.0 +10.0 -5.3 +2.0 +1.3    0.322  0.469
+    loa           99.1%   99.1%   -0.7 -0.7 -1.3 0.0 -0.7 +3.3       1.000  0.625
+    morris        93.4%   89.8%   -14.0 -2.0 -6.7 +0.7 +6.0 -6.0     0.248  0.250
+    othello       80.9%   66.8%   -3.3 -16.0 -23.3 -8.0 -24.7 -9.3   0.010  0.031  worse
+    pentago       91.1%   76.8%   -9.3 -14.0 -35.3 -16.0 -3.3 -8.0   0.026  0.031  worse
 
-Better in one game (breakthrough), worse in four, no significant
-difference in seven. Against a random opponent the plain trainers already win
-75-100% of games in all but othello, so there is little room to gain. Why the
-weights hurt in four games was not measured; one untested possibility is
-that weights from only 20 generations, with a start spread of 3 priority
-points, are large enough to outweigh better learned priorities. The
-weights also cost time: 1.1x to 2.7x the seconds per game.
+Worse in othello and pentago (all 6 replicates lower), and in arimaa (5 of
+6 lower; t p 0.022, Wilcoxon p 0.062); better in breakthrough (5 of 6
+higher; t p 0.032, Wilcoxon p 0.062); no significant difference in the
+other eight. An earlier version of this table (one replicate of 300 games
+per arm, two-proportion tests over the games) also had checkers, go and
+pentago worse at p < 0.05; games of one arm are not independent (the
+arm's learning carries from game to game), so those tests gave p values
+too small. Against a random opponent the plain trainers already win
+70-100% of games, so there is little room to gain. Why the weights hurt in
+three games was not measured. The weights also cost time: 1.1x to 2.7x the
+seconds per game (from the earlier version).
 use_weights is off in every trainer. It was on for a time in the
 breakthrough trainer (tune_weights off: the learned mean, LEARNED), and
-turned off after the measurements below against a stronger opponent.
-Breakthrough with the weights on (the learned mean, not tuned), from new databases (both arms learning
-everything else as they play), 1000 games each against the random
-opponent: plain 95.1% (951 won, mean margin +1336), weights 99.3% (993 won,
-+1481), p 1e-8; wins per 250 games plain 236, 242, 235, 238, weights 249,
-248, 247, 249; 0.09 against 0.22 s per game.
-The same against a stronger, fixed opponent (breakthrough_opponent.greedy:
-wins at once if it can, avoids moves that let the agent win at once,
-otherwise the best material and advancement; it beat random moves in 39 of
-40 games), 1000 games each from new databases: plain 24.5% (245 won, mean
-margin -712), weights 20.6% (206 won, -922), p 0.037; wins per 250 games
-plain 63, 78, 47, 57, weights 45, 65, 46, 50; 0.17 against 0.39 s per game.
-The weights were learned against random moves; against this opponent they
-did worse than none.
-Learned against that opponent instead (evaluate_grid_weights learn
+turned off after earlier measurements against a stronger opponent, which
+the re-measurement below does not support.
+
+Breakthrough from new databases (both arms learning everything else as
+they play; the weights arm with the mean in LEARNED, not tuned), 8 runs of
+400 games per arm; each run's win rate; p: Mann-Whitney between the runs
+of the two arms:
+    against the random opponent
+        plain    93.2 95.5 96.0 97.2 97.2 97.2 98.2 98.2   mean 96.6
+        weights  98.5 99.0 99.2 99.5 99.5 99.5 99.8 99.8   mean 99.3   p 0.0009
+    against a stronger, fixed opponent (breakthrough_opponent.greedy: wins
+    at once if it can, avoids moves that let the agent win at once,
+    otherwise the best material and advancement; it beat random moves in
+    39 of 40 games)
+        plain     0.2  1.8  3.0  3.2  5.2  8.5 10.5 24.2   mean  7.1
+        weights  16.0 16.2 17.2 17.5 17.5 19.8 20.0 22.0   mean 18.3   p 0.014
+The weights (learned against random moves) were better against both
+opponents. Against greedy the plain runs spread from 0.2% to 24%, the
+weights runs 16-22%. An earlier measurement (4 blocks of 250 games of one
+run per arm) had plain 24.5%, weights 20.6% against greedy, p 0.037 from
+pooled games; the runs here do not reproduce it.
+Weights learned against greedy instead (evaluate_grid_weights learn
 --opponent greedy --start zero: 160 games, 20 generations from 0, spread
-3; it won 4, 11, 13, 9 of each 40 learning games), then 1000 games each
-against it from copies of the learned databases: plain 64.8% (648 won,
-mean margin +362), weights 27.9% (279 won, -460), p 2e-61; wins per 250
-games plain 123, 180, 178, 167, weights 44, 67, 82, 86. Learned weights:
+3), 8 replicates, each followed by 400 games per arm against greedy from
+copies of its learned databases:
+        plain    48.2  5.5  8.2  8.8  5.8  0.2 16.2  2.2   mean 11.9
+        weights  19.2  0.2  8.5  9.0  0.8  0.0  7.5 20.2   mean  8.2
+        differences -29.0 -5.2 +0.2 +0.2 -5.0 -0.2 -8.8 +18.0: t p 0.45,
+        Wilcoxon p 0.38
+No significant difference. An earlier single replicate had plain 64.8%,
+weights 27.9% (p 2e-61 from pooled games); its learned weights were
 pieces +1.99, largest_group -0.13, groups -2.43, longest_line -0.55, edge
-+0.27, liberties +0.08, centre +2.78 (final spread 0.20-0.22).
-Why plain play won 64.8% here and 24.5% from new databases (both against
-greedy; plain play, runs of 400 games; each run's win rate):
++0.27, liberties +0.08, centre +2.78. In 7 of the 8 replicates here plain
+play won 0.2-16%, so that replicate's 64.8% was not typical.
+
+Why plain play won 64.8% in that replicate and 24.5% from new databases
+(both against greedy; plain play, runs of 400 games; each run's win rate;
+conditions B-D start from copies of that replicate's databases):
     A  new databases (8 runs)                 0.5 8.8 10.3 15.5 22.3 24.0 25.5 51.3
     B  copies of the learned databases (both files)    33.5 37.8 41.0 45.8
     C  the learned move priorities only                13.8 17.8 21.2 63.0
@@ -121,8 +143,8 @@ learns almost no differences between patterns (E3 won none of its 160
 learning games; every pattern's win lift -0.01 to -0.03) and stays there.
 
 Hex was first measured with offset rows (HexBoard's neighbours then
-depended on row parity): plain 87.3%, weights 66.7%, p 0.000. The row
-above is from a new run after the change to the standard rhombus.
+depended on row parity): plain 87.3%, weights 66.7% (one replicate). The
+row above is from after the change to the standard rhombus.
 """
 
 from typing import Dict, List, Optional, Tuple
