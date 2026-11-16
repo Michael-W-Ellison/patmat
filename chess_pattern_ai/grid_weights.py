@@ -69,9 +69,33 @@ per arm, two-proportion tests over the games) also had checkers, go and
 pentago worse at p < 0.05; games of one arm are not independent (the
 arm's learning carries from game to game), so those tests gave p values
 too small. Against a random opponent the plain trainers already win
-70-100% of games, so there is little room to gain. Why the weights hurt in
-three games was not measured. The weights also cost time: 1.1x to 2.7x the
-seconds per game (from the earlier version).
+70-100% of games, so there is little room to gain. The weights also cost
+time: 1.1x to 2.7x the seconds per game (from the earlier version).
+Why the weights hurt in othello and pentago (arimaa not measured):
+- Their size. Over each decision's candidates (20 games per replicate with
+  the learned mean), the median spread of the weights' value was 8-67
+  priority points in othello and 6-24 in pentago, of the rest of the score
+  2-6 and 0.4-4; the weights changed the chosen move in 20-87% and 35-64%
+  of decisions. That alone does not hurt: in breakthrough and go they
+  changed 68-89% of moves, and the weights were better there. Only in
+  checkers and dots_boxes was the rest of the score usually the larger.
+- The learned weights were no better than random ones. 150 games per
+  replicate from the same learned databases with weights drawn once from
+  N(0, 3) per feature (learning's start spread): othello 61.2% (learned
+  66.8%, plain 80.9%), pentago 77.1% (learned 76.8%, plain 91.1%); random
+  minus learned: t p 0.38 and 0.97. In breakthrough and go the same random
+  draws did worse than the learned weights (87.6% against 98.6%, and
+  75.8% against 98.6%; t p 0.090 and 0.017): there learning found weights
+  that help, in othello and pentago it did not in 160 games. Each
+  feature's learned weight changes sign across the replicates in every
+  game, and in pentago the win rate fell from the first 80 learning games
+  to the last 80 in 5 of 6 replicates.
+- The learned mean times 0.1 lost less: othello 75.1% (plain minus 5.8,
+  t p 0.013; 8.3 above the full weights, t p 0.065), pentago 85.8% (plain
+  minus 5.3, t p 0.054; 9.0 above the full weights, t p 0.086).
+So in these two games, weights the learning did not improve beyond random
+decided most moves and replaced the plain trainers' better choices; why
+160 games of the cross-entropy method found nothing there was not measured.
 use_weights is on in the breakthrough trainer (tune_weights off: the
 learned mean, LEARNED) and off in every other trainer. It was turned off
 for a time after earlier measurements against a stronger opponent, and
