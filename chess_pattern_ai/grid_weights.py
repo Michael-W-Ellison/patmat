@@ -72,10 +72,10 @@ too small. Against a random opponent the plain trainers already win
 70-100% of games, so there is little room to gain. Why the weights hurt in
 three games was not measured. The weights also cost time: 1.1x to 2.7x the
 seconds per game (from the earlier version).
-use_weights is off in every trainer. It was on for a time in the
-breakthrough trainer (tune_weights off: the learned mean, LEARNED), and
-turned off after earlier measurements against a stronger opponent, which
-the re-measurement below does not support.
+use_weights is on in the breakthrough trainer (tune_weights off: the
+learned mean, LEARNED) and off in every other trainer. It was turned off
+for a time after earlier measurements against a stronger opponent, and
+turned on again after the re-measurement below.
 
 Breakthrough from new databases (both arms learning everything else as
 they play; the weights arm with the mean in LEARNED, not tuned), 8 runs of
