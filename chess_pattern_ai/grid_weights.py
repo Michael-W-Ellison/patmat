@@ -94,8 +94,31 @@ Why the weights hurt in othello and pentago (arimaa not measured):
   t p 0.013; 8.3 above the full weights, t p 0.065), pentago 85.8% (plain
   minus 5.3, t p 0.054; 9.0 above the full weights, t p 0.086).
 So in these two games, weights the learning did not improve beyond random
-decided most moves and replaced the plain trainers' better choices; why
-160 games of the cross-entropy method found nothing there was not measured.
+decided most moves and replaced the plain trainers' better choices.
+Why learning found nothing there: 16 weight vectors drawn from N(0, 3) and
+zero weights (plain), 100 games each from copies of replicate 1's learned
+databases (standard error of a vector's win rate about 4.5 points):
+    game          plain  random vectors' win rates         above plain
+    othello        70%   29-71%, mean 54.7%                1 (71%)
+    pentago        85%   49-89%, mean 76.9%                3 (86-89%)
+    go             94%   36-100%, mean 75.9%               5 (97-100%)
+    breakthrough   94%   61-100%, mean 87.6%               8 (95-100%)
+- Little to find: in othello and pentago no drawn vector clearly beat plain
+  play (those above it are within the standard error); in go and
+  breakthrough several won 97-100%.
+- A weaker signal: of the variance of one game's result, the vector
+  accounted for 0.02 in othello and 0.06 in pentago, 0.27 in go and 0.15
+  in breakthrough. One generation of the cross-entropy method (8 of the
+  vectors, one recorded game each, the 3 best game scores kept; simulated)
+  raised the true win rate of the kept vectors over the 8 by 2.1 points in
+  othello and 3.2 in pentago (selecting by true win rate: 7.5 and 8.7),
+  against 7.9 in go and 7.1 in breakthrough.
+- The search stops regardless of signal: after the 20 generations every
+  spread was at or near the floor (CE_MIN_STD 0.2; at most 0.6) in all four
+  games and every replicate. With little signal the mean stops wherever
+  the noise led it, which fits the signs of the learned weights changing
+  across replicates.
+One replicate's databases only; 16 vectors.
 use_weights is on in the breakthrough trainer (tune_weights off: the
 learned mean, LEARNED) and off in every other trainer. It was turned off
 for a time after earlier measurements against a stronger opponent, and
