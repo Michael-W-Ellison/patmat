@@ -53,6 +53,9 @@ class Move:
         return f"{col_letter}{row + 1}"
 
 
+NEIGHBOR_OFFSETS = ((-1, 0), (-1, 1), (0, 1), (1, 0), (1, -1), (0, -1))
+
+
 class HexBoard:
     """
     Hex board representation
@@ -117,23 +120,16 @@ class HexBoard:
         """
         Get all neighboring hexagons of a position
 
-        In a hex grid, each position has up to 6 neighbors.
-        Using axial coordinate system:
-        - For even rows: NW, NE, E, SE, SW, W
-        - For odd rows: same relative directions
+        In a hex grid, each position has up to 6 neighbors. The board is the
+        standard Hex rhombus (as __str__ draws it: each row shifted half a
+        hexagon right of the row above), so every position has the same
+        offsets: NW (-1, 0), NE (-1, 1), W (0, -1), E (0, 1), SW (1, -1),
+        SE (1, 0).
         """
         row, col = pos
         neighbors = []
 
-        # Hexagonal neighbor offsets (varies by row parity)
-        if row % 2 == 0:
-            # Even row
-            offsets = [(-1, -1), (-1, 0), (0, 1), (1, 0), (1, -1), (0, -1)]
-        else:
-            # Odd row
-            offsets = [(-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (0, -1)]
-
-        for dr, dc in offsets:
+        for dr, dc in NEIGHBOR_OFFSETS:
             neighbor = (row + dr, col + dc)
             if self.is_valid_position(neighbor):
                 neighbors.append(neighbor)

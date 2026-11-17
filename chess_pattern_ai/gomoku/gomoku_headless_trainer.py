@@ -22,6 +22,8 @@ from gomoku.gomoku_board import GomokuBoard, Color, Move, Stone
 from gomoku.gomoku_game import GomokuGame
 from gomoku.gomoku_scorer import GomokuScorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
+from board_screens import agent_move
+from grid_weights import GridWeights
 from general_move_patterns import (GeneralPatternLearner, analyze_candidates,
                                    decisive_value, winning_moves,
                                    universal_db_path, MAX_CANDIDATES)
@@ -36,7 +38,11 @@ class GomokuHeadlessTrainer:
     Same philosophy as chess trainer
     """
 
-    def __init__(self, db_path='gomoku_training.db', board_size: int = 15):
+    use_weights = False         # grid_weights: the agent's move scores add learned weights of game-independent
+                                # position features, tuned from the game's results (cross-entropy)
+    tune_weights = True         # with use_weights: draw and tune the weights per game; False: their mean
+
+    def __init__(self, db_path='gomoku_training.db', board_size: int = 15, screen=None, screen_side=False):
         self.db_path = db_path
         self.board_size = board_size
         self.prioritizer = LearnableMovePrioritizer(db_path)
@@ -44,6 +50,13 @@ class GomokuHeadlessTrainer:
         # Game-independent patterns, shared with the other games' trainers
         self.general = GeneralPatternLearner(universal_db_path(db_path), 'gomoku')
         self.adapter = GomokuAdapter()
+        self.weights = GridWeights(db_path, 'gomoku', self.adapter, tune=self.tune_weights) \
+            if self.use_weights else None
+        # screen: the agent knows the game only from screens, drawn and read by board_screens (True, or a
+        # board_screens.ScreenView): it follows each move from the screens and decides from its own position;
+        # screen_side: the screens show the board from the agent's side
+        from board_screens import screen_view
+        self.screen = screen_view('gomoku', screen, screen_side)
         self.last_general_features = None
 
         # Statistics
@@ -195,7 +208,8 @@ class GomokuHeadlessTrainer:
                                       [move for move, _ in candidates])
         # A win now, or a loss the opponent can force at once, decides first;
         # otherwise the existing score plus the general-pattern value
-        scored = [(move, score + decisive_value(a['net']) + self.general.value(a['features']),
+        scored = [(move, score + decisive_value(a['net']) + self.general.value(a['features'])
+                   + (self.weights.value(game, move, ai_color) if self.weights is not None else 0.0),
                    a['features'])
                   for (move, score), a in zip(candidates, analysis)]
 
@@ -216,6 +230,8 @@ class GomokuHeadlessTrainer:
             (result, score, rounds) where result is 'win', 'loss', or 'draw'
         """
         game = GomokuGame(board_size=self.board_size)
+        if self.screen is not None:
+            self.screen.new_game(self.adapter, game, ai_color)
         rounds = 0
         max_rounds = 500  # Prevent infinite games (board can be 15x15 = 225 or 19x19 = 361)
 
@@ -235,7 +251,8 @@ class GomokuHeadlessTrainer:
 
             # Select move
             if current_color == ai_color:
-                move = self.select_move(game, ai_color, use_learning=True)
+                move = agent_move(self.screen, game,
+                                  lambda g: self.select_move(g, ai_color, use_learning=True))
                 if move is not None:
                     general_features.append(self.last_general_features)
             else:
@@ -262,6 +279,8 @@ class GomokuHeadlessTrainer:
 
             # Make move
             game.make_move(move)
+            if self.screen is not None:
+                self.screen.see(game)
             rounds += 1
 
             if verbose:
@@ -294,6 +313,8 @@ class GomokuHeadlessTrainer:
         # Record game for learning (directly update statistics)
         self.prioritizer.record_game_patterns(game_moves, result, score)
         self.general.record_game(general_features, result, 'gomoku')
+        if self.weights is not None:
+            self.weights.end_game(result, score)
 
         return result, score, rounds
 
@@ -404,9 +425,14 @@ def main():
     parser.add_argument('--size', type=int, default=15, choices=[15, 19],
                        help='Board size: 15 or 19 (default: 15)')
 
+    parser.add_argument('--screen', action='store_true',
+                        help='The agent knows the game only from screens (board_screens), read from the start')
+    parser.add_argument('--screen-side', action='store_true',
+                        help='With --screen: the screens show the board from the agent\'s side')
     args = parser.parse_args()
 
-    trainer = GomokuHeadlessTrainer(args.db, args.size)
+    trainer = GomokuHeadlessTrainer(args.db, args.size, screen=True if args.screen else None,
+                                    screen_side=args.screen_side)
 
     if args.show_patterns is not None:
         # Just show patterns and exit
@@ -414,6 +440,8 @@ def main():
     else:
         # Run training
         trainer.train(args.num_games, args.verbose, args.progress)
+        if trainer.screen is not None:     # what the agent made of the screens
+            print('Screens:', trainer.screen.stats)
 
         # Show learned patterns
         trainer.show_learned_patterns(10)

@@ -51,6 +51,24 @@ game-independent reply patterns most often refuted the agent's blunders
 (learned from a judge), so a quiet reply that punishes a move is read even
 when it is not among the QUIET_MOVES best quiet moves.
 
+Learned look-ahead (lookahead set to a lookahead_patterns.LookaheadLearner): at
+the end of a line, a position of a kind that in the agent's own games often
+hid a tactic (a deeper look found a swing a glance did not) is read
+lookahead_patterns.EXTENSION plies further before the capture search, once per
+line. glance() and look() are the two views the lessons compare.
+
+Episodic memory (episodes set to an episodic_memory.EpisodicMemory): a reply to
+a root move that matches the punishment of a remembered episode is always
+read, first, and episodic_memory.EXTENSION plies further; a root move that
+matches one is read further too. Or (memory_mode 'root') only the
+ROOT_CHECKED best root moves are checked, after the search (check()).
+
+Evaluation weights (weights set to a list, one per evaluation_weights.FEATURES):
+a position's value also gets the weighted sum of its features (mobility, king
+safety, loose pieces, pawn structure, ...), as the Tetris agent values its
+pieces' resting places; the weights are learned from game results by the
+cross-entropy method (evaluation_weights.WeightTuner).
+
 Killer moves and history scores (move_history set to a move_history.MoveHistory):
 below the root, the killer moves of the ply (the last moves that caused a
 cutoff there) are searched besides the usual moves, and the moves searched are
@@ -74,6 +92,8 @@ QUIESCENCE_DEPTH = 6    # captures followed beyond the search depth
 MAX_DEPTH = 8
 PATTERN_WEIGHT = 0.5    # root moves: search value + PATTERN_WEIGHT * pattern value (both material units)
 QUIET_MOVES = 2         # selective search: non-forcing moves considered at each position below the root
+ROOT_CHECKED = 3        # memory at the root: the search's best moves checked for remembered situations
+ROOT_SECONDS = 0.5      # ... and the time for searching them again
 
 
 def forcing(move: chess.Move, token: Optional[str], board: chess.Board) -> bool:
@@ -152,6 +172,16 @@ class PatternSearch:
         self.adapter = None                 # (the game's adapter, for the reply patterns)
         self.refutation_cache: Dict = {}
         self.move_history = None            # a MoveHistory: killers and history scores order the moves below the root
+        self.lookahead = None               # a LookaheadLearner: positions to read further at a line's end
+        self.episodes = None                # an EpisodicMemory: remembered punishments, read further
+        self.recalls = 0
+        # where the episodes are used: 'lines' (in every line, at its first reply and at the root) or 'root'
+        # (only the ROOT_CHECKED best root moves, after the search; check())
+        self.memory_mode = 'lines'
+        self.root_flagged = 0               # root mode: searches whose best moves met a remembered situation
+        self.extend_cache: Dict = {}
+        self.extensions = 0
+        self.weights = None                 # weights of evaluation_weights.FEATURES added to the evaluation
 
     # ------------------------------------------------------------- ordering
 
@@ -201,6 +231,12 @@ class PatternSearch:
                     features, REPLIES_EXTENDED, exclude={i for i, e in enumerate(moves) if e[0] in chosen})]
                 self.refutation_cache[key] = extra
             out = out + extra
+        if self.episodes is not None and self.memory_mode == 'lines' and ply == 1 and len(self.episodes):
+            # remembered punishments: always read, and first
+            recalled = [e for e in moves if self.episodes.recall(board, e[0])]
+            if recalled:
+                first = {e[0] for e in recalled}
+                out = recalled + [e for e in out if e[0] not in first]
         history = self.move_history
         if history is not None:
             chosen = {e[0] for e in out}
@@ -228,6 +264,9 @@ class PatternSearch:
             value += self.positions.value(board)
         if self.mates is not None:
             value += self.mates.value(board)
+        if self.weights is not None:
+            from evaluation_weights import value as weighted
+            value += weighted(board, self.weights)
         return value
 
     # --------------------------------------------------------------- search
@@ -238,6 +277,9 @@ class PatternSearch:
         self.nodes = 0
         self.history = self.game_positions(board)
         self.refutation_cache = {}
+        self.extend_cache = {}
+        self.extensions = 0
+        self.recalls = 0
         if self.move_history is not None:
             self.move_history.new_search()
         context = self.sequences.context(board) if self.use_patterns else []
@@ -255,10 +297,11 @@ class PatternSearch:
                     # a move cut off returns it exactly, so the comparison is on the value, not on
                     # value + bonus (whose rounding could make a cut-off move look better than the best)
                     threshold = best_total - bonus
+                    more = self.recalled(board, move)       # a trick remembered: read further
                     board.push(move)
                     try:
-                        value = -self.negamax(board, depth - 1, -float('inf'), -threshold,
-                                              self.next_context(context, tok), 1)
+                        value = -self.negamax(board, depth - 1 + more, -float('inf'), -threshold,
+                                              self.next_context(context, tok), 1, more > 0)
                     finally:
                         board.pop()
                     scored.append((value + bonus, move, pattern, tok))
@@ -270,7 +313,88 @@ class PatternSearch:
                 root = [(m, p, t) for _, m, p, t in sorted(scored, key=lambda e: -e[0])]
             except OutOfTime:
                 break
+        if self.memory_mode == 'root' and self.episodes is not None and len(self.episodes):
+            best_move = self.check(board, root, context, extra, best_move)
         return best_move
+
+    def check(self, board: chess.Board, root: List[Tuple], context: List[str],
+              extra: Optional[Dict[chess.Move, float]], best_move: chess.Move) -> chess.Move:
+        """
+        Memory at the root only: after the search, if a reply to one of its ROOT_CHECKED best moves makes a
+        situation remembered from an episode, those moves are searched again (full window, ROOT_SECONDS more):
+        the ones met by a remembered situation EXTENSION plies deeper; the best of them is played
+        """
+        from episodic_memory import EXTENSION
+        top = root[:ROOT_CHECKED]
+        flagged = []
+        for move, _, _ in top:
+            board.push(move)
+            try:
+                flagged.append(any(self.episodes.recall(board, r) for r in board.legal_moves))
+            finally:
+                board.pop()
+        if not any(flagged):
+            return best_move
+        self.root_flagged += 1
+        self.recalls += sum(flagged)
+        self.deadline = time.time() + ROOT_SECONDS
+        depth = max(1, self.depth_reached)
+        best, chosen = -float('inf'), best_move
+        try:
+            for (move, pattern, tok), hit in zip(top, flagged):
+                bonus = self.bonus(pattern) + (extra.get(move, 0.0) if extra else 0.0)
+                more = EXTENSION if hit else 0
+                board.push(move)
+                try:
+                    value = -self.negamax(board, depth - 1 + more, -float('inf'), float('inf'),
+                                          self.next_context(context, tok), 1, True)
+                finally:
+                    board.pop()
+                if value + bonus > best:
+                    best, chosen = value + bonus, move
+        except OutOfTime:
+            return best_move            # not all checked in time: the search's own choice
+        return chosen
+
+    def glance(self, board: chess.Board) -> float:
+        """The value of a position for the side to move as a line's end sees it: the capture search alone"""
+        self.deadline = float('inf')
+        context = self.sequences.context(board) if self.use_patterns else []
+        return self.quiesce(board, -float('inf'), float('inf'), context, 0, QUIESCENCE_DEPTH)
+
+    def look(self, board: chess.Board, depth: int, seconds: float) -> Optional[float]:
+        """The value of a position for the side to move searched depth plies (without look-ahead extensions,
+        episodes or refutation patterns: what it shows does not depend on what was learned from it); None if it
+        takes longer than seconds"""
+        saved = self.lookahead, self.episodes, self.refutations
+        self.lookahead = self.episodes = self.refutations = None
+        self.deadline = time.time() + seconds
+        self.history = self.game_positions(board) - {board._transposition_key()}
+        self.refutation_cache = {}
+        context = self.sequences.context(board) if self.use_patterns else []
+        try:
+            return self.negamax(board, depth, -float('inf'), float('inf'), context, 0)
+        except OutOfTime:
+            return None
+        finally:
+            self.lookahead, self.episodes, self.refutations = saved
+
+    def recalled(self, board: chess.Board, move: chess.Move) -> int:
+        """Plies to read a move further because it matches a remembered episode's punishment (episodic memory;
+        counted in recalls whether or not EXTENSION is 0)"""
+        if self.episodes is None or self.memory_mode != 'lines' or not self.episodes.recall(board, move):
+            return 0
+        from episodic_memory import EXTENSION
+        self.recalls += 1
+        return EXTENSION
+
+    def read_further(self, board: chess.Board) -> bool:
+        """At a line's end: whether the learned look-ahead patterns call for reading this position further"""
+        key = board._transposition_key()
+        hit = self.extend_cache.get(key)
+        if hit is None:
+            hit = self.extend_cache[key] = not board.is_game_over() and self.lookahead.extend(board)
+        return hit
 
     @staticmethod
     def game_positions(board: chess.Board) -> set:
@@ -286,22 +410,29 @@ class PatternSearch:
     def next_context(context: List[str], tok: Optional[str]) -> List[str]:
         return (context + [tok])[-2:] if tok is not None else context
 
-    def negamax(self, board: chess.Board, depth: int, alpha: float, beta: float, context: List[str], ply: int) -> float:
+    def negamax(self, board: chess.Board, depth: int, alpha: float, beta: float, context: List[str], ply: int,
+                extended: bool = False) -> float:
         self.nodes += 1
         if time.time() > self.deadline:
             raise OutOfTime
         if board._transposition_key() in self.history:
             return 0.0                      # back to a position of the game: a repetition, valued as a draw
         if depth <= 0:
+            if self.lookahead is not None and not extended and self.read_further(board):
+                self.extensions += 1        # a position whose kind often hides a tactic: read further, once
+                from lookahead_patterns import EXTENSION
+                return self.negamax(board, EXTENSION, alpha, beta, context, ply, True)
             return self.quiesce(board, alpha, beta, context, ply, QUIESCENCE_DEPTH)
         moves = self.candidates(board, context, ply)
         if not moves:
             return -(MATE - ply) if board.is_check() else 0.0
         best, best_move, cutoff, raised = -float('inf'), None, False, False
         for move, _, tok in moves:
+            more = self.recalled(board, move) if ply == 1 and not extended else 0   # a punishment remembered
             board.push(move)
             try:
-                value = -self.negamax(board, depth - 1, -beta, -alpha, self.next_context(context, tok), ply + 1)
+                value = -self.negamax(board, depth - 1 + more, -beta, -alpha, self.next_context(context, tok),
+                                      ply + 1, extended or more > 0)
             finally:
                 board.pop()
             if value > best:

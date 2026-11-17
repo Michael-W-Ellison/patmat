@@ -51,10 +51,29 @@ class HeadlessTrainer:
     use_move_history = False    # the search orders moves by killer moves and history scores (move_history)
     use_tactics = False         # general patterns get tactical parts: threats left after the best reply
                                 # (tactical_patterns)
+    use_lookahead = False       # learn, in hindsight after each game, which positions hide a tactic; the search
+                                # reads such positions further (lookahead_patterns)
+    use_memory = False          # episodic memory of punished moves, found in hindsight after each game, and
+                                # semantic memory of what kinds of reply punish (episodic_memory); the search
+                                # reads remembered punishments further, and the kinds that punish most
+    use_weights = True          # the search's evaluation adds weighted position features, the weights learned
+                                # from game results by the cross-entropy method (evaluation_weights), as the
+                                # Tetris agent learns its weights
+    tune_weights = True         # with use_weights: each game draws its weights and records its score; False:
+                                # play with the learned mean, learning nothing about the weights
 
     def __init__(self, db_path='headless_training.db', opponent='random', stockfish_level=0,
-                 stockfish_path='/usr/games/stockfish', stockfish_time=0.1):
+                 stockfish_path='/usr/games/stockfish', stockfish_time=0.1, screen=None, screen_side=False):
         self.scorer = GameScorer()
+        # screen: a screen_reading.ScreenMemory (or True: a new one): the agent then knows the game only from
+        # the screen (screen_reading.render of the board, the opponent's last move shown), followed in
+        # context from the starting screen; it decides from its own board (play_game)
+        self.screen = None
+        self.screen_side = screen_side      # the screen shows the board from the agent's side (flipped as black)
+        if screen is not None and screen is not False:
+            from screen_reading import ScreenMemory
+            self.screen = ScreenMemory() if screen is True else screen
+            self.screen_stats = {'turns': 0, 'true board': 0, 'lost': 0, 'read alone': 0, 'illegal': 0}
         self.prioritizer = LearnableMovePrioritizer(db_path)
         # Multi-move patterns, learned from both players' moves
         self.sequences = SequencePatternLearner(db_path)
@@ -96,6 +115,22 @@ class HeadlessTrainer:
         if self.use_move_history:
             from move_history import MoveHistory
             self.search.move_history = MoveHistory()
+        self.memory = None
+        if self.use_memory:
+            from episodic_memory import EpisodicMemory
+            self.memory = EpisodicMemory(db_path, semantic=self.general.refutations, adapter=self.adapter)
+            self.search.episodes = self.memory
+            self.search.refutations = self.general.refutations
+            self.search.adapter = self.adapter
+        self.lookahead = None
+        if self.use_lookahead:
+            from lookahead_patterns import LookaheadLearner
+            self.lookahead = LookaheadLearner(db_path)
+            self.search.lookahead = self.lookahead
+        self.weights = None
+        if self.use_weights:
+            from evaluation_weights import WeightTuner
+            self.weights = WeightTuner(db_path)
 
         self.games_played = 0
         self.wins = 0
@@ -211,6 +246,30 @@ class HeadlessTrainer:
 
         return random.choice(legal_moves)
 
+    def _follow_screen(self, board, seen, ai_color):
+        """
+        The agent's board before its move: the screen shown now (the true board drawn, the opponent's last
+        move highlighted), followed in context from the agent's board (the opponent's one move since); if it
+        cannot be followed, the screen read alone, square by square (the agent keeps its side to move and
+        castling rights as it knows them)
+        """
+        from screen_reading import board_fen, render
+        stats = self.screen_stats
+        stats['turns'] += 1
+        if len(seen.move_stack) < len(board.move_stack):          # the opponent has moved since
+            shown = render(board, lastmove=board.peek(), flipped=self.screen_side and ai_color == chess.BLACK)
+            moves = self.screen.follow(seen, shown, plies=1, flipped=self.screen_flipped)
+            if moves is not None:
+                seen.push(moves[0])
+            else:
+                stats['lost'] += 1
+                stats['read alone'] += 1
+                seen = seen.copy()
+                seen.set_board_fen(board_fen(self.screen.read(shown, self.screen_flipped)))
+                seen.turn = ai_color
+        stats['true board'] += seen.board_fen() == board.board_fen() and seen.turn == board.turn
+        return seen
+
     def play_game(self, ai_color, verbose=False):
         """Play a complete game until natural conclusion"""
         board = chess.Board()
@@ -224,11 +283,36 @@ class HeadlessTrainer:
 
         # Play until game naturally ends (checkmate, stalemate, etc.)
         # No artificial move limit - let games reach their conclusion
+        if self.screen is not None:
+            from screen_reading import render
+            assert not self.self_play, 'screen play is for games against an opponent'
+            flip = self.screen_side and ai_color == chess.BLACK
+            first = self.screen.learn_start(render(chess.Board(), flipped=flip), 'the starting screen') \
+                if not self.screen.examples else None
+            # which way the game's screens face: from the rank labels of the starting screen (or, unknown,
+            # found in context on every screen: screen_reading.ScreenMemory.follow)
+            from screen_reading import orientation
+            self.screen_flipped = first['flipped'] if first and 'flipped' in first else \
+                orientation(render(chess.Board(), flipped=flip))
+            seen = chess.Board()            # the agent's own board: what it has made of the screens
+
+        if self.weights is not None:
+            self.search.weights = self.weights.draw() if self.tune_weights else self.weights.mean()
+
         while not board.is_game_over():
             fen_before = board.fen()
 
             if board.turn == ai_color:
-                move = self.play_ai_move(board, ai_color)
+                if self.screen is not None:
+                    seen = self._follow_screen(board, seen, ai_color)
+                    move = self.play_ai_move(seen, ai_color)
+                    if move is not None:
+                        seen.push(move)
+                        if move not in board.legal_moves:      # decided from a board read wrong
+                            self.screen_stats['illegal'] += 1
+                            move = random.choice(list(board.legal_moves))
+                else:
+                    move = self.play_ai_move(board, ai_color)
                 if move:
                     move_san = board.san(move)
                     board.push(move)
@@ -306,6 +390,18 @@ class HeadlessTrainer:
             self.positions.record_game(board.move_stack, ai_color, result,
                                        judge=self.judge if self.judge_positions else None)
             self.mates.record_game(board.move_stack)
+            if self.lookahead is not None:
+                self.lookahead.record_game(board.move_stack, self.search)
+            if self.memory is not None:
+                self.memory.record_game(board.move_stack, ai_color, self.search)
+            if self.weights is not None and self.tune_weights:
+                from evaluation_weights import episode_score
+                from sequence_patterns import material
+                replay, balances = chess.Board(), []
+                for m in board.move_stack:
+                    replay.push(m)
+                    balances.append(material(replay, ai_color))
+                self.weights.record(self.search.weights, episode_score(result, balances))
 
         # Store result details
         self.game_results.append({
@@ -450,6 +546,12 @@ class HeadlessTrainer:
         self.mates.close()
         self.positions.close()
         self.sequences.close()
+        if self.lookahead is not None:
+            self.lookahead.close()
+        if self.memory is not None:
+            self.memory.close()
+        if self.weights is not None:
+            self.weights.close()
         if self.engine is not None:
             self.engine.quit()
         if self.judge is not None:
@@ -472,11 +574,16 @@ def main():
     parser.add_argument('--level', type=int, default=0, help='Stockfish skill level 0-20 (default: 0)')
     parser.add_argument('--stockfish-path', default='/usr/games/stockfish', help='Stockfish binary')
     parser.add_argument('--db', default='headless_training.db', help='Training database (default: headless_training.db)')
+    parser.add_argument('--screen', action='store_true',
+                        help='The agent knows the game only from the screen (screen_reading), read from the start')
+    parser.add_argument('--screen-side', action='store_true',
+                        help='With --screen: the screen shows the board from the agent\'s side (flipped as black)')
 
     args = parser.parse_args()
 
     trainer = HeadlessTrainer(args.db, opponent=args.opponent, stockfish_level=args.level,
-                              stockfish_path=args.stockfish_path)
+                              stockfish_path=args.stockfish_path, screen=True if args.screen else None,
+                              screen_side=args.screen_side)
 
     try:
         trainer.train(args.num_games, verbose=args.verbose, progress_interval=args.progress)

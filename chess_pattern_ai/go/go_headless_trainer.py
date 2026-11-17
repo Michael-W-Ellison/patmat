@@ -23,6 +23,8 @@ from go.go_board import GoBoard, Color, Move
 from go.go_game import GoGame
 from go.go_scorer import GoScorer
 from learnable_move_prioritizer import LearnableMovePrioritizer
+from board_screens import agent_move
+from grid_weights import GridWeights
 from general_move_patterns import (GeneralPatternLearner, analyze_candidates,
                                    decisive_value, winning_moves,
                                    universal_db_path, MAX_CANDIDATES)
@@ -38,7 +40,11 @@ class GoHeadlessTrainer:
     Supports 9x9 and 19x19 boards
     """
 
-    def __init__(self, db_path='go_training.db', board_size: int = 9):
+    use_weights = False         # grid_weights: the agent's move scores add learned weights of game-independent
+                                # position features, tuned from the game's results (cross-entropy)
+    tune_weights = True         # with use_weights: draw and tune the weights per game; False: their mean
+
+    def __init__(self, db_path='go_training.db', board_size: int = 9, screen=None, screen_side=False):
         """
         Initialize Go trainer
 
@@ -53,6 +59,13 @@ class GoHeadlessTrainer:
         # Game-independent patterns, shared with the other games' trainers
         self.general = GeneralPatternLearner(universal_db_path(db_path), 'go')
         self.adapter = GoAdapter()
+        self.weights = GridWeights(db_path, 'go', self.adapter, tune=self.tune_weights) \
+            if self.use_weights else None
+        # screen: the agent knows the game only from screens, drawn and read by board_screens (True, or a
+        # board_screens.ScreenView): it follows each move from the screens and decides from its own position;
+        # screen_side: the screens show the board from the agent's side
+        from board_screens import screen_view
+        self.screen = screen_view('go', screen, screen_side)
         self.last_general_features = None
 
         # Statistics
@@ -152,7 +165,8 @@ class GoHeadlessTrainer:
                                       [move for move, _ in candidates])
         # A win now, or a loss the opponent can force at once, decides first;
         # otherwise the existing score plus the general-pattern value
-        scored = [(move, score + decisive_value(a['net']) + self.general.value(a['features']),
+        scored = [(move, score + decisive_value(a['net']) + self.general.value(a['features'])
+                   + (self.weights.value(game, move, ai_color) if self.weights is not None else 0.0),
                    a['features'])
                   for (move, score), a in zip(candidates, analysis)]
 
@@ -173,6 +187,8 @@ class GoHeadlessTrainer:
             (result, score, moves) where result is 'win', 'loss', or 'draw'
         """
         game = GoGame(board_size=self.board_size)
+        if self.screen is not None:
+            self.screen.new_game(self.adapter, game, ai_color)
         moves_played = 0
         max_moves = 1000  # Prevent infinite games
 
@@ -191,7 +207,8 @@ class GoHeadlessTrainer:
 
             # Select move
             if current_color == ai_color:
-                move = self.select_move(game, ai_color, use_learning=True)
+                move = agent_move(self.screen, game,
+                                  lambda g: self.select_move(g, ai_color, use_learning=True))
                 if move is not None:
                     general_features.append(self.last_general_features)
             else:
@@ -227,6 +244,8 @@ class GoHeadlessTrainer:
 
             # Make move
             game.make_move(move)
+            if self.screen is not None:
+                self.screen.see(game)
             if move.position is not None:
                 moves_played += 1
 
@@ -258,6 +277,8 @@ class GoHeadlessTrainer:
         # Record game for learning (directly update statistics)
         self.prioritizer.record_game_patterns(game_moves, result, score)
         self.general.record_game(general_features, result, 'go')
+        if self.weights is not None:
+            self.weights.end_game(result, score)
 
         return result, score, moves_played
 
@@ -368,6 +389,10 @@ def main():
                        const=10, default=None,
                        help='Show top N learned patterns')
 
+    parser.add_argument('--screen', action='store_true',
+                        help='The agent knows the game only from screens (board_screens), read from the start')
+    parser.add_argument('--screen-side', action='store_true',
+                        help='With --screen: the screens show the board from the agent\'s side')
     args = parser.parse_args()
 
     # Validate board size
@@ -375,7 +400,8 @@ def main():
         print(f"Error: Board size must be 9 or 19, got {args.size}")
         sys.exit(1)
 
-    trainer = GoHeadlessTrainer(args.db, board_size=args.size)
+    trainer = GoHeadlessTrainer(args.db, board_size=args.size, screen=True if args.screen else None,
+                                screen_side=args.screen_side)
 
     if args.show_patterns is not None:
         # Just show patterns and exit
@@ -383,6 +409,8 @@ def main():
     else:
         # Run training
         trainer.train(args.num_games, args.verbose, args.progress)
+        if trainer.screen is not None:     # what the agent made of the screens
+            print('Screens:', trainer.screen.stats)
 
         # Show learned patterns
         trainer.show_learned_patterns(10)

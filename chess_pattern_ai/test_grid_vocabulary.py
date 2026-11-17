@@ -104,10 +104,12 @@ class TestSymmetry(unittest.TestCase):
 
 
 class TestHexAndGraph(unittest.TestCase):
-    def test_hex_neighbours_follow_row_parity(self):
+    def test_hex_neighbours_of_the_rhombus(self):
         g = Grid([[0] * 3 for _ in range(3)], topology='hex')
-        self.assertEqual(sorted(g.neighbors((1, 1))), [(0, 1), (0, 2), (1, 0), (1, 2), (2, 1), (2, 2)])
-        self.assertEqual(sorted(g.neighbors((2, 1))), [(1, 0), (1, 1), (2, 0), (2, 2)])
+        self.assertEqual(sorted(g.neighbors((1, 1))), [(0, 1), (0, 2), (1, 0), (1, 2), (2, 0), (2, 1)])
+        self.assertEqual(sorted(g.neighbors((2, 1))), [(1, 1), (1, 2), (2, 0), (2, 2)])
+        self.assertEqual(sorted(g.neighbors((0, 0))), [(0, 1), (1, 0)])   # an acute corner: 2
+        self.assertEqual(sorted(g.neighbors((0, 2))), [(0, 1), (1, 1), (1, 2)])   # an obtuse corner: 3
 
     def test_hex_chain_component(self):
         # (0,0) -> (1,0) -> (2,0): connected through hex SE/SW steps
