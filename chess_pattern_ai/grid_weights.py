@@ -71,7 +71,7 @@ arm's learning carries from game to game), so those tests gave p values
 too small. Against a random opponent the plain trainers already win
 70-100% of games, so there is little room to gain. The weights also cost
 time: 1.1x to 2.7x the seconds per game (from the earlier version).
-Why the weights hurt in othello and pentago (arimaa not measured):
+Why the weights hurt in othello and pentago (arimaa: see below):
 - Their size. Over each decision's candidates (20 games per replicate with
   the learned mean), the median spread of the weights' value was 8-67
   priority points in othello and 6-24 in pentago, of the rest of the score
@@ -119,6 +119,35 @@ databases (standard error of a vector's win rate about 4.5 points):
   the noise led it, which fits the signs of the learned weights changing
   across replicates.
 One replicate's databases only; 16 vectors.
+Arimaa, measured the same way:
+- The weights changed 82-87% of the agent's chosen steps (median spread
+  over a step's candidates 7-17 priority points, of the rest of the score
+  0.1-0.5).
+- 16 vectors from N(0, 3), 100 games each from replicate 1's databases:
+  4-67% (mean 38.5%), none above plain (zero weights, 86%). Per replicate
+  (150 games): random weights 45.0%, learned 51.0%, plain 70.9% (random
+  minus learned t p 0.58); the learned mean times 0.1 61.2% (10.2 above
+  the full weights, t p 0.025; 9.7 below plain, t p 0.048). Of the
+  variance of one game's result the vector accounted for 0.16 (as in
+  breakthrough), but the winning margin did not track a vector's win rate
+  (Spearman +0.01 over the 16; othello +0.61, breakthrough +0.91).
+- With the weights more games reached the 100-turn limit, which counts as
+  a draw: 22.4% of games against 7.9% (6 replicates; of 179 fewer wins,
+  131 became draws). The agent's steps (40 games per arm per replicate):
+  pushes 15.9% of steps against 24.9%, rabbit advances 13.3% against 15.1%
+  (lower in 5 of 6 replicates, Wilcoxon p 0.094), trap control 17.5%
+  against 14.8%, pulls 7.7% against 3.8%. No feature measures advancement
+  toward the goal row.
+- Arimaa runs are strongly path-dependent: the opponent (silver) chooses
+  steps by the same learned priorities (half of them at random), and a run
+  can switch to winning nearly every game (replicate 1's plain arm won 140
+  of its last 145 after 5 of its first 10). The 40-game runs above did not
+  reproduce the gap: weights 141 wins, plain 122 of 240, and draws 35
+  against 39.
+So in arimaa, as in othello and pentago, weights decided most steps and no
+weights tried did better than none; the shift away from pushes and rabbit
+advances, with more games reaching the turn limit, is what the 150-game
+arms show, but the 40-game runs did not show it.
 use_weights is on in the breakthrough trainer (tune_weights off: the
 learned mean, LEARNED) and off in every other trainer. It was turned off
 for a time after earlier measurements against a stronger opponent, and
