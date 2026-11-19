@@ -141,13 +141,27 @@ Arimaa, measured the same way:
 - Arimaa runs are strongly path-dependent: the opponent (silver) chooses
   steps by the same learned priorities (half of them at random), and a run
   can switch to winning nearly every game (replicate 1's plain arm won 140
-  of its last 145 after 5 of its first 10). The 40-game runs above did not
-  reproduce the gap: weights 141 wins, plain 122 of 240, and draws 35
-  against 39.
+  of its last 145 after 5 of its first 10). A run is not fixed by its
+  random seed: Piece.__hash__ hashes Enums, whose hashes Python randomizes
+  per process, so the order of the legal steps (which breaks ties between
+  equal priorities and decides which step exploration picks) changes from
+  process to process; with PYTHONHASHSEED fixed, the same seed repeats a
+  run move for move. From the same learned databases, 40-game runs of one
+  arm won 4 to 39 games in replicate 1, with a standard deviation of about
+  4.5 wins within a replicate.
+- 8 runs of 40 games per arm per replicate: weights 21.7 wins, plain 25.1
+  (8.5 points lower), lower in 5 of 6 replicates (Wilcoxon over the
+  replicates p 0.16; Mann-Whitney within replicate 1 p 0.001, replicate 2
+  p 0.045); draws 8.2 against 5.5 per 40 games. A 40-game run per arm with
+  step counts (above) had weights 141 wins and plain 122 of 240: its plain
+  runs were in the lower part of each replicate's 8 and its weights runs in
+  the upper part, while the first 40 games of the 150-game arms (plain 171,
+  weights 119) were at the opposite ends. Both were single runs per arm;
+  the gap from 8 runs (8.5 points) is smaller than the 150-game arms'
+  (19.9 points).
 So in arimaa, as in othello and pentago, weights decided most steps and no
-weights tried did better than none; the shift away from pushes and rabbit
-advances, with more games reaching the turn limit, is what the 150-game
-arms show, but the 40-game runs did not show it.
+weights tried did better than none; with them, fewer pushes and rabbit
+advances and more games reaching the turn limit.
 use_weights is on in the breakthrough trainer (tune_weights off: the
 learned mean, LEARNED) and off in every other trainer. It was turned off
 for a time after earlier measurements against a stronger opponent, and
