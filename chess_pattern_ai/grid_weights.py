@@ -141,12 +141,13 @@ Arimaa, measured the same way:
 - Arimaa runs are strongly path-dependent: the opponent (silver) chooses
   steps by the same learned priorities (half of them at random), and a run
   can switch to winning nearly every game (replicate 1's plain arm won 140
-  of its last 145 after 5 of its first 10). A run is not fixed by its
-  random seed: Piece.__hash__ hashes Enums, whose hashes Python randomizes
-  per process, so the order of the legal steps (which breaks ties between
-  equal priorities and decides which step exploration picks) changes from
-  process to process; with PYTHONHASHSEED fixed, the same seed repeats a
-  run move for move. From the same learned databases, 40-game runs of one
+  of its last 145 after 5 of its first 10). In these measurements a run
+  was not fixed by its random seed: Piece.__hash__ hashed Enums, whose
+  hashes Python randomizes per process, so the order of the legal steps
+  (which breaks ties between equal priorities and decides which step
+  exploration picks) changed from process to process. Piece's and
+  ArimaaStep's hashes now use ints only, and the same seed repeats a run
+  move for move under any hash seed. From the same learned databases, 40-game runs of one
   arm won 4 to 39 games in replicate 1, with a standard deviation of about
   4.5 wins within a replicate.
 - 8 runs of 40 games per arm per replicate: weights 21.7 wins, plain 25.1

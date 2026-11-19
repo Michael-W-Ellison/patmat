@@ -22,6 +22,9 @@ class StepType(Enum):
     PULL = "pull"      # Pull enemy piece
 
 
+_STEP_INDEX = {StepType.MOVE: 0, StepType.PUSH: 1, StepType.PULL: 2}
+
+
 class ArimaaStep:
     """Represents a single step in Arimaa"""
 
@@ -49,7 +52,8 @@ class ArimaaStep:
                 self.enemy_pos == other.enemy_pos)
 
     def __hash__(self):
-        return hash((self.step_type, self.from_pos, self.to_pos, self.enemy_pos))
+        # From ints only, as Piece's (an Enum's hash changes with the hash seed)
+        return hash((_STEP_INDEX[self.step_type], self.from_pos, self.to_pos, self.enemy_pos))
 
 
 class ArimaaGame:
