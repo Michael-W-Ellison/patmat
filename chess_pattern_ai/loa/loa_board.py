@@ -43,7 +43,9 @@ class Piece:
     position: Tuple[int, int]  # (row, col)
 
     def __hash__(self):
-        return hash((self.color, self.position))
+        # From ints only: an Enum's hash is its name's, which Python randomizes per process, and the
+        # order of the sets of pieces (and so of the legal moves) would change with the hash seed
+        return hash((self.color is Color.WHITE, self.position))
 
     def __eq__(self, other):
         if not isinstance(other, Piece):

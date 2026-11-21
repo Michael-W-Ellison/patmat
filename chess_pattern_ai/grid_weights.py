@@ -147,7 +147,10 @@ Arimaa, measured the same way:
   (which breaks ties between equal priorities and decides which step
   exploration picks) changed from process to process. Piece's and
   ArimaaStep's hashes now use ints only, and the same seed repeats a run
-  move for move under any hash seed. From the same learned databases, 40-game runs of one
+  move for move under any hash seed. The pieces of breakthrough, checkers
+  and loa had the same dependence (all the measurements here were made
+  with it) and now hash ints only too; the other eight games repeated
+  their games under every hash seed tried. From the same learned databases, 40-game runs of one
   arm won 4 to 39 games in replicate 1, with a standard deviation of about
   4.5 wins within a replicate.
 - 8 runs of 40 games per arm per replicate: weights 21.7 wins, plain 25.1

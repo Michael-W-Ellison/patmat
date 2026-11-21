@@ -38,7 +38,9 @@ class Piece:
 
     def __hash__(self):
         """Make piece hashable for use in sets"""
-        return hash((self.type, self.color, self.position))
+        # From ints only: an Enum's hash is its name's, which Python randomizes per process, and the
+        # order of the set of pieces (and so of the legal moves) would change with the hash seed
+        return hash((self.type is PieceType.KING, self.color is Color.RED, self.position))
 
     def __eq__(self, other):
         """Equality based on type, color, and position"""
