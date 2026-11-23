@@ -16,6 +16,10 @@ appended to <work dir>/<game>/<arm>/games.jsonl as it ends; play carries on from
 run stopped part-way is not lost). report: per game, each arm's games, wins, draws, losses and mean margin;
 the difference in win rate with a test of two proportions; the learned weights.
 
+--seed (learn, play): the seed of the run's random choices (learn: also of the weights drawn); a run
+repeats from the same seed. A run carried on from part-way draws from the seed and the number of games
+already played, so it does not repeat an uninterrupted one.
+
 --start zero (learn): the weights start at 0 with spread START_STD even in a
 game listed in grid_weights.LEARNED (whose new databases otherwise start from
 its learned weights).
@@ -96,7 +100,12 @@ def learn(work, game, games, opponent=None, start=None, seed=None):
     t, module = trainer(game, folder, True, True, opponent)
     log = os.path.join(folder, 'learn.jsonl')
     done = sum(1 for _ in open(log)) if os.path.exists(log) else 0
-    random.seed(f'learn {game} {done}' if seed is None else f'learn {game} {seed} {done}')
+    key = f'learn {game} {done}' if seed is None else f'learn {game} {seed} {done}'
+    random.seed(key)
+    # The tuner's own generator, seeded too, and the next game's weights drawn from it (the trainer drew
+    # the first ones unseeded), so that a run repeats
+    t.weights.tuner.rng = random.Random(f'tuner {key}')
+    t.weights.current = t.weights._next()
     with open(log, 'a') as f:
         for i in range(done, games):
             start = time.time()
