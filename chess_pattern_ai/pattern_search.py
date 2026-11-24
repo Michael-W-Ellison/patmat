@@ -152,7 +152,7 @@ class OutOfTime(Exception):
 
 class PatternSearch:
 
-    def __init__(self, sequences: SequencePatternLearner, seconds: float = 0.5, use_patterns: bool = True,
+    def __init__(self, sequences: SequencePatternLearner, seconds: Optional[float] = 0.5, use_patterns: bool = True,
                  positions: Optional[PositionPatternLearner] = None, selective: bool = False,
                  max_depth: Optional[int] = None, bonus_cap: Optional[float] = None,
                  mates: Optional[MatePatternLearner] = None, threats: bool = False):
@@ -164,7 +164,7 @@ class PatternSearch:
         self.max_depth = max_depth          # None: MAX_DEPTH
         self.bonus_cap = bonus_cap          # None: the root pattern bonus is not limited
         self.positions = positions          # None: positions are valued by material only
-        self.seconds = seconds
+        self.seconds = seconds              # None: no time limit (the search goes to max_depth)
         self.use_patterns = use_patterns    # False: order by capture value only (for comparison)
         self.nodes = 0
         self.depth_reached = 0
@@ -273,7 +273,7 @@ class PatternSearch:
 
     def choose(self, board: chess.Board, extra: Optional[Dict[chess.Move, float]] = None) -> Optional[chess.Move]:
         """The move for the side to move (extra: a further bonus for root moves, in material units)"""
-        self.deadline = time.time() + self.seconds
+        self.deadline = time.time() + self.seconds if self.seconds is not None else float('inf')
         self.nodes = 0
         self.history = self.game_positions(board)
         self.refutation_cache = {}

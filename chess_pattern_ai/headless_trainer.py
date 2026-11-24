@@ -32,10 +32,12 @@ class HeadlessTrainer:
     SEQUENCE_WEIGHT = 20        # score per material unit a move's sequence patterns expect (a pawn is 10)
     SEQUENCE_EXTRA = 5          # moves the sequence patterns rate best, considered beyond the 15 by priority
     use_search = True           # choose moves by a look-ahead guided by the sequence patterns (pattern_search)
-    SEARCH_SECONDS = 0.5        # time for that look-ahead per move
+    SEARCH_SECONDS = None       # time limit for that look-ahead per move (None: none, it goes to SEARCH_DEPTH,
+                                # so that a run repeats whatever the machine's speed)
     use_position_values = True  # the look-ahead values positions by learned position patterns (position_patterns)
     SEARCH_SELECTIVE = True     # look-ahead reads forcing moves + a few others below the root (pattern_search)
-    SEARCH_DEPTH = 3            # plies the look-ahead goes to (None: as deep as its time allows)
+    SEARCH_DEPTH = 3            # plies the look-ahead goes to (None: as deep as its time allows, at most
+                                # pattern_search.MAX_DEPTH)
     SEARCH_BONUS_CAP = 3.0      # limit on the pattern bonus added to the look-ahead's value of a move
     SEARCH_THREATS = False      # look-ahead recognises threats: considers escapes, a second threat costs (pattern_search)
     use_mate_values = False     # the look-ahead values kings' surroundings by how often they preceded mate
