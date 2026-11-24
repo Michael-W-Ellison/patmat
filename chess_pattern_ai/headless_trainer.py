@@ -130,7 +130,8 @@ class HeadlessTrainer:
         self.weights = None
         if self.use_weights:
             from evaluation_weights import WeightTuner
-            self.weights = WeightTuner(db_path)
+            # its generator seeded from random's: after random.seed, the weights drawn repeat
+            self.weights = WeightTuner(db_path, seed=random.getrandbits(64))
 
         self.games_played = 0
         self.wins = 0
