@@ -93,7 +93,8 @@ MAX_DEPTH = 8
 PATTERN_WEIGHT = 0.5    # root moves: search value + PATTERN_WEIGHT * pattern value (both material units)
 QUIET_MOVES = 2         # selective search: non-forcing moves considered at each position below the root
 ROOT_CHECKED = 3        # memory at the root: the search's best moves checked for remembered situations
-ROOT_SECONDS = 0.5      # ... and the time for searching them again
+ROOT_SECONDS = None     # ... and the time limit for searching them again (None: none, they are searched to
+                        # the depth the search reached, those met by a remembered situation EXTENSION deeper)
 
 
 def forcing(move: chess.Move, token: Optional[str], board: chess.Board) -> bool:
@@ -321,7 +322,7 @@ class PatternSearch:
               extra: Optional[Dict[chess.Move, float]], best_move: chess.Move) -> chess.Move:
         """
         Memory at the root only: after the search, if a reply to one of its ROOT_CHECKED best moves makes a
-        situation remembered from an episode, those moves are searched again (full window, ROOT_SECONDS more):
+        situation remembered from an episode, those moves are searched again (full window, within ROOT_SECONDS):
         the ones met by a remembered situation EXTENSION plies deeper; the best of them is played
         """
         from episodic_memory import EXTENSION
@@ -337,7 +338,7 @@ class PatternSearch:
             return best_move
         self.root_flagged += 1
         self.recalls += sum(flagged)
-        self.deadline = time.time() + ROOT_SECONDS
+        self.deadline = time.time() + ROOT_SECONDS if ROOT_SECONDS is not None else float('inf')
         depth = max(1, self.depth_reached)
         best, chosen = -float('inf'), best_move
         try:
@@ -362,13 +363,13 @@ class PatternSearch:
         context = self.sequences.context(board) if self.use_patterns else []
         return self.quiesce(board, -float('inf'), float('inf'), context, 0, QUIESCENCE_DEPTH)
 
-    def look(self, board: chess.Board, depth: int, seconds: float) -> Optional[float]:
+    def look(self, board: chess.Board, depth: int, seconds: Optional[float]) -> Optional[float]:
         """The value of a position for the side to move searched depth plies (without look-ahead extensions,
         episodes or refutation patterns: what it shows does not depend on what was learned from it); None if it
-        takes longer than seconds"""
+        takes longer than seconds (None: no time limit)"""
         saved = self.lookahead, self.episodes, self.refutations
         self.lookahead = self.episodes = self.refutations = None
-        self.deadline = time.time() + seconds
+        self.deadline = time.time() + seconds if seconds is not None else float('inf')
         self.history = self.game_positions(board) - {board._transposition_key()}
         self.refutation_cache = {}
         context = self.sequences.context(board) if self.use_patterns else []

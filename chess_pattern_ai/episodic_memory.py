@@ -103,7 +103,8 @@ from sequence_patterns import material
 WINDOW = 6              # plies after a move within which a fall in material is looked into
 SWING = 20              # a fall (and a deeper look's difference) of this much counts (a pawn is 10)
 DEEP = 4                # plies of the deeper look
-LOOK_SECONDS = 3.0      # its time limit (a look not finished is no evidence)
+LOOK_SECONDS = None     # its time limit (a look not finished is no evidence; None: none, it goes to DEEP,
+                        # so that what is found does not depend on the machine's speed)
 LINE = 6                # plies of the line kept with an episode
 EXTENSION = 2           # plies a recalled move is read further
 
