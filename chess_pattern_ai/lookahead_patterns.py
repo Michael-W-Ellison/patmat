@@ -60,7 +60,9 @@ import chess
 
 SAMPLE = 12             # positions of each game looked at again after it
 DEEP = 4                # plies of the deeper look
-LOOK_SECONDS = 3.0      # time limit of one deeper look (positions it does not finish are not lessons)
+LOOK_SECONDS = None     # time limit of one deeper look (positions it does not finish are not lessons;
+                        # None: none, it goes to DEEP, so that what is learned does not depend on the
+                        # machine's speed)
 SWING = 20              # a deeper look differing from the glance by this much (a pawn is 10) hid something
 PRIOR = 20.0            # pseudo-positions at the overall rate a signature's rate is shrunk toward
 EXTEND_RATE = 0.38      # the search reads a position further when its signature's rate is at least this
@@ -126,7 +128,8 @@ class LookaheadLearner:
     # -------------------------------------------------------------- lessons
 
     def lesson(self, board: chess.Board, search) -> Optional[bool]:
-        """Glance and deeper look at one position: whether it hid a swing (None: the look did not finish)"""
+        """Glance and deeper look at one position: whether it hid a swing (None: the look did not finish within
+        LOOK_SECONDS)"""
         glance = search.glance(board)
         deep = search.look(board, DEEP, LOOK_SECONDS)
         if deep is None:
