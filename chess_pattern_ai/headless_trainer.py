@@ -127,7 +127,8 @@ class HeadlessTrainer:
         self.lookahead = None
         if self.use_lookahead:
             from lookahead_patterns import LookaheadLearner
-            self.lookahead = LookaheadLearner(db_path)
+            # its generator seeded from random's: after random.seed, the positions it samples repeat
+            self.lookahead = LookaheadLearner(db_path, seed=random.getrandbits(64))
             self.search.lookahead = self.lookahead
         self.weights = None
         if self.use_weights:
